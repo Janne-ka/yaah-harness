@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 420" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a2" markerWidth="12" markerHeight="12" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6 Z" fill="#555"/>
+    </marker>
+  </defs>
+  <rect width="920" height="420" fill="#ffffff"/>
+  <text x="40" y="38" font-size="21" font-weight="700" fill="#1a1a1a">The center stays small; only the edges multiply</text>
+
+  <!-- ONE -->
+  <text x="120" y="86" font-size="13" font-weight="700" fill="#666" text-anchor="middle">ONE concept</text>
+  <rect x="40" y="150" width="160" height="96" rx="10" fill="#dce9f7" stroke="#2c4f7c" stroke-width="2.5"/>
+  <text x="120" y="190" font-size="16" font-weight="700" fill="#23425f" text-anchor="middle">Node</text>
+  <text x="120" y="212" font-size="12" fill="#3a5e88" text-anchor="middle">+ Envelope</text>
+  <text x="120" y="231" font-size="11" fill="#5a738f" text-anchor="middle">over Comms</text>
+
+  <line x1="210" y1="198" x2="262" y2="198" stroke="#555" stroke-width="2.5" marker-end="url(#a2)"/>
+  <text x="236" y="186" font-size="11" fill="#777" text-anchor="middle" font-style="italic">repeated</text>
+
+  <!-- MANY grid: every box the same shape -->
+  <text x="600" y="86" font-size="13" font-weight="700" fill="#666" text-anchor="middle">MANY components — every one is still that same Node</text>
+
+  <!-- row 0 -->
+  <g>
+    <rect x="290" y="100" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="348" y="120" font-size="12" font-weight="600" fill="#23425f" text-anchor="middle">spec</text><text x="348" y="135" font-size="9.5" fill="#7088a3" text-anchor="middle">agent</text>
+    <rect x="416" y="100" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="474" y="120" font-size="12" font-weight="600" fill="#23425f" text-anchor="middle">code</text><text x="474" y="135" font-size="9.5" fill="#7088a3" text-anchor="middle">agent</text>
+    <rect x="542" y="100" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="600" y="120" font-size="12" font-weight="600" fill="#23425f" text-anchor="middle">break</text><text x="600" y="135" font-size="9.5" fill="#7088a3" text-anchor="middle">agent</text>
+    <rect x="668" y="100" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="726" y="120" font-size="11" font-weight="600" fill="#23425f" text-anchor="middle">review·corr</text><text x="726" y="135" font-size="9.5" fill="#7088a3" text-anchor="middle">agent</text>
+    <rect x="794" y="100" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="852" y="120" font-size="11" font-weight="600" fill="#23425f" text-anchor="middle">review·sec</text><text x="852" y="135" font-size="9.5" fill="#7088a3" text-anchor="middle">agent</text>
+  </g>
+  <!-- row 1 -->
+  <g>
+    <rect x="290" y="158" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="348" y="178" font-size="12" font-weight="600" fill="#23425f" text-anchor="middle">secperf</text><text x="348" y="193" font-size="9.5" fill="#7088a3" text-anchor="middle">agent</text>
+    <rect x="416" y="158" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="474" y="178" font-size="11" font-weight="600" fill="#23425f" text-anchor="middle">data-audit</text><text x="474" y="193" font-size="9.5" fill="#7088a3" text-anchor="middle">agent</text>
+    <rect x="542" y="158" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="600" y="178" font-size="12" font-weight="600" fill="#23425f" text-anchor="middle">eval</text><text x="600" y="193" font-size="9.5" fill="#7088a3" text-anchor="middle">agent</text>
+    <rect x="668" y="158" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="726" y="178" font-size="11" font-weight="600" fill="#23425f" text-anchor="middle">code-review</text><text x="726" y="193" font-size="9.5" fill="#7088a3" text-anchor="middle">agent</text>
+    <rect x="794" y="158" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="852" y="178" font-size="11" font-weight="600" fill="#23425f" text-anchor="middle">premise</text><text x="852" y="193" font-size="9.5" fill="#7088a3" text-anchor="middle">agent</text>
+  </g>
+  <!-- row 2 -->
+  <g>
+    <rect x="290" y="216" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="348" y="236" font-size="11" font-weight="600" fill="#23425f" text-anchor="middle">judge·find</text><text x="348" y="251" font-size="9.5" fill="#7088a3" text-anchor="middle">agent</text>
+    <rect x="416" y="216" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="474" y="236" font-size="12" font-weight="600" fill="#23425f" text-anchor="middle">sceptic</text><text x="474" y="251" font-size="9.5" fill="#7088a3" text-anchor="middle">agent</text>
+    <rect x="542" y="216" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="600" y="236" font-size="12" font-weight="600" fill="#23425f" text-anchor="middle">get·diff</text><text x="600" y="251" font-size="9.5" fill="#7088a3" text-anchor="middle">get</text>
+    <rect x="668" y="216" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="726" y="236" font-size="12" font-weight="600" fill="#23425f" text-anchor="middle">red-check</text><text x="726" y="251" font-size="9.5" fill="#7088a3" text-anchor="middle">shell</text>
+    <rect x="794" y="216" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="852" y="236" font-size="12" font-weight="600" fill="#23425f" text-anchor="middle">qa</text><text x="852" y="251" font-size="9.5" fill="#7088a3" text-anchor="middle">shell</text>
+  </g>
+  <!-- row 3 -->
+  <g>
+    <rect x="290" y="274" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="348" y="294" font-size="12" font-weight="600" fill="#23425f" text-anchor="middle">worktree</text><text x="348" y="309" font-size="9.5" fill="#7088a3" text-anchor="middle">worktree</text>
+    <rect x="416" y="274" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="474" y="294" font-size="12" font-weight="600" fill="#23425f" text-anchor="middle">flatten</text><text x="474" y="309" font-size="9.5" fill="#7088a3" text-anchor="middle">transform</text>
+    <rect x="542" y="274" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="600" y="294" font-size="12" font-weight="600" fill="#23425f" text-anchor="middle">report</text><text x="600" y="309" font-size="9.5" fill="#7088a3" text-anchor="middle">render</text>
+    <rect x="668" y="274" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="726" y="294" font-size="11" font-weight="600" fill="#23425f" text-anchor="middle">post·find</text><text x="726" y="309" font-size="9.5" fill="#7088a3" text-anchor="middle">post</text>
+    <rect x="794" y="274" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="852" y="294" font-size="11" font-weight="600" fill="#23425f" text-anchor="middle">gate·audit</text><text x="852" y="309" font-size="9.5" fill="#7088a3" text-anchor="middle">human_gate</text>
+  </g>
+
+  <text x="40" y="360" font-size="13" fill="#444">12 node types  →  25+ s_factory stages  →  6 adapters.  No new concepts — only more <tspan font-style="italic">config</tspan>.</text>
+  <text x="40" y="382" font-size="13" fill="#444">If a box here needed a concept that isn't <tspan font-weight="700">Node / Envelope / Comms</tspan>, that would be the design breaking. It hasn't.</text>
+</svg>

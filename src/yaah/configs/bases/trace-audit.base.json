@@ -1,0 +1,12 @@
+{
+  "_about": "R14-seed trace OVERLAY — heavy-capture trace block intended to be merged INTO a deployment base via `_extends` for an audit-grade run. NOT a full root on its own (no transport / state / providers); always `_extends` a `local.base.json` / `nats.base.json` and let this one's `trace:` win. Pick this overlay for: regulatory audit runs, post-incident replay capture, anything where you want every cost/tool/phase event durably on disk.",
+
+  "trace": {
+    "mode": "tracer",
+    "capture": ["phase", "cost", "tools"],
+    "sinks": [
+      {"type": "file", "path": "trace-audit.jsonl"},
+      {"type": "console"}
+    ]
+  }
+}

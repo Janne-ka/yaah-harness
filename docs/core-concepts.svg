@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 380" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" markerWidth="11" markerHeight="11" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#2c4f7c"/>
+    </marker>
+  </defs>
+  <rect width="900" height="380" fill="#ffffff"/>
+  <text x="450" y="42" font-size="22" font-weight="700" fill="#1a1a1a" text-anchor="middle">The whole system is three concepts</text>
+
+  <!-- Envelope in -->
+  <rect x="40" y="150" width="160" height="56" rx="28" fill="#fde2c4" stroke="#e0892f" stroke-width="2"/>
+  <text x="120" y="176" font-size="15" font-weight="700" fill="#7a4a10" text-anchor="middle">Envelope</text>
+  <text x="120" y="195" font-size="11.5" fill="#7a4a10" text-anchor="middle">one message shape</text>
+
+  <!-- Node -->
+  <rect x="320" y="120" width="260" height="116" rx="10" fill="#dce9f7" stroke="#2c4f7c" stroke-width="2.5"/>
+  <text x="450" y="158" font-size="19" font-weight="700" fill="#23425f" text-anchor="middle">Node</text>
+  <text x="450" y="182" font-size="13" fill="#23425f" text-anchor="middle">invoke(input, config) → output</text>
+  <text x="450" y="210" font-size="11.5" fill="#5a738f" text-anchor="middle">agent · validator · gate · shell · render — all the same</text>
+
+  <!-- Envelope out -->
+  <rect x="700" y="150" width="160" height="56" rx="28" fill="#fde2c4" stroke="#e0892f" stroke-width="2"/>
+  <text x="780" y="176" font-size="15" font-weight="700" fill="#7a4a10" text-anchor="middle">Envelope</text>
+  <text x="780" y="195" font-size="11.5" fill="#7a4a10" text-anchor="middle">one message shape</text>
+
+  <!-- arrows -->
+  <line x1="202" y1="178" x2="316" y2="178" stroke="#2c4f7c" stroke-width="2.5" marker-end="url(#a)"/>
+  <line x1="582" y1="178" x2="696" y2="178" stroke="#2c4f7c" stroke-width="2.5" marker-end="url(#a)"/>
+
+  <!-- Comms band -->
+  <rect x="40" y="280" width="820" height="52" rx="8" fill="#cfddf0" stroke="#4a78b0" stroke-width="2"/>
+  <text x="450" y="305" font-size="15" font-weight="700" fill="#23425f" text-anchor="middle">Comms — request · publish · subscribe</text>
+  <text x="450" y="323" font-size="11.5" fill="#3a5e88" text-anchor="middle">the only thing the harness calls; carries every Envelope between Nodes</text>
+
+  <text x="450" y="362" font-size="13" fill="#444" text-anchor="middle">Agents aren't special. A validator, a renderer, a human gate — the same Node trading the same Envelope.</text>
+</svg>

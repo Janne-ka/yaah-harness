@@ -1,0 +1,54 @@
+# pixi environment for yaah — a reproducible dev/build env.
+#
+# WHY pixi: it speaks BOTH conda packages AND PyPI, and its lockfile (pixi.lock)
+# is portable. yaah's core has ZERO runtime deps — the only third-party libraries
+# are the opt-in adapters below, declared as composable pixi features. The PEP 621
+# metadata in pyproject.toml stays the tool-agnostic source of truth; this file is
+# only the environment layer.
+#
+# OPTIONAL hardening: if your organization (or conda-forge) ships a conda
+# constraints package that uses `run_constraints` to refuse/upgrade/downgrade
+# packages in known-vulnerable version ranges, add its channel to `channels` and
+# list it under `[dependencies]`. The resolved, hardened versions are then
+# captured in the committed `pixi.lock`, so the security benefit travels with the
+# repo regardless of where it's built.
+
+[workspace]
+name = "yaah"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-64", "osx-arm64", "win-64"]
+
+[dependencies]
+python = ">=3.9"
+# add a conda constraints package here to harden the adapter versions (optional)
+
+# The package itself: pure-Python, zero runtime deps, installed editable so the
+# tests + `yaah` console script resolve against the working tree.
+[pypi-dependencies]
+yaah = { path = ".", editable = true }
+
+# --- opt-in adapters as composable features ------------------------------------
+# Declared as CONDA deps so an optional constraints layer can govern their
+# versions (and their transitive deps). If a library is not on conda-forge, move
+# it to a `[feature.<name>.pypi-dependencies]` block instead — still pinned by the
+# lock. Versions are left open here; the lock decides them.
+[feature.litellm.dependencies]
+litellm = "*"
+
+[feature.nats.dependencies]
+nats-py = "*"
+
+[feature.langfuse.dependencies]
+langfuse = "*"
+
+[feature.http.dependencies]
+httpx = "*"
+
+[environments]
+# default = the zero-dep core — the floor every dev gets.
+# full    = every adapter — for the distributed / full-feature build.
+default = []
+full = ["litellm", "nats", "langfuse", "http"]
+
+[tasks]
+test = "python scripts/run_tests.py"

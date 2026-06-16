@@ -1,0 +1,23 @@
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# pixi — local solved environments (manifest + pixi.lock are committed)
+.pixi/
+
+# build artifacts
+/build/
+dist/
+
+# coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml

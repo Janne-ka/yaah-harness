@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 540" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#444"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="900" height="540" fill="#ffffff"/>
+  <text x="40" y="32" font-size="20" font-weight="700" fill="#1a1a1a">YAAH — layer stack</text>
+  <text x="40" y="52" font-size="13" fill="#666">Dependencies point downward only. Engine (layers 1–6) imports nothing from adapters.</text>
+
+  <!-- dependency arrow (left) -->
+  <line x1="24" y1="78" x2="24" y2="468" stroke="#888" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="20" y="275" font-size="12" fill="#888" transform="rotate(-90 20 275)" text-anchor="middle">depends on / imports</text>
+
+  <!-- APPLICATION (domain) -->
+  <rect x="48" y="74" width="556" height="58" rx="6" fill="#fde2c4" stroke="#e0892f" stroke-width="1.5"/>
+  <text x="60" y="98" font-size="15" font-weight="700" fill="#7a4a10">APPLICATION — s_factory</text>
+  <text x="60" y="118" font-size="12" fill="#7a4a10">pipeline graph (factory-pipeline.json) · prompts · transforms.py · domain validators · report templates</text>
+
+  <!-- ENGINE bracket label -->
+  <text x="592" y="310" font-size="12" font-weight="700" fill="#3a5e88" transform="rotate(-90 592 310)" text-anchor="middle">ENGINE</text>
+
+  <!-- 6 Assembly -->
+  <rect x="48" y="142" width="556" height="50" rx="6" fill="#e7e0f6" stroke="#7d5fb0" stroke-width="1.5"/>
+  <text x="60" y="162" font-size="14" font-weight="700" fill="#4a3578">6 · ASSEMBLY — build/ · runtime.py</text>
+  <text x="60" y="180" font-size="12" fill="#4a3578">Registry + builders · validate_pipeline · build()/serve · root-config bootstrap · gate CLI — the only place adapters get wired</text>
+
+  <!-- 5 Ports -->
+  <rect x="48" y="202" width="556" height="54" rx="6" fill="#d7eede" stroke="#3f9d68" stroke-width="1.5"/>
+  <text x="60" y="222" font-size="14" font-weight="700" fill="#1f6b41">5 · CAPABILITY PORTS + DEFAULTS</text>
+  <text x="60" y="240" font-size="12" fill="#1f6b41">prompts/ · data/ · mcp/ · store/ · ModelBackend — each a Protocol + zero-config default + Routing source:key</text>
+
+  <!-- 4 Workers -->
+  <rect x="48" y="266" width="556" height="50" rx="6" fill="#dce9f7" stroke="#4a78b0" stroke-width="1.5"/>
+  <text x="60" y="286" font-size="14" font-weight="700" fill="#2c4f7c">4 · WORKER LIBRARY — nodes/ · agents/</text>
+  <text x="60" y="304" font-size="12" fill="#2c4f7c">agent · get · post · transform · shell · render · python · worktree · once · validators — all behind one Node interface</text>
+
+  <!-- 3 Harness -->
+  <rect x="48" y="326" width="556" height="54" rx="6" fill="#dce9f7" stroke="#4a78b0" stroke-width="1.5"/>
+  <text x="60" y="346" font-size="14" font-weight="700" fill="#2c4f7c">3 · HARNESS — harness/</text>
+  <text x="60" y="364" font-size="12" fill="#2c4f7c">graph runner: retry+feedback · fan-out · branch · suspend/resume · baton lifecycle · gate driver</text>
+
+  <!-- 2 Comms -->
+  <rect x="48" y="390" width="556" height="44" rx="6" fill="#cfddf0" stroke="#4a78b0" stroke-width="1.5"/>
+  <text x="60" y="410" font-size="14" font-weight="700" fill="#2c4f7c">2 · COMMS PORT — comms/</text>
+  <text x="60" y="427" font-size="12" fill="#2c4f7c">Comms Protocol (request / publish / subscribe) + InProcessComms default</text>
+
+  <!-- 1 Kernel -->
+  <rect x="48" y="444" width="556" height="44" rx="6" fill="#c2d4ec" stroke="#3a5e88" stroke-width="1.5"/>
+  <text x="60" y="464" font-size="14" font-weight="700" fill="#23425f">1 · KERNEL — core/</text>
+  <text x="60" y="481" font-size="12" fill="#23425f">Envelope · Node · NodeConfig · Verdict · Kind · Failure  (the contract, no logic)</text>
+
+  <!-- ADAPTERS (right) -->
+  <rect x="628" y="202" width="232" height="114" rx="6" fill="#efe0f5" stroke="#9b59b6" stroke-width="1.5" stroke-dasharray="5 3"/>
+  <text x="640" y="224" font-size="14" font-weight="700" fill="#6e3a8a">ADAPTERS</text>
+  <text x="640" y="244" font-size="11.5" fill="#6e3a8a">transports (NATS/LocalBus)</text>
+  <text x="640" y="261" font-size="11.5" fill="#6e3a8a">backends (claude / LiteLLM)</text>
+  <text x="640" y="278" font-size="11.5" fill="#6e3a8a">prompts · data · mcp · stores</text>
+  <text x="640" y="300" font-size="11" fill="#8a5aa6">implement ports · wired by layer 6</text>
+
+  <!-- implements arrow -->
+  <line x1="628" y1="240" x2="606" y2="232" stroke="#9b59b6" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="636" y="330" font-size="11" fill="#9b59b6" font-style="italic">swap one here + 1 runtime map entry — layers 1–6 don't move</text>
+
+  <text x="48" y="516" font-size="12.5" fill="#444">Same shape end-to-end: every box exchanges <tspan font-weight="700">Envelope</tspan>s; the harness routes; specialization is config + prompt, not new code.</text>
+</svg>

@@ -1,0 +1,32 @@
+# CI: the script-style test suite (tests/test_*.py, one process each), offline and
+# deterministic — fake model backends, no NATS server (the NATS tests self-skip
+# without nats-py), no API keys, no browser. Python 3.9 is installed first so the
+# import-floor guard actually verifies; the later 3.12 wins the default python3.
+name: tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Git identity (worktree tests need one)
+        run: |
+          git config --global user.email "ci@example.com"
+          git config --global user.name "ci"
+
+      - name: Test suite
+        run: python3 scripts/run_tests.py

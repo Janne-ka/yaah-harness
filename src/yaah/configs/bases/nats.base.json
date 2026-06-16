@@ -1,0 +1,10 @@
+{
+  "_about": "R14-seed base — multi-process YAAH deployment over a local NATS server. Workers serve subsets of roles, the orchestrator runs in a separate process. Durable state via file store so a worker restart resumes correctly. Pair with `_extends: 'path/to/nats.base.json'`, then add `providers`, `default_provider`, `pipeline`, `serve` (which roles this host runs), and `input`. Pick this base for: local-over-NATS dev (one box, many workers), multi-tenant smoke, anything that wants resume-after-crash.",
+
+  "transport": {"type": "nats", "url": "nats://127.0.0.1:4222", "request_timeout": 300.0},
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "file", "dir": ".yaah-state"},
+  "trace": {"mode": "tracer", "capture": ["phase", "cost"], "sinks": [{"type": "file", "path": "trace.jsonl"}]},
+  "run": true
+}

@@ -1,0 +1,1122 @@
+{
+  "node_types": [
+    {
+      "type": "agent",
+      "builder": "_build_agent",
+      "class": "s"
+    },
+    {
+      "type": "json_object",
+      "builder": "_build_json_object",
+      "class": "JsonObjectValidator"
+    },
+    {
+      "type": "json_schema",
+      "builder": "_build_json_schema",
+      "class": "JsonSchemaValidator"
+    },
+    {
+      "type": "human_gate",
+      "builder": "_build_human_gate",
+      "class": "HumanGate"
+    },
+    {
+      "type": "shell",
+      "builder": "_build_shell",
+      "class": "ShellNode"
+    },
+    {
+      "type": "shell_check",
+      "builder": "_build_shell_check",
+      "class": "ShellCheck"
+    },
+    {
+      "type": "expect_field",
+      "builder": "_build_expect_field",
+      "class": "ExpectField"
+    },
+    {
+      "type": "worktree",
+      "builder": "_build_worktree",
+      "class": "WorktreeNode"
+    },
+    {
+      "type": "get",
+      "builder": "_build_get",
+      "class": "GetNode"
+    },
+    {
+      "type": "post",
+      "builder": "_build_post",
+      "class": "PostNode"
+    },
+    {
+      "type": "transform",
+      "builder": "_build_transform",
+      "class": "TransformNode"
+    },
+    {
+      "type": "render",
+      "builder": "_build_render",
+      "class": "RenderNode"
+    }
+  ],
+  "ports": {
+    "DataSink": {
+      "module": "src/yaah/data/data_sink.py",
+      "summary": "DataSink \u2014 the interface for WRITING data by key (the 'post' seam).",
+      "methods": [
+        "async store(key: str, value: Any) -> str"
+      ]
+    },
+    "DataSource": {
+      "module": "src/yaah/data/data_source.py",
+      "summary": "DataSource \u2014 the interface for fetching DATA by key (the 'get' seam).",
+      "methods": [
+        "async fetch(key: str) -> str"
+      ]
+    },
+    "PromptSource": {
+      "module": "src/yaah/prompts/prompt_source.py",
+      "summary": "PromptSource \u2014 the interface for fetching a prompt by key.",
+      "methods": [
+        "async get(key: str) -> str"
+      ]
+    },
+    "McpSource": {
+      "module": "src/yaah/mcp/mcp_source.py",
+      "summary": "McpSource \u2014 the interface for fetching an agent's MCP server config (\"get\").",
+      "methods": [
+        "async get(key: str) -> Dict[str, Any]"
+      ]
+    },
+    "Store": {
+      "module": "src/yaah/store/store.py",
+      "summary": "Store \u2014 the durable key->bytes substrate, in capability tiers.",
+      "methods": [
+        "async get(key: str) -> Optional[bytes]",
+        "async put(key: str, value: bytes) -> None",
+        "async delete(key: str) -> None"
+      ]
+    },
+    "Scannable": {
+      "module": "src/yaah/store/store.py",
+      "summary": "Store \u2014 the durable key->bytes substrate, in capability tiers.",
+      "methods": [
+        "scan(prefix: str) -> AsyncIterator[Tuple[str, bytes]]"
+      ]
+    },
+    "CompareAndSet": {
+      "module": "src/yaah/store/store.py",
+      "summary": "Store \u2014 the durable key->bytes substrate, in capability tiers.",
+      "methods": [
+        "async get_rev(key: str) -> Tuple[Optional[bytes], Optional[int]]",
+        "async cas(key: str, value: bytes) -> Optional[int]"
+      ]
+    },
+    "TraceContributor": {
+      "module": "src/yaah/trace/contributor.py",
+      "summary": "TraceContributor \u2014 a capture module that projects a Span into record fields.",
+      "methods": [
+        "contribute(span: Span) -> Dict[str, Any]"
+      ]
+    },
+    "TraceSink": {
+      "module": "src/yaah/trace/sink.py",
+      "summary": "TraceSink \u2014 the port a trace destination implements.",
+      "methods": [
+        "async handle(env: Envelope) -> None"
+      ]
+    },
+    "Tracer": {
+      "module": "src/yaah/trace/tracer.py",
+      "summary": "Tracer \u2014 the port emit sites call to record a measurement.",
+      "methods": [
+        "async emit(span: Span) -> None",
+        "async drain(corr: str) -> List[Dict[str, Any]]",
+        "async ingest(records: List[Dict[str, Any]]) -> None"
+      ]
+    },
+    "Subscription": {
+      "module": "src/yaah/comms/comms.py",
+      "summary": "Comms \u2014 the only interface the harness calls to move envelopes.",
+      "methods": [
+        "cancel() -> None"
+      ]
+    },
+    "Comms": {
+      "module": "src/yaah/comms/comms.py",
+      "summary": "Comms \u2014 the only interface the harness calls to move envelopes.",
+      "methods": [
+        "async request(target: str, envelope: Envelope) -> Envelope",
+        "async publish(topic: str, envelope: Envelope) -> None",
+        "async subscribe(topic: str, handler: Handler) -> Subscription"
+      ]
+    },
+    "Filter": {
+      "module": "src/yaah/filters/filter.py",
+      "summary": "Filter \u2014 the port a model-bound `envelope_get` filter implements (R10).",
+      "methods": [
+        "async apply(value: Any) -> Any"
+      ]
+    },
+    "ModelBackend": {
+      "module": "src/yaah/agents/model_backend.py",
+      "summary": "ModelBackend / ToolBackend \u2014 the interface an Agent calls to talk to a model.",
+      "methods": [
+        "async complete(prompt: str) -> str"
+      ]
+    },
+    "ToolBackend": {
+      "module": "src/yaah/agents/model_backend.py",
+      "summary": "ModelBackend / ToolBackend \u2014 the interface an Agent calls to talk to a model.",
+      "methods": [
+        "async turn(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]"
+      ]
+    }
+  },
+  "adapters": {
+    "data": [
+      {
+        "module": "src/yaah/adapters/data/file_data_source.py",
+        "name": "FileDataSource",
+        "doc": "FileDataSource \u2014 fetch a file, optionally only a line range (\u00b1 N context).",
+        "args": [
+          {
+            "name": "base_dir",
+            "annotation": "str",
+            "default": "''",
+            "kwonly": false
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      },
+      {
+        "module": "src/yaah/adapters/data/file_sink.py",
+        "name": "FileSink",
+        "doc": "FileSink \u2014 write a value to a file (the simplest 'post' target).",
+        "args": [
+          {
+            "name": "base_dir",
+            "annotation": "str",
+            "default": "''",
+            "kwonly": false
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      },
+      {
+        "module": "src/yaah/adapters/data/git_diff_source.py",
+        "name": "GitDiffSource",
+        "doc": "GitDiffSource \u2014 fetch a git diff, scoped to the changed lines (\u00b1 N context).",
+        "args": [
+          {
+            "name": "repo",
+            "annotation": "Optional[str]",
+            "default": "None",
+            "kwonly": true
+          },
+          {
+            "name": "context",
+            "annotation": "int",
+            "default": "3",
+            "kwonly": true
+          },
+          {
+            "name": "intent_to_add",
+            "annotation": "bool",
+            "default": "False",
+            "kwonly": true
+          },
+          {
+            "name": "timeout",
+            "annotation": "Optional[float]",
+            "default": "None",
+            "kwonly": true
+          },
+          {
+            "name": "spawn",
+            "annotation": "Optional[Callable[..., Awaitable[Any]]]",
+            "default": "None",
+            "kwonly": true
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      }
+    ],
+    "prompts": [
+      {
+        "module": "src/yaah/adapters/prompts/file_prompt_source.py",
+        "name": "FilePromptSource",
+        "doc": "FilePromptSource \u2014 read prompts from a directory.",
+        "args": [
+          {
+            "name": "base_dir",
+            "annotation": "str",
+            "default": null,
+            "kwonly": false
+          },
+          {
+            "name": "ext",
+            "annotation": "str",
+            "default": "'.md'",
+            "kwonly": false
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      },
+      {
+        "module": "src/yaah/adapters/prompts/http_prompt_source.py",
+        "name": "HttpPromptSource",
+        "doc": "HttpPromptSource \u2014 fetch prompts over HTTP.",
+        "args": [
+          {
+            "name": "base_url",
+            "annotation": "str",
+            "default": null,
+            "kwonly": false
+          },
+          {
+            "name": "fetch",
+            "annotation": "Optional[Callable[..., Awaitable[str]]]",
+            "default": "None",
+            "kwonly": true
+          },
+          {
+            "name": "timeout",
+            "annotation": "Optional[float]",
+            "default": "None",
+            "kwonly": true
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      },
+      {
+        "module": "src/yaah/adapters/prompts/langfuse_prompt_source.py",
+        "name": "LangfusePromptSource",
+        "doc": "LangfusePromptSource \u2014 managed prompts from Langfuse (by name + label/version).",
+        "args": [
+          {
+            "name": "label",
+            "annotation": "Optional[str]",
+            "default": "None",
+            "kwonly": true
+          },
+          {
+            "name": "client",
+            "annotation": "Any",
+            "default": "None",
+            "kwonly": true
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      }
+    ],
+    "mcp": [
+      {
+        "module": "src/yaah/adapters/mcp/file_mcp_source.py",
+        "name": "FileMcpSource",
+        "doc": "FileMcpSource \u2014 read MCP server configs from JSON files (the governed case).",
+        "args": [
+          {
+            "name": "base_dir",
+            "annotation": "str",
+            "default": null,
+            "kwonly": false
+          },
+          {
+            "name": "ext",
+            "annotation": "str",
+            "default": "'.json'",
+            "kwonly": false
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      }
+    ],
+    "stores": [
+      {
+        "module": "src/yaah/adapters/stores/file_store.py",
+        "name": "FileStore",
+        "doc": "FileStore \u2014 a durable Store extender backed by one file per key.",
+        "args": [
+          {
+            "name": "base_dir",
+            "annotation": "str",
+            "default": null,
+            "kwonly": false
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      }
+    ],
+    "trace_sinks": [
+      {
+        "module": "src/yaah/adapters/trace/console_trace_sink.py",
+        "name": "ConsoleTraceSink",
+        "doc": "ConsoleTraceSink \u2014 render the phase capture as live progress on stderr.",
+        "args": [
+          {
+            "name": "stream",
+            "annotation": "Optional[TextIO]",
+            "default": "None",
+            "kwonly": false
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      },
+      {
+        "module": "src/yaah/adapters/trace/file_trace_sink.py",
+        "name": "FileTraceSink",
+        "doc": "FileTraceSink \u2014 persist trace records as append-only JSONL.",
+        "args": [
+          {
+            "name": "path",
+            "annotation": "str",
+            "default": null,
+            "kwonly": false
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      },
+      {
+        "module": "src/yaah/adapters/trace/langfuse_trace_sink.py",
+        "name": "LangfuseTraceSink",
+        "doc": "LangfuseTraceSink \u2014 forward trace records to Langfuse (R5a).",
+        "args": [
+          {
+            "name": "client",
+            "annotation": "Any",
+            "default": "None",
+            "kwonly": true
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      },
+      {
+        "module": "src/yaah/adapters/trace/progress_file_sink.py",
+        "name": "ProgressFileSink",
+        "doc": "ProgressFileSink \u2014 append live stage progress to a file you can `tail -f`.",
+        "args": [
+          {
+            "name": "path",
+            "annotation": "str",
+            "default": null,
+            "kwonly": false
+          },
+          {
+            "name": "clock",
+            "annotation": "Optional[Callable[[], float]]",
+            "default": "None",
+            "kwonly": true
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      },
+      {
+        "module": "src/yaah/adapters/trace/stats_file_sink.py",
+        "name": "StatsFileSink",
+        "doc": "StatsFileSink \u2014 keep a live statistics rollup in a separate file.",
+        "args": [
+          {
+            "name": "path",
+            "annotation": "str",
+            "default": null,
+            "kwonly": false
+          },
+          {
+            "name": "price_map",
+            "annotation": "Optional[Dict[str, Any]]",
+            "default": "None",
+            "kwonly": true
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      }
+    ],
+    "transports": [
+      {
+        "module": "src/yaah/adapters/transports/local_bus.py",
+        "name": "LocalBus",
+        "doc": "LocalBus \u2014 an in-process bus that is faithful to the wire.",
+        "args": [],
+        "args_doc": [],
+        "method_args_doc": []
+      },
+      {
+        "module": "src/yaah/adapters/transports/nats_comms.py",
+        "name": "NatsComms",
+        "doc": "NatsComms \u2014 the real distributed transport, over a NATS server.",
+        "args": [
+          {
+            "name": "servers",
+            "annotation": "str",
+            "default": "'nats://127.0.0.1:4222'",
+            "kwonly": false
+          },
+          {
+            "name": "request_timeout",
+            "annotation": "float",
+            "default": "300.0",
+            "kwonly": true
+          },
+          {
+            "name": "user",
+            "annotation": "Optional[str]",
+            "default": "None",
+            "kwonly": true
+          },
+          {
+            "name": "password",
+            "annotation": "Optional[str]",
+            "default": "None",
+            "kwonly": true
+          },
+          {
+            "name": "token",
+            "annotation": "Optional[str]",
+            "default": "None",
+            "kwonly": true
+          },
+          {
+            "name": "creds",
+            "annotation": "Optional[str]",
+            "default": "None",
+            "kwonly": true
+          },
+          {
+            "name": "tls",
+            "annotation": "Any",
+            "default": "None",
+            "kwonly": true
+          },
+          {
+            "name": "tls_hostname",
+            "annotation": "Optional[str]",
+            "default": "None",
+            "kwonly": true
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      }
+    ],
+    "backends": [
+      {
+        "module": "src/yaah/adapters/backends/claude_cli_backend.py",
+        "name": "ClaudeCliBackend",
+        "doc": "ClaudeCliBackend \u2014 a ModelBackend that shells out to the local `claude -p`.",
+        "args": [
+          {
+            "name": "binary",
+            "annotation": "str",
+            "default": "'claude'",
+            "kwonly": true
+          },
+          {
+            "name": "extra_args",
+            "annotation": "Optional[Sequence[str]]",
+            "default": "None",
+            "kwonly": true
+          },
+          {
+            "name": "strip_mcp",
+            "annotation": "bool",
+            "default": "True",
+            "kwonly": true
+          },
+          {
+            "name": "timeout",
+            "annotation": "Optional[float]",
+            "default": "None",
+            "kwonly": true
+          },
+          {
+            "name": "permission_mode",
+            "annotation": "Optional[str]",
+            "default": "None",
+            "kwonly": true
+          },
+          {
+            "name": "allowed_tools",
+            "annotation": "Optional[Sequence[str]]",
+            "default": "None",
+            "kwonly": true
+          },
+          {
+            "name": "spawn",
+            "annotation": "Optional[Callable[..., Awaitable[Any]]]",
+            "default": "None",
+            "kwonly": true
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      },
+      {
+        "module": "src/yaah/adapters/backends/litellm_backend.py",
+        "name": "LiteLLMBackend",
+        "doc": "LiteLLMBackend \u2014 a ModelBackend that calls many providers via litellm.",
+        "args": [
+          {
+            "name": "acompletion",
+            "annotation": "Optional[Callable[..., Awaitable[Any]]]",
+            "default": "None",
+            "kwonly": true
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      }
+    ],
+    "filters": [
+      {
+        "module": "src/yaah/adapters/filters/around_keyword_filter.py",
+        "name": "AroundKeywordFilter",
+        "doc": "AroundKeywordFilter \u2014 return \u00b1N lines around occurrences of a keyword in the value (R10 EXTENDED).",
+        "args": [],
+        "args_doc": [],
+        "method_args_doc": [
+          {
+            "method": "apply",
+            "args_doc": [
+              {
+                "name": "value",
+                "desc": "any value \u2014 non-string values pass through unchanged."
+              },
+              {
+                "name": "keyword",
+                "desc": "literal substring; empty keyword returns value verbatim."
+              },
+              {
+                "name": "n",
+                "desc": "lines of context on each side of each hit (default 3)."
+              },
+              {
+                "name": "all",
+                "desc": "if True, return all hits with merged overlapping windows separated by `\"...\"`; if False (default), only the first hit."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "module": "src/yaah/adapters/filters/call_target_filter.py",
+        "name": "CallTargetFilter",
+        "doc": "CallTargetFilter \u2014 bridge a `fn:`/`node:`/`http:` target into the Filter port (R10 EXTENDED).",
+        "args": [
+          {
+            "name": "target",
+            "annotation": "str",
+            "default": null,
+            "kwonly": false
+          },
+          {
+            "name": "comms",
+            "annotation": "Optional[Any]",
+            "default": "None",
+            "kwonly": true
+          }
+        ],
+        "args_doc": [
+          {
+            "name": "target",
+            "desc": "a call_target string (`fn:module:func` / `node:role` / `http://\u2026`). SECURITY: this is the universal escape hatch \u2014 `fn:` imports arbitrary Python and runs it (RCE-equivalent for an untrusted config), `http:` calls an arbitrary URL. The author MUST vet the target the same way any code reference in a config file would be vetted."
+          },
+          {
+            "name": "comms",
+            "desc": "needed for `node:` targets; None is fine for `fn:`/`http:`."
+          }
+        ],
+        "method_args_doc": []
+      },
+      {
+        "module": "src/yaah/adapters/filters/redact_filter.py",
+        "name": "RedactFilter",
+        "doc": "RedactFilter \u2014 replace regex-matched patterns in a string value with a placeholder (R10 EXTENDED).",
+        "args": [
+          {
+            "name": "default_patterns",
+            "annotation": "Optional[List[str]]",
+            "default": "None",
+            "kwonly": false
+          },
+          {
+            "name": "replacement",
+            "annotation": "str",
+            "default": "'[REDACTED]'",
+            "kwonly": false
+          }
+        ],
+        "args_doc": [
+          {
+            "name": "default_patterns",
+            "desc": "list of regex strings the AUTHOR pins at construction. SECURITY: the model's `filter: {name: \"redact\"}` invocation CANNOT override these \u2014 `apply` ignores any model-supplied `patterns` so the model can neither WIDEN nor NARROW the policy. The allow-list rule applied to filter params."
+          },
+          {
+            "name": "replacement",
+            "desc": "string substituted for each match (default `\"[REDACTED]\"`). The model also cannot override this."
+          }
+        ],
+        "method_args_doc": []
+      }
+    ]
+  },
+  "validators": [
+    {
+      "name": "JsonObjectValidator",
+      "doc": "Passes if payload[key] parses as a JSON object with the required keys.",
+      "args": [
+        {
+          "name": "required",
+          "annotation": "Optional[List[str]]",
+          "default": "None",
+          "kwonly": false
+        },
+        {
+          "name": "key",
+          "annotation": "str",
+          "default": "'raw'",
+          "kwonly": true
+        }
+      ],
+      "args_doc": [],
+      "method_args_doc": []
+    },
+    {
+      "name": "JsonSchemaValidator",
+      "doc": "Passes if payload[key] parses as JSON matching a JSON-Schema SUBSET.",
+      "args": [
+        {
+          "name": "schema",
+          "annotation": "Dict[str, Any]",
+          "default": null,
+          "kwonly": false
+        },
+        {
+          "name": "key",
+          "annotation": "str",
+          "default": "'raw'",
+          "kwonly": true
+        }
+      ],
+      "args_doc": [],
+      "method_args_doc": []
+    },
+    {
+      "name": "ExpectField",
+      "doc": "Passes if the prior node's output payload[key] equals an expected value.",
+      "args": [
+        {
+          "name": "key",
+          "annotation": "str",
+          "default": null,
+          "kwonly": false
+        },
+        {
+          "name": "equals",
+          "annotation": "object",
+          "default": null,
+          "kwonly": false
+        }
+      ],
+      "args_doc": [],
+      "method_args_doc": []
+    }
+  ],
+  "node_impls": [
+    {
+      "module": "src/yaah/nodes/get_node.py",
+      "name": "GetNode",
+      "doc": "GetNode \u2014 fetch data via a DataSource and add it to the payload.",
+      "args": [
+        {
+          "name": "data_source",
+          "annotation": "Any",
+          "default": null,
+          "kwonly": false
+        },
+        {
+          "name": "key",
+          "annotation": "str",
+          "default": null,
+          "kwonly": false
+        },
+        {
+          "name": "into",
+          "annotation": "str",
+          "default": "'data'",
+          "kwonly": true
+        },
+        {
+          "name": "cwd_from",
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "context",
+          "annotation": "Optional[int]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "paths",
+          "annotation": "Optional[Sequence[str]]",
+          "default": "None",
+          "kwonly": true
+        }
+      ],
+      "args_doc": [],
+      "method_args_doc": []
+    },
+    {
+      "module": "src/yaah/nodes/once_node.py",
+      "name": "OnceNode",
+      "doc": "OnceNode \u2014 wrap a side-effecting node so it runs ONCE per idempotency key.",
+      "args": [
+        {
+          "name": "inner",
+          "annotation": "Any",
+          "default": null,
+          "kwonly": false
+        },
+        {
+          "name": "store",
+          "annotation": "Any",
+          "default": null,
+          "kwonly": false
+        }
+      ],
+      "args_doc": [],
+      "method_args_doc": []
+    },
+    {
+      "module": "src/yaah/nodes/post_node.py",
+      "name": "PostNode",
+      "doc": "PostNode \u2014 write a payload field out via a DataSink (the 'post' transform).",
+      "args": [
+        {
+          "name": "data_sink",
+          "annotation": "Any",
+          "default": null,
+          "kwonly": false
+        },
+        {
+          "name": "key",
+          "annotation": "str",
+          "default": null,
+          "kwonly": false
+        },
+        {
+          "name": "field",
+          "annotation": "str",
+          "default": "'data'",
+          "kwonly": true
+        },
+        {
+          "name": "into",
+          "annotation": "str",
+          "default": "'stored'",
+          "kwonly": true
+        },
+        {
+          "name": "cwd_from",
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kwonly": true
+        }
+      ],
+      "args_doc": [],
+      "method_args_doc": []
+    },
+    {
+      "module": "src/yaah/nodes/render_node.py",
+      "name": "RenderNode",
+      "doc": "RenderNode \u2014 a worker that fills a {{mustache}} template with the payload.",
+      "args": [
+        {
+          "name": "template",
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "template_file",
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "out_path",
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kwonly": true
+        }
+      ],
+      "args_doc": [],
+      "method_args_doc": []
+    },
+    {
+      "module": "src/yaah/nodes/shell_check.py",
+      "name": "ShellCheck",
+      "doc": "ShellCheck \u2014 a validator that runs a command and passes on the expected exit.",
+      "args": [
+        {
+          "name": "command",
+          "annotation": "Union[str, List[str]]",
+          "default": null,
+          "kwonly": false
+        },
+        {
+          "name": "expect_exit",
+          "annotation": "int",
+          "default": "0",
+          "kwonly": true
+        },
+        {
+          "name": "expect_nonzero",
+          "annotation": "bool",
+          "default": "False",
+          "kwonly": true
+        },
+        {
+          "name": "cwd",
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "cwd_from",
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "timeout",
+          "annotation": "Optional[float]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "shell",
+          "annotation": "bool",
+          "default": "False",
+          "kwonly": true
+        }
+      ],
+      "args_doc": [],
+      "method_args_doc": []
+    },
+    {
+      "module": "src/yaah/nodes/shell_node.py",
+      "name": "ShellNode",
+      "doc": "ShellNode \u2014 a worker that runs a fixed command and returns its outcome.",
+      "args": [
+        {
+          "name": "command",
+          "annotation": "Union[str, List[str]]",
+          "default": null,
+          "kwonly": false
+        },
+        {
+          "name": "cwd",
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "cwd_from",
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "timeout",
+          "annotation": "Optional[float]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "shell",
+          "annotation": "bool",
+          "default": "False",
+          "kwonly": true
+        },
+        {
+          "name": "tail_only",
+          "annotation": "bool",
+          "default": "False",
+          "kwonly": true
+        },
+        {
+          "name": "tail",
+          "annotation": "int",
+          "default": "2000",
+          "kwonly": true
+        },
+        {
+          "name": "carry",
+          "annotation": "Optional[List[str]]",
+          "default": "None",
+          "kwonly": true
+        }
+      ],
+      "args_doc": [],
+      "method_args_doc": []
+    },
+    {
+      "module": "src/yaah/nodes/transform_node.py",
+      "name": "TransformNode",
+      "doc": "TransformNode \u2014 call an external capability as a transform (tools + mcp).",
+      "args": [
+        {
+          "name": "target",
+          "annotation": "str",
+          "default": null,
+          "kwonly": false
+        },
+        {
+          "name": "comms",
+          "annotation": "Any",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "args_from",
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "into",
+          "annotation": "str",
+          "default": "'result'",
+          "kwonly": true
+        },
+        {
+          "name": "call",
+          "annotation": "str",
+          "default": "'args'",
+          "kwonly": true
+        }
+      ],
+      "args_doc": [],
+      "method_args_doc": []
+    },
+    {
+      "module": "src/yaah/nodes/worktree_node.py",
+      "name": "WorktreeNode",
+      "doc": "WorktreeNode \u2014 give a task an isolated git worktree (and tear it down).",
+      "args": [
+        {
+          "name": "repo",
+          "annotation": "str",
+          "default": null,
+          "kwonly": true
+        },
+        {
+          "name": "base",
+          "annotation": "str",
+          "default": "'HEAD'",
+          "kwonly": true
+        },
+        {
+          "name": "root",
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "branch_prefix",
+          "annotation": "str",
+          "default": "'yaah/'",
+          "kwonly": true
+        },
+        {
+          "name": "op",
+          "annotation": "str",
+          "default": "'add'",
+          "kwonly": true
+        },
+        {
+          "name": "task_key",
+          "annotation": "str",
+          "default": "'task'",
+          "kwonly": true
+        },
+        {
+          "name": "timeout",
+          "annotation": "Optional[float]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "carry",
+          "annotation": "Optional[list]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "force",
+          "annotation": "bool",
+          "default": "False",
+          "kwonly": true
+        }
+      ],
+      "args_doc": [],
+      "method_args_doc": []
+    }
+  ],
+  "tools": [
+    {
+      "module": "src/yaah/agents/context_broker_tool.py",
+      "fn": "make_context_broker_tool",
+      "doc": "Build a `context_broker` Tool bound to `envelope` and `comms`."
+    },
+    {
+      "module": "src/yaah/agents/envelope_tool.py",
+      "fn": "make_envelope_get_tool",
+      "doc": "Build an `envelope_get` Tool bound to `envelope`."
+    }
+  ],
+  "trace_contributors": [
+    {
+      "module": "src/yaah/trace/contributors/cost.py",
+      "name": "CostContributor",
+      "doc": "CostContributor \u2014 the token/model capture (the cost dimension).",
+      "args": [],
+      "args_doc": [],
+      "method_args_doc": []
+    },
+    {
+      "module": "src/yaah/trace/contributors/phase.py",
+      "name": "PhaseContributor",
+      "doc": "PhaseContributor \u2014 the default-on minimum capture (progress UX).",
+      "args": [],
+      "args_doc": [],
+      "method_args_doc": []
+    },
+    {
+      "module": "src/yaah/trace/contributors/tools.py",
+      "name": "ToolsContributor",
+      "doc": "ToolsContributor \u2014 the tool-call capture.",
+      "args": [],
+      "args_doc": [],
+      "method_args_doc": []
+    }
+  ]
+}

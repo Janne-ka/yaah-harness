@@ -1,0 +1,10 @@
+{
+  "_about": "R14-seed base — fully local in-process YAAH deployment. The smallest viable root: one process, in-memory state, console trace, file-system prompts. Pair with `_extends: 'path/to/local.base.json'` in your own root, then add `providers`, `default_provider`, `pipeline`, and `input`. Pick this base for: dev iteration, fixture-driven runs, CI smoke tests, the QUICK START scaffold.",
+
+  "transport": {"type": "inproc"},
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "memory"},
+  "trace": {"mode": "tracer", "capture": ["phase", "cost"], "sinks": [{"type": "console"}]},
+  "run": true
+}

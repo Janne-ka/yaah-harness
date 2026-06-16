@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1078" height="296" viewBox="0 0 1078 296" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">
+<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="#6b7280"/></marker></defs>
+<path d="M 214 56 C 259 56, 259 56, 302 56" fill="none" stroke="#6b7280"  marker-end="url(#arr)"/>
+<path d="M 214 56 C 259 56, 259 148, 302 148" fill="none" stroke="#6b7280"  marker-end="url(#arr)"/><text x="259" y="109" font-size="10" fill="#b45309" text-anchor="middle">fork</text>
+<path d="M 214 56 C 259 56, 259 240, 302 240" fill="none" stroke="#6b7280"  marker-end="url(#arr)"/><text x="259" y="168" font-size="10" fill="#b45309" text-anchor="middle">fork</text>
+<path d="M 494 148 C 539 148, 539 56, 582 56" fill="none" stroke="#6b7280"  marker-end="url(#arr)"/>
+<path d="M 774 56 C 819 56, 819 56, 862 56" fill="none" stroke="#6b7280"  marker-end="url(#arr)"/>
+<path d="M 494 240 C 539 240, 539 148, 582 148" fill="none" stroke="#6b7280"  marker-end="url(#arr)"/>
+<path d="M 774 148 C 819 148, 819 148, 862 148" fill="none" stroke="#6b7280"  marker-end="url(#arr)"/>
+<path d="M 959 180 C 959 216, 959 124, 959 90" fill="none" stroke="#6b7280"  marker-end="url(#arr)"/>
+<path d="M 494 148 C 679 148, 679 56, 862 56" fill="none" stroke="#6b7280" stroke-dasharray="5 4" marker-end="url(#arr)"/><text x="679" y="96" font-size="10" fill="#b45309" text-anchor="middle">expect</text>
+<path d="M 494 240 C 679 240, 679 56, 862 56" fill="none" stroke="#6b7280" stroke-dasharray="5 4" marker-end="url(#arr)"/><text x="679" y="142" font-size="10" fill="#b45309" text-anchor="middle">expect</text>
+<rect x="24" y="24" rx="8" width="190" height="64" fill="#fee2e2" stroke="#b91c1c" stroke-width="1.5"/>
+<text x="34" y="42" font-size="13" font-weight="bold" fill="#b91c1c">ab  ▶</text>
+<text x="34" y="57" font-size="10.5" fill="#374151">fork</text>
+<rect x="304" y="116" rx="8" width="190" height="64" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.5"/>
+<text x="314" y="134" font-size="13" font-weight="bold" fill="#1d4ed8">a-secperf</text>
+<text x="314" y="149" font-size="10.5" fill="#374151">agent</text>
+<rect x="584" y="24" rx="8" width="190" height="64" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.5"/>
+<text x="594" y="42" font-size="13" font-weight="bold" fill="#1d4ed8">a-eval</text>
+<text x="594" y="57" font-size="10.5" fill="#374151">agent</text>
+<rect x="304" y="208" rx="8" width="190" height="64" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.5"/>
+<text x="314" y="226" font-size="13" font-weight="bold" fill="#1d4ed8">b-security</text>
+<text x="314" y="241" font-size="10.5" fill="#374151">agent</text>
+<rect x="584" y="116" rx="8" width="190" height="64" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.5"/>
+<text x="594" y="134" font-size="13" font-weight="bold" fill="#1d4ed8">b-perf</text>
+<text x="594" y="149" font-size="10.5" fill="#374151">agent</text>
+<rect x="864" y="116" rx="8" width="190" height="64" fill="#dbeafe" stroke="#1d4ed8" stroke-width="1.5"/>
+<text x="874" y="134" font-size="13" font-weight="bold" fill="#1d4ed8">b-eval</text>
+<text x="874" y="149" font-size="10.5" fill="#374151">agent</text>
+<rect x="864" y="24" rx="8" width="190" height="64" fill="#fee2e2" stroke="#b91c1c" stroke-width="1.5"/>
+<text x="874" y="42" font-size="13" font-weight="bold" fill="#b91c1c">join</text>
+<text x="874" y="57" font-size="10.5" fill="#374151">fan-in</text>
+<text x="1010" y="80" font-size="10.5" fill="#9ca3af">■ end</text>
+<rect x="304" y="24" rx="8" width="190" height="64" fill="#e5e7eb" stroke="#374151" stroke-width="1.5"/>
+<text x="314" y="42" font-size="13" font-weight="bold" fill="#374151">result</text>
+<text x="314" y="57" font-size="10.5" fill="#374151">transform</text>
+<text x="450" y="80" font-size="10.5" fill="#9ca3af">■ end</text>
+</svg>

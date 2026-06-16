@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 480" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <rect width="920" height="480" fill="#ffffff"/>
+  <text x="40" y="34" font-size="21" font-weight="700" fill="#1a1a1a">Extending a base component — one example: the <tspan fill="#2c4f7c">Agent</tspan> node</text>
+
+  <!-- BASE -->
+  <rect x="40" y="64" width="250" height="150" rx="10" fill="#dce9f7" stroke="#2c4f7c" stroke-width="2.5"/>
+  <text x="56" y="90" font-size="15" font-weight="700" fill="#23425f">Agent  ·  engine (agents/)</text>
+  <text x="56" y="112" font-size="11.5" fill="#3a5e88">invoke(input, config) → Envelope</text>
+  <text x="56" y="134" font-size="11.5" fill="#3a5e88">• render prompt (+ retry feedback)</text>
+  <text x="56" y="152" font-size="11.5" fill="#3a5e88">• call the ModelBackend</text>
+  <text x="56" y="170" font-size="11.5" fill="#3a5e88">• optional tools / MCP / worktree cwd</text>
+  <text x="56" y="196" font-size="11" fill="#7088a3" font-style="italic">one class — written once, never edited per stage</text>
+
+  <!-- ports chips -->
+  <text x="56" y="240" font-size="11" font-weight="700" fill="#1f6b41">pulls from ports:</text>
+  <rect x="40" y="248" width="84" height="26" rx="13" fill="#d7eede" stroke="#3f9d68"/><text x="82" y="265" font-size="10.5" fill="#1f6b41" text-anchor="middle">PromptSource</text>
+  <rect x="130" y="248" width="88" height="26" rx="13" fill="#d7eede" stroke="#3f9d68"/><text x="174" y="265" font-size="10.5" fill="#1f6b41" text-anchor="middle">ModelBackend</text>
+  <rect x="224" y="248" width="66" height="26" rx="13" fill="#d7eede" stroke="#3f9d68"/><text x="257" y="265" font-size="10.5" fill="#1f6b41" text-anchor="middle">McpSource</text>
+
+  <!-- plus -->
+  <text x="312" y="148" font-size="30" font-weight="700" fill="#888" text-anchor="middle">+</text>
+
+  <!-- CONFIG card -->
+  <rect x="336" y="64" width="262" height="206" rx="10" fill="#fde2c4" stroke="#e0892f" stroke-width="2"/>
+  <text x="352" y="88" font-size="14" font-weight="700" fill="#7a4a10">config (application)</text>
+  <text x="352" y="118" font-size="12" fill="#5a3a10" font-family="ui-monospace, Menlo, Consolas, monospace">"type":  "agent"</text>
+  <text x="352" y="140" font-size="12" fill="#5a3a10" font-family="ui-monospace, Menlo, Consolas, monospace">"prompt": "file:review"</text>
+  <text x="352" y="162" font-size="12" fill="#5a3a10" font-family="ui-monospace, Menlo, Consolas, monospace">"model": "claude:sonnet"</text>
+  <text x="352" y="184" font-size="12" fill="#5a3a10" font-family="ui-monospace, Menlo, Consolas, monospace">"config": {"lens":</text>
+  <text x="352" y="202" font-size="12" fill="#5a3a10" font-family="ui-monospace, Menlo, Consolas, monospace">          "correctness"}</text>
+  <text x="352" y="226" font-size="12" fill="#5a3a10" font-family="ui-monospace, Menlo, Consolas, monospace">"validators": ["findings-json"]</text>
+  <text x="352" y="252" font-size="11" fill="#a06a28" font-style="italic">a prompt + a few keys + a name</text>
+
+  <!-- equals -->
+  <text x="618" y="148" font-size="30" font-weight="700" fill="#888" text-anchor="middle">=</text>
+
+  <!-- RESULT -->
+  <rect x="642" y="64" width="238" height="206" rx="10" fill="#e7e0f6" stroke="#7d5fb0" stroke-width="2"/>
+  <text x="658" y="88" font-size="14" font-weight="700" fill="#4a3578">role: review·correctness</text>
+  <text x="658" y="112" font-size="11.5" fill="#4a3578">a specialized stage in the graph.</text>
+  <text x="658" y="136" font-size="11.5" font-weight="700" fill="#4a3578">Harness adds, from graph fields:</text>
+  <text x="658" y="156" font-size="11.5" fill="#4a3578">• retry + feedback (validators)</text>
+  <text x="658" y="174" font-size="11.5" fill="#4a3578">• fan-out with the other 6 lenses</text>
+  <text x="658" y="192" font-size="11.5" fill="#4a3578">• branch on the verdict</text>
+  <text x="658" y="210" font-size="11.5" fill="#4a3578">• escalate → human gate</text>
+  <text x="658" y="244" font-size="12" font-weight="700" fill="#6e3a8a">engine code written: 0 lines</text>
+
+  <!-- ghost row -->
+  <text x="40" y="316" font-size="13" font-weight="700" fill="#444">The same Agent class, different config, becomes every other model stage:</text>
+  <g font-size="11" text-anchor="middle">
+    <rect x="40"  y="330" width="98" height="30" rx="15" fill="#eef3fa" stroke="#9bb4d4"/><text x="89"  y="349" fill="#3a5e88">spec</text>
+    <rect x="148" y="330" width="98" height="30" rx="15" fill="#eef3fa" stroke="#9bb4d4"/><text x="197" y="349" fill="#3a5e88">code</text>
+    <rect x="256" y="330" width="98" height="30" rx="15" fill="#eef3fa" stroke="#9bb4d4"/><text x="305" y="349" fill="#3a5e88">eval</text>
+    <rect x="364" y="330" width="98" height="30" rx="15" fill="#eef3fa" stroke="#9bb4d4"/><text x="413" y="349" fill="#3a5e88">secperf</text>
+    <rect x="472" y="330" width="98" height="30" rx="15" fill="#eef3fa" stroke="#9bb4d4"/><text x="521" y="349" fill="#3a5e88">data-audit</text>
+    <rect x="580" y="330" width="98" height="30" rx="15" fill="#eef3fa" stroke="#9bb4d4"/><text x="629" y="349" fill="#3a5e88">code-review</text>
+    <rect x="688" y="330" width="98" height="30" rx="15" fill="#eef3fa" stroke="#9bb4d4"/><text x="737" y="349" fill="#3a5e88">judges</text>
+    <rect x="796" y="330" width="98" height="30" rx="15" fill="#eef3fa" stroke="#9bb4d4"/><text x="845" y="349" fill="#3a5e88">sceptics</text>
+  </g>
+
+  <!-- principle banner -->
+  <rect x="40" y="392" width="840" height="64" rx="8" fill="#1f3b59"/>
+  <text x="460" y="418" font-size="15" font-weight="700" fill="#ffffff" text-anchor="middle">The principle: extend by CONFIGURING a base Node — never by subclassing.</text>
+  <text x="460" y="440" font-size="12.5" fill="#cfe0f2" text-anchor="middle">A new stage = a prompt + a few config keys + a name in the graph. Behaviour (retry / fan-out / branch / gate) comes from the harness, not the node.</text>
+</svg>

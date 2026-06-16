@@ -1,0 +1,72 @@
+[project]
+name = "yaah"
+version = "0.0.1"
+description = "Yet Another Agentic Harness — generic worker-orchestration kernel"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "Janne Karvosenoja"}]
+requires-python = ">=3.9"
+# The engine core has ZERO runtime dependencies — minimal CVE surface, trivial to
+# vendor. Every third-party library is an OPT-IN adapter, lazily imported only
+# when that adapter is used (LiteLLM backend / NATS transport / Langfuse sinks /
+# HTTP prompt source). Versions are intentionally unpinned here: pin them in the
+# environment + lock layer (see pixi.toml), not via a guess in this file.
+dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+# TODO(before first push): set to the public repo URL.
+Homepage = "https://github.com/OWNER/yaah-harness"
+Source = "https://github.com/OWNER/yaah-harness"
+
+[project.optional-dependencies]
+litellm = ["litellm"]      # LiteLLMBackend (provider:model via litellm)
+nats = ["nats-py"]         # NatsComms transport (distributed, auth+TLS)
+langfuse = ["langfuse"]    # Langfuse trace sink + prompt source
+http = ["httpx"]           # HttpPromptSource default fetcher
+all = ["litellm", "nats-py", "langfuse", "httpx"]
+
+[project.scripts]
+yaah = "yaah.runtime:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# Ship the R14-seed base configs inside the wheel so `_extends: "yaah:bases/..."`
+# resolves from an installed package, not just the source tree.
+"yaah.configs.bases" = ["*.json"]
+
+[tool.coverage.run]
+branch = true
+source = ["yaah"]
+parallel = true
+# Measure the package as imported (PYTHONPATH=src), not the file paths.
+
+[tool.coverage.paths]
+# Treat the src/ layout and any installed copy as the same package.
+source = ["src/yaah", "*/yaah"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+# The bar, now met (87% combined). Enforced as a ratchet: keep it here and raise
+# it as coverage grows; do not let it slip below 75.
+fail_under = 75
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "\\.\\.\\.",                 # Protocol method bodies (abstract `...`, never run)
+]
