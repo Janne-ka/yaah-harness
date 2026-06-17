@@ -1,15 +1,15 @@
 ---
 name: yaah-reviewing
-description: Use when auditing or reviewing YAAH engine code under yaah/src/ or yaah/tests/. Not for small targeted reads — use Read directly. Not for in-flight edits — use yaah-extending.
+description: Use when auditing or reviewing YAAH engine code under src/ or tests/. Not for small targeted reads — use Read directly. Not for in-flight edits — use yaah-extending.
 ---
 
-# Reviewing YAAH + the example app
+# Reviewing YAAH
 
 **Standing rule:** never commit unless explicitly asked.
 
 ## Overview
 
-A YAAH review judges **four axes** (elegant, simple, working, extensible) alongside bugs and security — never just one. The codebase is large (~6.5k lines, ~12 sub-packages); an inline read misses cross-file invariants. **Fan-out is a tool, not a reflex — match it to scope (see Cost ladder below).** Output feeds the autonomous fix-batch loop; the report goes in `yaah/docs/assessment-YYYY-MM-DD.md` and the most recent one is the canonical starting point.
+A YAAH review judges **four axes** (elegant, simple, working, extensible) alongside bugs and security — never just one. The codebase is large (~6.5k lines, ~12 sub-packages); an inline read misses cross-file invariants. **Fan-out is a tool, not a reflex — match it to scope (see Cost ladder below).** Output feeds the autonomous fix-batch loop; the report goes in `docs/assessment-YYYY-MM-DD.md` and the most recent one is the canonical starting point.
 
 ## Cost ladder — match scope to method
 
@@ -30,18 +30,18 @@ A YAAH review judges **four axes** (elegant, simple, working, extensible) alongs
 
 | # | Cluster | Files |
 |---|---|---|
-| 1 | Harness engine | `yaah/src/yaah/core/`, `harness/` (includes `fork_coordinator.py`, `span_emitter.py` — concerns already split out of `harness.py`) |
+| 1 | Harness engine | `src/yaah/core/`, `harness/` (includes `fork_coordinator.py`, `span_emitter.py` — concerns already split out of `harness.py`) |
 | 2 | Comms / transports / store | `comms/` (including the `Subscription` Protocol), `adapters/transports/`, `store/`, `adapters/stores/` |
 | 3 | Agents / backends | `agents/`, `adapters/backends/` |
 | 4 | Nodes / build / runtime | `nodes/`, `build/`, `runtime*.py`, `external_call.py`, `cwd.py` |
 | 5 | Ports & adapters | `data/`, `prompts/`, `mcp/`, `adapters/{data,prompts,mcp,trace}/`, `trace/`, `validators.py`, `recall.py`, `jsonio.py` |
-| 6 | the example app on harness | the app's pipeline configs, transforms, prompts, and renderers |
+| 6 | App on YAAH (only if your project ships one) | its pipeline configs, transforms, prompts, renderers |
 
 ## Invariants to check (yaah-specific)
 
 These are **enforced**, not aspirational:
 
-- **Domain-free engine.** No application-specific (domain) references in `yaah/src/`. Engine never references stages by name, tenant fields, test runners.
+- **Domain-free engine.** No application-specific (domain) references in `src/`. Engine never references stages by name, tenant fields, test runners.
 - **One class per file** + use-case docstring (who calls, where, why).
 - **Hug-the-world ports.** Each port has a `routing_*` multiplexer + concrete adapters (`file_*`, `http_*`). Triad must be consistent across data/prompts/mcp.
 - **Trust boundary is implicit and undefended.** `fn:module:func` in config = RCE if untrusted; payload-derived paths (`worktree.task`, `cwd_from`) reach destructive ops with no sanitization. Flag every payload→fs/shell/network edge.
@@ -64,7 +64,7 @@ These are **enforced**, not aspirational:
 
 3. **Cross-confirm anything CRITICAL/HIGH.** A bug isn't real until reproduced (run the failing test, decode the parked baton, etc.). Two sub-agents independently flagging the same defect is strong; a single agent's claim is a hypothesis.
 
-4. **Synthesize.** Per-cluster ratings → prioritized fix table (file:line, severity, fix) → philosophy-preservation matrix for cluster 6. Write to `yaah/docs/assessment-YYYY-MM-DD.md`.
+4. **Synthesize.** Per-cluster ratings → prioritized fix table (file:line, severity, fix) → philosophy-preservation matrix for cluster 6. Write to `docs/assessment-YYYY-MM-DD.md`.
 
 ## Common mistakes
 
@@ -79,4 +79,4 @@ These are **enforced**, not aspirational:
 
 ## Output anchor
 
-The report goes in `yaah/docs/assessment-YYYY-MM-DD.md` and must include: verdict, ratings table, headline findings, prioritized fix list, philosophy-preservation matrix, reproduce-ground-truth appendix. **This file is the input to the autonomous fix-batch loop** — write it so a downstream agent can pick fixes from the prioritized table without re-deriving context. Keep it a point-in-time snapshot (do not fold later actions in); start a new dated file on the next review.
+The report goes in `docs/assessment-YYYY-MM-DD.md` and must include: verdict, ratings table, headline findings, prioritized fix list, philosophy-preservation matrix, reproduce-ground-truth appendix. **This file is the input to the autonomous fix-batch loop** — write it so a downstream agent can pick fixes from the prioritized table without re-deriving context. Keep it a point-in-time snapshot (do not fold later actions in); start a new dated file on the next review.

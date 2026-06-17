@@ -53,6 +53,6 @@
     <rect x="794" y="274" width="116" height="46" rx="6" fill="#dce9f7" stroke="#4a78b0"/><text x="852" y="294" font-size="11" font-weight="600" fill="#23425f" text-anchor="middle">gate·audit</text><text x="852" y="309" font-size="9.5" fill="#7088a3" text-anchor="middle">human_gate</text>
   </g>
 
-  <text x="40" y="360" font-size="13" fill="#444">12 node types  →  25+ s_factory stages  →  6 adapters.  No new concepts — only more <tspan font-style="italic">config</tspan>.</text>
+  <text x="40" y="360" font-size="13" fill="#444">12 node types  →  25+ app stages  →  6 adapters.  No new concepts — only more <tspan font-style="italic">config</tspan>.</text>
   <text x="40" y="382" font-size="13" fill="#444">If a box here needed a concept that isn't <tspan font-weight="700">Node / Envelope / Comms</tspan>, that would be the design breaking. It hasn't.</text>
 </svg>

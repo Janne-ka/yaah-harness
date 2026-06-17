@@ -36,6 +36,7 @@ def build_graph(g: Dict[str, Any]) -> Graph:
             node=s.get("node", ""),  # a fork / fan-in stage carries no node
             validators=list(s.get("validators", [])),
             max_attempts=int(s.get("max_attempts", 1)),
+            error_retries=int(s.get("error_retries", 2)),
             feedback=bool(s.get("feedback", False)),
             escalate=s.get("escalate"),
             then=s.get("then"),

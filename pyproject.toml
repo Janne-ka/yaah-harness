@@ -1,5 +1,5 @@
 [project]
-name = "yaah"
+name = "yaah-harness"
 version = "0.0.1"
 description = "Yet Another Agentic Harness — generic worker-orchestration kernel"
 readme = "README.md"
@@ -21,16 +21,17 @@ classifiers = [
 ]
 
 [project.urls]
-# TODO(before first push): set to the public repo URL.
-Homepage = "https://github.com/OWNER/yaah-harness"
-Source = "https://github.com/OWNER/yaah-harness"
+Homepage = "https://github.com/Janne-ka/yaah-harness"
+Source = "https://github.com/Janne-ka/yaah-harness"
 
 [project.optional-dependencies]
 litellm = ["litellm"]      # LiteLLMBackend (provider:model via litellm)
 nats = ["nats-py"]         # NatsComms transport (distributed, auth+TLS)
-langfuse = ["langfuse"]    # Langfuse trace sink + prompt source
+langfuse = ["langfuse>=4"]  # trace sink maps onto the v4 (OTEL) client surface;
+                            # the legacy v2 surface is still handled if you pin <3
 http = ["httpx"]           # HttpPromptSource default fetcher
-all = ["litellm", "nats-py", "langfuse", "httpx"]
+all = ["litellm", "nats-py", "langfuse>=4", "httpx"]
+dev = ["coverage[toml]"]   # run_tests.py enforces the fail_under floor when present
 
 [project.scripts]
 yaah = "yaah.runtime:main"

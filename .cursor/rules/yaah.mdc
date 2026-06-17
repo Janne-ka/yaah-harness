@@ -1,0 +1,26 @@
+---
+description: YAAH harness — orientation and the rules that bite. Read AGENTS.md for the full guide.
+alwaysApply: true
+---
+
+YAAH is a domain-free runtime for orchestrating agentic workers. Full guide:
+**[AGENTS.md](../../AGENTS.md)**. A pipeline is JSON (`nodes` + `graph`); a root
+config says how to run it. Start with `docs/quickstart.md`, `docs/tutorial.md`,
+and `examples/` (`hello-yaah`, `review-pipeline`, `fork-join`).
+
+Rules that bite hardest:
+
+- **Data-flow contract:** an agent's reply is a STRING in `payload["raw"]`. A
+  `json_object` validator only *checks* it; a `transform` parse step
+  (`call:"envelope"`, `fn(envelope, config) -> dict`) merges it. Every
+  `agent → render`/`branch` edge needs a parse, or you ship a literal
+  `{{placeholder}}` at exit 0 (silent-wrong).
+- **A human gate must `branch` on `decision`** — only `then` is a pause, not a gate.
+- **Compose, don't invent** — `fork`+`fanin`+`transform` express most things.
+- **Domain-free engine:** nothing in `src/yaah/` may name anything app-specific.
+- **One class per file** + a use-case docstring (who calls it, where, why).
+- **Security:** `fn:module:func` in config is executed; never let a payload value
+  reach `importlib`/a shell/an fs path/a URL unsanitized.
+
+Tests are script-style, Python 3.9 compatible: `python3 scripts/run_tests.py`.
+Always ship a `.fake.json` overlay so pipelines run offline. Don't commit unless asked.

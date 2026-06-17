@@ -1,0 +1,12 @@
+{
+  "transport": {"type": "inproc"},
+  "providers": {"fake": {"type": "fake_scripted",
+                         "by_model": {"draft": ["{\"summary\":\"YAAH routes between workers; each worker does one job.\"}"]}}},
+  "default_provider": "fake",
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "file", "dir": "state"},
+  "pipeline": "review.json",
+  "input": "fixtures/input.json",
+  "run": true
+}

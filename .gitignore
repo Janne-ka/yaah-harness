@@ -21,3 +21,11 @@ dist/
 .coverage.*
 htmlcov/
 coverage.xml
+
+# local planning / working notes (not part of the repo)
+.notes/
+
+# local-only (never published): personal Claude Code settings + the private
+# banlist of a consuming app's proper nouns (see docs/contributor/banlist.txt)
+.claude/settings.local.json
+docs/contributor/banlist.local.txt

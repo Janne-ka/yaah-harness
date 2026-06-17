@@ -1,0 +1,26 @@
+{
+  "nodes": {
+    "role:security": {"type": "agent", "model": "fake:security", "stage": "security",
+                      "template": "Review {{text}} for SECURITY issues. Return JSON: {\"finding\": \"...\"}"},
+    "role:perf":     {"type": "agent", "model": "fake:perf", "stage": "perf",
+                      "template": "Review {{text}} for PERFORMANCE issues. Return JSON: {\"finding\": \"...\"}"},
+    "role:style":    {"type": "agent", "model": "fake:style", "stage": "style",
+                      "template": "Review {{text}} for STYLE issues. Return JSON: {\"finding\": \"...\"}"},
+    "role:report":   {"type": "render", "out": "review.html",
+                      "template_text": "<h1>Review — {{count}} lenses</h1>\n<pre>{{report}}</pre>\n"}
+  },
+  "graph": {
+    "start": "spread",
+    "stages": {
+      "spread":   {"node": "", "fork": ["security", "perf", "style"], "then": "report"},
+      "security": {"node": "role:security", "then": "join"},
+      "perf":     {"node": "role:perf", "then": "join"},
+      "style":    {"node": "role:style", "then": "join"},
+      "join":     {"node": "",
+                   "fanin": {"expect": ["security", "perf", "style"], "wait": "all",
+                             "reduce": "fn:lenses:merge"},
+                   "then": null},
+      "report":   {"node": "role:report", "then": null}
+    }
+  }
+}

@@ -46,7 +46,8 @@ class NatsComms:
     def __init__(self, servers: str = "nats://127.0.0.1:4222", *, request_timeout: float = 300.0,
                  user: Optional[str] = None, password: Optional[str] = None,
                  token: Optional[str] = None, creds: Optional[str] = None,
-                 tls: Any = None, tls_hostname: Optional[str] = None) -> None:
+                 tls: Any = None, tls_hostname: Optional[str] = None,
+                 tracer: Any = None) -> None:
         self._servers = servers
         # Default request/reply deadline. LLM nodes (a real `claude -p`) can take
         # MINUTES, far past NATS's usual sub-second RPC assumption — so the default
@@ -62,6 +63,12 @@ class NatsComms:
         self._creds = creds            # path to an NKEY/JWT credentials file
         self._tls = tls                # an ssl.SSLContext
         self._tls_hostname = tls_hostname
+        # Optional tracer: when wired, connection-state changes (disconnect /
+        # reconnect / error / close) emit spans. Without this the orchestrator
+        # discovered a dead/partitioned broker only via a 300s request timeout —
+        # transient blip vs permanent partition was UNOBSERVABLE. None = silent
+        # (today's behaviour for a local broker).
+        self._tracer = tracer
         self._nc: Any = None
 
     async def connect(self) -> "NatsComms":
@@ -73,8 +80,38 @@ class NatsComms:
                          ("tls", self._tls), ("tls_hostname", self._tls_hostname)):
             if val is not None:
                 opts[key] = val
+        if self._tracer is not None:
+            opts["error_cb"] = self._on_error
+            opts["disconnected_cb"] = self._on_disconnected
+            opts["reconnected_cb"] = self._on_reconnected
+            opts["closed_cb"] = self._on_closed
         self._nc = await nats.connect(self._servers, **opts)
         return self
+
+    async def _emit_conn(self, event: str, *, status: str, detail: str = "") -> None:
+        """Emit a `nats` connection-state span. Point-in-time (no duration) — the
+        EVENT is the signal. No-op when no tracer is wired."""
+        if self._tracer is None:
+            return
+        import time
+
+        from ...trace import Span
+        now = time.monotonic()
+        await self._tracer.emit(Span.timed(
+            "nats", corr="nats", t0=now, t1=now, status=status,
+            attrs={"event": event, "detail": detail}))
+
+    async def _on_error(self, e: Any) -> None:
+        await self._emit_conn("error", status="error", detail=repr(e))
+
+    async def _on_disconnected(self) -> None:
+        await self._emit_conn("disconnected", status="error")
+
+    async def _on_reconnected(self) -> None:
+        await self._emit_conn("reconnected", status="ok")
+
+    async def _on_closed(self) -> None:
+        await self._emit_conn("closed", status="error")
 
     async def request(self, target: str, envelope: Envelope, *, timeout: Optional[float] = None) -> Envelope:
         if timeout is None:

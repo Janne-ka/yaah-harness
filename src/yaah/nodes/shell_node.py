@@ -20,7 +20,7 @@ from typing import List, Optional, Union
 
 from ..core import Envelope, Kind, NodeConfig
 from ..cwd import carry_cwd, resolve_cwd
-from ._shell import _run
+from ._shell import _run, ShellTimeout
 
 
 class ShellNode:
@@ -42,10 +42,16 @@ class ShellNode:
     async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
         cwd = resolve_cwd(input, self._cwd_from, self._cwd)  # per-run worktree, else static cwd
         timeout = config.timeout if config.timeout is not None else self._timeout  # #13
-        code, text = await _run(self._command, cwd=cwd, timeout=timeout, shell=self._shell)
-        fields = {"exit_code": code, "ok": (code == 0), "stdout_tail": text[-self._tail:]}
-        if not self._tail_only:
-            fields["stdout"] = text
+        try:
+            code, text = await _run(self._command, cwd=cwd, timeout=timeout, shell=self._shell)
+            fields = {"exit_code": code, "ok": (code == 0), "stdout_tail": text[-self._tail:]}
+            if not self._tail_only:
+                fields["stdout"] = text
+        except ShellTimeout as t:
+            # a hang is a FAILURE, never exit 0 — surface it structurally (a
+            # distinct `timed_out` marker + exit 124) so the gate/downstream can
+            # tell a timeout apart from a real nonzero exit.
+            fields = {"exit_code": 124, "ok": False, "timed_out": True, "stdout_tail": t.note}
         # Forward the worktree path (so the next repo-bound stage stays in it) and
         # any explicitly-carried payload keys (e.g. the spec, on through to code).
         fields.update(carry_cwd(input, self._cwd_from))

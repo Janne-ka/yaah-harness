@@ -26,9 +26,12 @@ def _env(**payload):
 # ---- RenderNode -------------------------------------------------------------
 
 async def render_inline_fills_known_and_leaves_unknown() -> None:
-    node = RenderNode(template="Hi {{name}}, you owe {{amount}} — {{missing}}")
+    # allow_unfilled opts into the degrade path: known keys filled (non-str coerced
+    # via str()), unknown placeholder left literal. Without the flag this render
+    # FAILS (covered in test_silent_wrong.py) — the footgun is closed by default.
+    node = RenderNode(template="Hi {{name}}, you owe {{amount}} — {{missing}}",
+                      allow_unfilled=True)
     out = await node.invoke(_env(name="Ada", amount=42), CFG)
-    # known keys filled (non-str coerced via str()), unknown placeholder left intact
     assert out.payload["output"] == "Hi Ada, you owe 42 — {{missing}}"
     assert out.payload["path"] is None
 

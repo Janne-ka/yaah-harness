@@ -20,6 +20,7 @@ platforms = ["linux-64", "osx-64", "osx-arm64", "win-64"]
 
 [dependencies]
 python = ">=3.9"
+coverage = "*"   # run_tests.py enforces the [tool.coverage] fail_under floor (75%)
 # add a conda constraints package here to harden the adapter versions (optional)
 
 # The package itself: pure-Python, zero runtime deps, installed editable so the
@@ -39,7 +40,7 @@ litellm = "*"
 nats-py = "*"
 
 [feature.langfuse.dependencies]
-langfuse = "*"
+langfuse = ">=4"   # trace sink maps onto the v4 (OTEL) surface; v2 also handled if pinned <3
 
 [feature.http.dependencies]
 httpx = "*"

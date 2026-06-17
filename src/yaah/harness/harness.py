@@ -38,6 +38,11 @@ Outcome = Union[Done, Suspended, Cleared]
 
 _UNSET = object()  # "ttl argument not provided" — distinct from ttl=None (never expire)
 
+# Livelock backstop for the linear walk: a backward `branch` route or a runaway
+# feedback edge could spin `_drive`'s `while baton.stage is not None` forever. Far
+# above any real linear pipeline; overridable per-harness for tests.
+_MAX_STAGE_STEPS = 10000
+
 
 def _route_key(value: object) -> str:
     """Normalize a branch value to its route-key string. Route keys come from
@@ -55,6 +60,24 @@ def _safe_set(fut: "asyncio.Future", value: object) -> None:
     handlers so a NATS-thread dispatch can't race the harness loop."""
     if not fut.done():
         fut.set_result(value)
+
+
+# Substrings that mark a TRANSIENT, infrastructural fault — safe to retry because
+# it is pre-effect (the work has not happened): provider overload/rate-limit, a
+# gateway/timeout, a network blip, git/index-lock contention, NATS no-responders.
+# Conservative and domain-free; an unmatched error is treated as PERMANENT (fail
+# fast). Drives the separate error-retry budget in Harness._run_attempts.
+_TRANSIENT_SIGNALS = (
+    "429", "overloaded", "rate limit", "ratelimit", "503", "502", "504",
+    "timeout", "timed out", "temporarily unavailable", "service unavailable",
+    "connection reset", "connection refused", "connection aborted",
+    "no responders", "index.lock", "cannot lock ref", "unable to create",
+)
+
+
+def _is_transient(text: object) -> bool:
+    t = str(text or "").lower()
+    return any(sig in t for sig in _TRANSIENT_SIGNALS)
 
 
 # internal per-stage results (private to the run loop)
@@ -129,6 +152,30 @@ class Harness:
         self._fork = ForkCoordinator(self, comms=comms, clear_bus=self._clear_bus,
                                      envelopes=self._envelopes,
                                      tracer=self._tracer, clock=clock)
+        # Transient-fault retry policy (SEPARATE from max_attempts, see
+        # _run_attempts): an infrastructural blip retries with exponential
+        # backoff on its own budget (Stage.error_retries). `_sleep` is injectable
+        # so tests don't actually wait; base/cap bound the backoff curve.
+        self._sleep = asyncio.sleep
+        self._backoff_base = 0.5
+        self._backoff_cap = 8.0
+        self._max_steps = _MAX_STAGE_STEPS  # livelock backstop for _drive
+
+    def _backoff(self, n: int) -> float:
+        return min(self._backoff_base * (2 ** (n - 1)), self._backoff_cap)
+
+    @staticmethod
+    def _is_transient_verdict(verdict: Verdict) -> bool:
+        """A failed verdict whose failure looks like a transient infrastructural
+        fault (a node/transport ERROR carrying an overload/timeout/lock message).
+        Gates the separate error-retry budget in _run_attempts."""
+        return any(_is_transient((f.code or "") + " " + (f.message or ""))
+                   for f in verdict.failures)
+
+    @staticmethod
+    def _verdict_detail(verdict: Verdict) -> str:
+        return "; ".join("{}: {}".format(f.code, f.message)
+                         for f in verdict.failures) or "failed"
 
     async def sweep_expired(self) -> list:
         """Evict suspended batons past their own ttl (abandoned human gates).
@@ -215,8 +262,17 @@ class Harness:
         no-op when the baton was never saved — a run that finished without parking.)"""
         try:
             outcome = await self._drive(baton, input)
+        except StageFailed:
+            await self.batons.delete(baton.id)   # logical terminal — evict
+            raise
         except BaseException:
-            await self.batons.delete(baton.id)
+            # NON-logical failure (a transport/store blip, cancellation, an engine
+            # bug): do NOT evict. A baton lives in the store ONLY because it
+            # previously PARKED (suspended, awaiting a human) — so deleting it on an
+            # infrastructural error would nuke a resumable run and lose the human's
+            # pending decision (the blanket-delete bug). Leave it in its
+            # last-persisted state for a later resume / the TTL sweep; a still-running
+            # baton was never saved, so nothing leaks either way.
             raise
         if isinstance(outcome, Suspended):
             await self.batons.save(baton)  # parked — persist for resume()
@@ -262,10 +318,23 @@ class Harness:
             _status = "suspended"
         else:
             _status = "ok"
+        # Decision provenance: record the value that will drive this stage's branch
+        # route (it is already in the output payload at emit time) so the trace
+        # answers "why did it go there?" without re-deriving from transient payload.
+        route = None
+        out = getattr(result, "output", None)
+        if stage.branch and out is not None:
+            on = stage.branch.get("on")
+            if on is not None:
+                # distinguish an ABSENT routing key (a typo'd producer → every run
+                # silently takes the default) from a present value — a silent
+                # misroute is otherwise invisible in the trace.
+                route = ("<absent→default>" if on not in out.payload
+                         else _route_key(out.payload.get(on)))
         await self._spans.stage(stage.name, input, t0,
                                 status=_status,
                                 concerns=getattr(result, "concerns", None),
-                                output=getattr(result, "output", None))
+                                output=out, route=route)
         return result
 
     def _fold_sticky(self, stage_input: Envelope, stage_output: Envelope) -> None:
@@ -292,7 +361,17 @@ class Harness:
                 "code": "concern", "message": str(item), "fix_hint": ""}
 
     async def _drive(self, baton: Baton, input: Envelope) -> Outcome:
+        steps = 0
         while baton.stage is not None:
+            steps += 1
+            if steps > self._max_steps:
+                # a branch route cycles, or a feedback edge never settles — fail
+                # cleanly (StageFailed → evicts) instead of spinning forever.
+                raise StageFailed(baton.stage, Verdict.failed(Failure(
+                    "step_ceiling",
+                    "run exceeded {} stage transitions — a branch route likely "
+                    "cycles".format(self._max_steps),
+                    "check branch routes for a back-edge")), input)
             stage = self.graph.stages[baton.stage]
             if stage.fork:
                 # A fork PRODUCES the join's "clear" (the reduced result) as its
@@ -390,8 +469,8 @@ class Harness:
         place the retry/escalate policy lives; called by _run_stage with one of
         the producers below."""
         attempt = 0
+        errors = 0
         while True:
-            attempt += 1
             produced = await produce(stage, input)
             if isinstance(produced, _Suspend):
                 return produced  # a node chose to suspend (gate / await)
@@ -402,6 +481,19 @@ class Harness:
                 verdict, soft = pre_verdict, []
             if verdict.ok:
                 return _Pass(out, soft)
+            # TRANSIENT-FAULT tolerance on a SEPARATE budget (does NOT spend
+            # max_attempts): an infrastructural blip (provider overload/timeout,
+            # git index-lock) retries with backoff before it ever counts as a
+            # stage failure — so a transient can't fail a max_attempts:1 gate.
+            # Idempotent: each retry is a fresh request, and a transient fault is
+            # pre-effect. A PERMANENT fault falls straight through to the policy.
+            if errors < stage.error_retries and self._is_transient_verdict(verdict):
+                errors += 1
+                await self._spans.note(stage.name, input, status="error", attrs={
+                    "retry": "transient", "n": errors, "error": self._verdict_detail(verdict)})
+                await self._sleep(self._backoff(errors))
+                continue
+            attempt += 1
             if attempt >= stage.max_attempts:
                 if stage.escalate == "human":
                     # keep the failed artifact so resume can merge the decision onto
@@ -411,6 +503,11 @@ class Harness:
                 # (on_error) runs in _drive, OUTSIDE the clearable race (so a self-clear
                 # can't turn this failure into a Cleared).
                 raise StageFailed(stage.name, verdict, out)
+            # a real (logical) retry — record the failed attempt so the trace shows
+            # the trajectory, not just the final attempt (per-attempt observability).
+            await self._spans.note(stage.name, input, status="error", attrs={
+                "retry": "feedback" if stage.feedback else "retry",
+                "attempt": attempt, "error": self._verdict_detail(verdict)})
             if stage.feedback:
                 input = self._with_feedback(input, out, verdict)
 
@@ -455,12 +552,27 @@ class Harness:
             "node {!r} replied ERROR: {}".format(role, env.payload.get("error", env.payload)),
             "see the node's logs/trace for the exception; the error payload is the artifact"))
 
+    async def _safe_request(self, target: str, input: Envelope) -> Envelope:
+        """Request a node, CONVERGING the transports: an in-proc node that RAISES
+        becomes the same Kind.ERROR reply a remote `serve()` returns (the H3
+        convergence, finished for in-proc — `InProcessComms.request` does not
+        catch). So a node fault enters the retry / escalate / StageFailed path
+        with a traced span and a retained artifact instead of crashing the run as
+        a bare traceback. Only `Exception` is caught — `BaseException`
+        (cancellation, KeyboardInterrupt) propagates. The error repr feeds the
+        transient classifier (a network/lock blip then rides the error-retry
+        budget; a logic bug fails fast)."""
+        try:
+            return await self.comms.request(target, input)
+        except Exception as e:
+            return Envelope(Kind.ERROR, {"error": repr(e)}, dict(input.headers))
+
     async def _produce_single(self, stage: Stage, input: Envelope) -> Union["_Suspend", tuple]:
         """One attempt for a single-node stage: one request. An 'await' reply parks
         the stage, keeping what flowed INTO the gate so resume can merge the
         decision onto that artifact (early_review #18); an ERROR reply is a ready
         hard-fail verdict (H3). Used by _run_attempts."""
-        out = await self.comms.request(stage.node, input)
+        out = await self._safe_request(stage.node, input)
         await self._ingest_remote_trace(out)
         if out.kind == Kind.ERROR:  # remote handler raised — fail, don't validate as success
             return out, self._error_verdict(stage.node or stage.name, out)
@@ -600,7 +712,7 @@ class Harness:
         -> noted in the report, continues"), tagged with the validator role."""
         soft: List[dict] = []
         for role in stage.validators:  # cheap/deterministic first by list order
-            vout = await self.comms.request(role, out)
+            vout = await self._safe_request(role, out)
             await self._ingest_remote_trace(vout)  # R6 — validator may have traced too
             if vout.kind == Kind.ERROR:  # the VALIDATOR itself crashed remotely (H3):
                 # hard-fail carrying the actual error, not an empty no-status verdict

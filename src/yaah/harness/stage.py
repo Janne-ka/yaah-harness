@@ -22,6 +22,10 @@ class Stage:
                               # (e.g. a clear) as <id>:<correlation_id>. Defaults to `name`.
     validators: List[str] = field(default_factory=list)  # roles, run in order (cheap first)
     max_attempts: int = 1
+    error_retries: int = 2  # SEPARATE transient-fault budget (does NOT spend max_attempts):
+                            # an infrastructural node/transport fault (provider overload/timeout,
+                            # git index-lock) is retried-with-backoff this many times before it
+                            # counts as a stage failure — so a blip can't fail a max_attempts:1 gate.
     feedback: bool = False  # feed the verdict back into the retry input
     escalate: Optional[str] = None  # 'human' → suspend when attempts run out
     then: Optional[str] = None  # next stage name, or None to finish

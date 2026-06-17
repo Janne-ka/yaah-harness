@@ -32,14 +32,11 @@ async def main() -> None:
     r = await RenderNode(template="<h1>{{title}}</h1>").invoke(task, cfg)
     assert r.payload["output"] == "<h1>Eval Report</h1>", r.payload
 
-    # config.timeout is honored per-node: a slow command past the deadline raises
-    # (and the subprocess is killed) — early_review #13.
-    timed_out = False
-    try:
-        await ShellNode(["sleep", "5"]).invoke(task, NodeConfig(timeout=0.2))
-    except asyncio.TimeoutError:
-        timed_out = True
-    assert timed_out, "ShellNode must honor config.timeout"
+    # config.timeout is honored per-node: a slow command past the deadline is
+    # KILLED and surfaced STRUCTURALLY (fault-tolerance E4) — ok=False +
+    # timed_out=True (never exit 0), not a bare raise — early_review #13.
+    r = await ShellNode(["sleep", "5"]).invoke(task, NodeConfig(timeout=0.2))
+    assert r.payload.get("timed_out") is True and r.payload.get("ok") is False, r.payload
 
     print("ok")
 

@@ -1,0 +1,13 @@
+{
+  "transport": {"type": "inproc"},
+  "providers": {"fake": {"type": "fake_scripted", "by_model": {
+    "security": ["{\"finding\": \"no auth check on the delete path\"}"],
+    "perf":     ["{\"finding\": \"N+1 query in the list endpoint\"}"],
+    "style":    ["{\"finding\": \"inconsistent naming across the module\"}"]
+  }}},
+  "default_provider": "fake",
+  "state": {"type": "memory"},
+  "pipeline": "review.json",
+  "input": "fixtures/input.json",
+  "run": true
+}

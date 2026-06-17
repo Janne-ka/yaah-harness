@@ -103,6 +103,11 @@ class ForkCoordinator:
             excs = await self._spread(stage, input, ctx)
             await self._drain(ctx)
             if excs:  # H2 terminal case: a branch failure must not vanish into a task
+                for extra in excs[1:]:  # don't lose siblings — only excs[0] is raised
+                    await self._tracer.emit(Span.timed(
+                        "stage", corr=input.correlation_id, parent=stage.name,
+                        t0=self._clock(), t1=self._clock(), status="error",
+                        attrs={"stage": stage.name, "error": "fork_branch_failed: " + repr(extra)}))
                 raise excs[0]
             return ctx.result if ctx.result is not None else input
 
@@ -302,7 +307,20 @@ class ForkCoordinator:
         # gather the PARKED arrivals (branch -> payload) from the EnvelopeStore and reduce
         parked = await self._envelopes.list(join["addr"] + ":")
         arrived = {key.rsplit(":", 1)[-1]: env.payload for key, env in parked}
-        reduced = await self._reduce(stage, arrived)
+        try:
+            reduced = await self._reduce(stage, arrived)
+        except Exception as e:
+            # A broken `reduce` target used to vanish: this coordinator runs as a
+            # background task whose exception _drain retrieved-and-DISCARDED, so the
+            # fork saw only a MISSING clear and hung (or timed out misleadingly).
+            # Surface it as an explicit join error + error span instead of a silent hang.
+            await self._tracer.emit(Span.timed(
+                "stage", corr=join.get("corr") or "", parent=stage.name,
+                t0=self._clock(), t1=self._clock(), status="error",
+                attrs={"stage": stage.name, "error": "fanin_reduce_failed: " + repr(e)}))
+            await self._publish_join_error(stage, join)
+            await self._envelopes.flush(join["addr"] + ":")
+            return
         payload = dict(reduced) if isinstance(reduced, dict) else {"result": reduced}
         corr = join.get("corr") or ""
         topic = (stage.fanin or {}).get("clear_topic", "clear")

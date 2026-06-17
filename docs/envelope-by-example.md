@@ -109,7 +109,8 @@ holds.
    with no parse between them is the #1 authoring bug.
 3. **Only `carry`-listed keys survive an agent stage.** A payload-replacing
    transform must explicitly re-carry what downstream needs (the factory uses a
-   `_carry` helper). A dropped key surfaces as an empty `{{placeholder}}` far later.
+   `_carry` helper). A dropped key now fails the render (`render_unfilled_placeholders`)
+   rather than surfacing as an empty `{{placeholder}}` far later.
 4. **`feedback` is the standard retry channel.** Put `[{code, message, fix_hint}]`
    on `payload["feedback"]` and the next agent's prompt appends it automatically —
    that's how "return to sender with the judge's concerns" works without a custom

@@ -28,9 +28,22 @@ class SpanEmitter:
         self._tracer = tracer
         self._clock = clock
 
+    async def note(self, stage_name: str, input: Envelope, *,
+                   status: str, attrs: dict) -> None:
+        """Emit a point-in-time `stage` span (t0==t1) for an INTERMEDIATE event a
+        completed-stage span can't carry — a failed/retried attempt inside the
+        retry loop. Without this the trace collapsed a stage to its FINAL attempt:
+        a flaky stage that passed on try 3 looked identical to one that passed on
+        try 1 (observability blind spot — per-attempt history). One line per
+        retry, so the route waterfall shows the actual attempt trajectory."""
+        now = self._clock()
+        await self._tracer.emit(Span.timed(
+            "stage", corr=input.correlation_id, parent=input.id,
+            t0=now, t1=now, status=status, attrs={"stage": stage_name, **attrs}))
+
     async def stage(self, stage_name: str, input: Envelope, t0: float,
                     *, status: str, concerns: Optional[list] = None,
-                    output: Optional[Envelope] = None) -> None:
+                    output: Optional[Envelope] = None, route: Any = None) -> None:
         """Emit a `stage` span for a completed stage. Status reflects the stage
         outcome: 'ok' (passed), 'suspended' (parked at gate), 'cleared'
         (cancelled in-flight). Soft concerns (validators that flagged but
@@ -45,6 +58,12 @@ class SpanEmitter:
             attrs["concerns"] = len(concerns)
         if output is not None and isinstance(output.payload.get("exit_code"), int):
             attrs["exit_code"] = output.payload["exit_code"]
+        # Decision provenance: the value that DROVE this stage's branch route —
+        # the cheapest high-value observability win. Without it, "why did it park /
+        # rework / block?" was unanswerable (the branch key lived only in the
+        # transient payload, never a span).
+        if route is not None:
+            attrs["route"] = route
         await self._tracer.emit(Span.timed(
             "stage", corr=input.correlation_id, parent=input.id,
             t0=t0, t1=self._clock(), status=status, attrs=attrs))

@@ -26,14 +26,37 @@ def _strip_agent_opts(merged: Dict[str, Any]) -> None:
         merged.pop(key, None)
 
 
+def _as_dict(resp: Any) -> Dict[str, Any]:
+    """Normalize a litellm response to a plain dict before extraction.
+
+    The real SDK returns a `ModelResponse` (pydantic) whose `choices` items are
+    `Choices`/`Message` OBJECTS, not dicts — so the dict-style readers below would
+    silently see `{}` and return empty content. `model_dump()` (pydantic v2) /
+    `dict()` (v1) flatten it to nested dicts. Test stubs already pass dicts, which
+    pass through untouched."""
+    if isinstance(resp, dict):
+        return resp
+    for attr in ("model_dump", "dict"):
+        fn = getattr(resp, attr, None)
+        if callable(fn):
+            try:
+                d = fn()
+            except Exception:
+                continue
+            if isinstance(d, dict):
+                return d
+    return {}
+
+
 def _report_usage(on_usage: Optional[Callable[..., Any]], resp: Any, model: Optional[str]) -> None:
     """Feed the cost bridge (R4) from a litellm response. No-op if no callback
     (cost capture off) or the response carries no usage. litellm normalizes usage
     to prompt_tokens / completion_tokens across providers."""
     if on_usage is None:
         return
-    usage = (resp.get("usage") if isinstance(resp, dict) else None) or {}
-    resp_model = resp.get("model") if isinstance(resp, dict) else None
+    resp = _as_dict(resp)
+    usage = resp.get("usage") or {}
+    resp_model = resp.get("model")
     on_usage({"tokens_in": usage.get("prompt_tokens", 0),
               "tokens_out": usage.get("completion_tokens", 0),
               "model": resp_model or model})
@@ -109,7 +132,8 @@ class LiteLLMBackend:
 
 def _first_message(resp: Any) -> Dict[str, Any]:
     """The first choice's `message` dict, or {} on a malformed/empty response."""
-    if not isinstance(resp, dict):
+    resp = _as_dict(resp)
+    if not resp:
         return {}
     choices = resp.get("choices")
     if not isinstance(choices, list) or not choices:

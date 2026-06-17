@@ -1,6 +1,6 @@
 ---
 name: yaah-pipeline-authoring
-description: Use when the user wants a new or modified YAAH pipeline config — a `*-pipeline.json` (nodes + graph) and/or a `*.local.json` root. Not for editing engine code (use yaah-extending); for engine pipelines only.
+description: Use when the user wants a new or modified YAAH pipeline config — a `*-pipeline.json` (nodes + graph) and/or a `*.local.json` root. Not for editing engine code (use yaah-extending).
 ---
 
 # Authoring YAAH pipelines
@@ -15,13 +15,13 @@ A YAAH pipeline is two JSONs: a **pipeline** (`nodes` + `graph` of stages) and a
 
 - User asks: "build / write / scaffold a YAAH pipeline", "I want a pipeline that does X"
 - They have a workflow shape in mind but not the JSON
-- Not for: editing engine code (`yaah-extending`); the example app-specific pipelines (`an app-specific authoring skill`)
+- Not for: editing engine code (`yaah-extending`); an app-specific pipeline variant when your project ships its own authoring skill
 
 ## Knowledge base — read this when answering "which X?"
 
-`yaah/docs/module-catalog.md` is the **single source of truth** for node types, ports, adapters, validators, trace contributors/sinks, and model-initiated tools — auto-generated from `yaah/src/yaah/` by `yaah/scripts/build_catalog.py`. When the user asks "which node type for X?", "what args does FileDataSource take?", "which trace sink?" — look it up in the catalog, don't guess. If the catalog is stale, regenerate: `python3 yaah/scripts/build_catalog.py` (drift-free by construction — the code is the truth).
+`docs/module-catalog.md` is the **single source of truth** for node types, ports, adapters, validators, trace contributors/sinks, and model-initiated tools — auto-generated from `src/yaah/` by `scripts/build_catalog.py`. When the user asks "which node type for X?", "what args does FileDataSource take?", "which trace sink?" — look it up in the catalog, don't guess. If the catalog is stale, regenerate: `python3 scripts/build_catalog.py` (drift-free by construction — the code is the truth).
 
-**Root-config schema (R15):** `yaah/src/yaah/validate.py` is the single source of truth for what a root config may contain — `_ROOT_KEYS` (allowed top-level keys), `_TYPED_BLOCK_KEYS` / `_NAMED_MAP_KEYS` / `_STRING_KEYS` / `_BOOL_KEYS` (shape per key), `_TRACE_MODES` / `_TRANSPORT_TYPES` (enum values). Before handing the dev a root config, run it through `yaah.validate.validate_root(root)` mentally: any unknown key, bad shape, or bad enum surfaces with did-you-mean. This is the contract the runtime gates every load on, and it is what an LLM-generated root must pass cleanly.
+**Root-config schema (R15):** `src/yaah/validate.py` is the single source of truth for what a root config may contain — `_ROOT_KEYS` (allowed top-level keys), `_TYPED_BLOCK_KEYS` / `_NAMED_MAP_KEYS` / `_STRING_KEYS` / `_BOOL_KEYS` (shape per key), `_TRACE_MODES` / `_TRANSPORT_TYPES` (enum values). Before handing the dev a root config, run it through `yaah.validate.validate_root(root)` mentally: any unknown key, bad shape, or bad enum surfaces with did-you-mean. This is the contract the runtime gates every load on, and it is what an LLM-generated root must pass cleanly.
 
 **Seed base configs (R14-seed):** the seeds ship INSIDE the package (`src/yaah/configs/bases/`, carried in the wheel) so they're available whether yaah is a source sibling or a `pip install`:
 - `local.base.json` — inproc transport, memory state, console trace. Pick for **dev iteration / fixture-driven / CI smoke / QUICK START**.
@@ -51,92 +51,7 @@ Most devs want to copy a working thing first, customize second. **Open with the 
 
 > "Want the QUICK START (3-stage linear, fake backend, runs in 5 min) as a starting point, or shall I drive a Q&A for a custom shape?"
 
-### QUICK START — `hello-yaah/` (write verbatim; executed-and-verified 2026-06-10)
-
-A `summarize → check → parse → render` pipeline. 6 files, fake provider, one run command. Demonstrates the **full data-flow contract**: agent → `payload["raw"]` (a STRING) → validator (retry+feedback) → parse transform (raw → payload keys) → render, plus the typed-block root shape and console trace.
-
-> **The contract that bites everyone:** an agent's output lands in `payload["raw"]` as a string. `json_object` only *validates* it — nothing merges it into the payload. Without a parse transform, a downstream `render`/`branch` sees no keys and "succeeds" with un-interpolated `{{placeholders}}` (exit 0, wrong output). Every agent→render or agent→branch edge needs a parse step. See [`yaah/docs/envelope-by-example.md`](../../yaah/docs/envelope-by-example.md) for the real envelope at each hop (what a node reads/writes) and [`yaah/docs/why-yaah.md`](../../yaah/docs/why-yaah.md) for when this engine is the right tool.
-
-```
-hello-yaah/
-├── starter.json                # pipeline (4 stages)
-├── starter.local.json          # root (inproc, fake, console trace)
-├── hello_transforms.py         # the parse fn (imported from the run dir)
-├── prompts/summarize.md        # agent prompt
-├── fixtures/input.json         # one envelope
-└── templates/output.html       # mustache target
-```
-
-**`starter.json`:**
-```json
-{
-  "nodes": {
-    "role:summarize": {"type": "agent", "prompt": "file:summarize",
-                       "model": "fake:summarize", "stage": "summarize"},
-    "role:check":     {"type": "json_object", "required": ["summary"]},
-    "role:parse":     {"type": "transform", "target": "fn:hello_transforms:parse",
-                       "call": "envelope"},
-    "role:render":    {"type": "render", "template_file": "templates/output.html",
-                       "out": "summary.html"}
-  },
-  "graph": {
-    "start": "summarize",
-    "stages": {
-      "summarize": {"node": "role:summarize", "validators": ["role:check"],
-                    "max_attempts": 3, "feedback": true, "then": "parse"},
-      "parse":     {"node": "role:parse", "then": "render"},
-      "render":    {"node": "role:render", "then": null}
-    }
-  }
-}
-```
-
-**`hello_transforms.py`** — the `call: "envelope"` signature is `fn(envelope, config) -> dict`; the returned dict SPREADS over the payload top-level (that's how `summary` becomes visible to `render` and to any `branch`):
-```python
-import json
-
-def parse(envelope, config):
-    return json.loads(envelope.payload.get("raw", "{}"))
-```
-
-**`starter.local.json`** (no `trace` block needed — the harness defaults to a console sink so first runs are visible by default; add `trace: {sink: [...]}` only when you want file/langfuse/progress sinks, or `trace: {sink: []}` to opt out). The scripted table is `by_model`: model name → **LIST of replies, one per attempt** (a bare string is accepted as a single reply; use a list to script retries):
-```json
-{
-  "transport": {"type": "inproc"},
-  "providers": {"fake": {"type": "fake_scripted",
-                         "by_model": {"summarize": ["{\"summary\":\"hello\"}"]}}},
-  "default_provider": "fake",
-  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
-  "default_prompt_source": "file",
-  "state": {"type": "memory"},
-  "pipeline": "starter.json",
-  "input": "fixtures/input.json",
-  "run": true
-}
-```
-
-- `prompts/summarize.md` → `Summarize {{text}} in one sentence. Return JSON: {"summary": "..."}`
-- `fixtures/input.json` → `{"text": "YAAH is a domain-free harness."}`
-- `templates/output.html` → `<h1>{{summary}}</h1>`
-
-Expected: `[trace]` lines for all four stages, exit 0, and `summary.html` containing `<h1>hello</h1>` (if you see a literal `{{summary}}` instead, your parse stage is missing or misordered).
-
-**Run** — install yaah once, then invoke `yaah` directly:
-```bash
-# one-time install (editable, from the yaah/ source dir)
-( cd /abs/path/to/ai-assisted-coding-library/yaah && pip install -e . )
-
-# every run
-cd hello-yaah && yaah starter.local.json
-```
-
-If you can't install (read-only checkout, vendor restrictions), the equivalent uninstalled invocation still works:
-```bash
-REPO=/abs/path/to/ai-assisted-coding-library
-PYTHONPATH="$REPO/yaah/src" python3 -m yaah.runtime starter.local.json
-```
-
-To go real: add a `claude` provider (`{"type": "claude_cli"}`), swap `fake:summarize` → `claude:claude-sonnet-4-6`. Same pipeline.
+If they accept, **read [`quickstart.md`](quickstart.md)** in this skill dir and write the `hello-yaah/` scaffold verbatim — it's the runnable starter (a *running* concern, kept out of this file so the authoring scope stays sharp). The data-flow contract it teaches (agent output is a STRING in `payload["raw"]`; every agent→render/branch edge needs a parse transform) is the #1 authoring trap — it's also the first row of Common mistakes below.
 
 ## The Q&A (in order — **skip what the user already specified**)
 
@@ -167,74 +82,25 @@ The `expose:` / `filters:` / `reasoning` knobs are security-sensitive; don't def
 
 If the user asks for any of these without context, ASK what they're trying to expose and why; don't just write `expose: {payload: ["*"]}`.
 
-**Canonical constraint text** lives in `yaah/docs/module-catalog.md` § *Security-relevant constraints (from `Args:` docstrings)* — auto-extracted from the source. The table above is a quick reference; the catalog is the truth.
+**Canonical constraint text** lives in `docs/module-catalog.md` § *Security-relevant constraints (from `Args:` docstrings)* — auto-extracted from the source. The table above is a quick reference; the catalog is the truth.
 
 Then **draft, show, ask "what to adjust"**, write.
 
 ## Quick reference
 
-**Smallest viable pipeline** (linear, one agent, one validator, one parse transform — same shape as the QUICK START; the parse stage is not optional, see the data-flow contract above):
-```json
-{
-  "nodes": {
-    "role:think":  {"type": "agent", "prompt": "file:my-prompt", "model": "claude:claude-sonnet-4-6", "stage": "think"},
-    "role:check":  {"type": "json_object"},
-    "role:parse":  {"type": "transform", "target": "fn:my_transforms:parse", "call": "envelope"}
-  },
-  "graph": {
-    "start": "think",
-    "stages": {
-      "think": {"node": "role:think", "validators": ["role:check"], "max_attempts": 3, "feedback": true, "then": "parse"},
-      "parse": {"node": "role:parse", "then": null}
-    }
-  }
-}
-```
-(`my_transforms.py` lives next to the root config and is imported from the run dir; `fn:` targets in config are trusted code — never point one at anything payload-derived.)
-
-**Fork (asymmetric A/B)** — see an A/B-fork pipeline example. Fan-out to **stage** names = fork; fan-in `expect:` lists the fork targets; `reduce:` is the comparison fn.
-
-**Fanout barrier** (same input → N parallel roles → merge) — see the app's pipeline config's review stage. Fan-out to **role** names = barrier; downstream reads `{results, roles}`.
-
-**Root config** template (the real shape — every field is a typed block, not a bare string):
-```json
-{
-  "transport": {"type": "inproc"},
-  "providers": {"claude": {"type": "claude_cli"}},
-  "default_provider": "claude",
-  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
-  "default_prompt_source": "file",
-  "state": {"type": "memory"},
-  "pipeline": "my-pipeline.json",
-  "input": "fixtures/my-input.json",
-  "run": true
-}
-```
-Add `data_sources` (e.g. `git_diff`), a `trace` block (`mode`/`capture`/`sink:[…]`), and `decisions:{…}` (auto-approve gates) when you need them. Read an example root config and an example root config as reference roots.
-
-## Fake-mode shapes — pick the smallest one that fits
-
-The harness gives you three escalating ways to swap in fakes. **Default to the cheapest** that covers what differs.
-
-| Shape | When | What it looks like |
-|---|---|---|
-| **`--fake` flag + inline `_fake` block** | Only the root differs (providers/state). Pipeline is shared. *Most trivial cases.* | One root file. Add `"_fake": {"providers": {...fake_scripted...}, "default_provider": "..."}` to the root, then `yaah <root> --fake` swaps the matching top-level keys in. The `_`-prefix means the block is ignored without the flag. |
-| **`.fake.json` pipeline overlay (`_extends`)** | The pipeline ALSO differs (model swaps per role) — most non-trivial pipelines. | `<name>.fake.json` is `{"_extends": "<name>.json", "nodes": {"role:x": {"model": "fake:..."}}}`. Reference it from a fake root. A fake overlay is typically a fraction of the canonical's size — overlay only the deltas. |
-| **Two root files (`.claude.local.json` + `.fake.local.json` with `_extends`)** | Trace sinks / state / multiple host-specific knobs also differ. | The fake root `_extends` the claude root and overrides as needed. Use only when the other two shapes don't reach. |
-
-**Drift surface** — adding `max_attempts: N` to a canonical stage doesn't auto-propagate to the overlay; verify the overlay doesn't redefine that key.
+Concrete shapes to adapt — smallest-viable linear, fork (asymmetric A/B), fanout barrier, the root-config template, and the three fake-mode shapes — live in [`pipeline-reference.md`](pipeline-reference.md). Read it when you need a template to copy; the judgment for *which* shape is the Q&A above. Two rules that travel with every template: the parse stage between an agent and any render/branch is **not optional**, and `fn:` targets in config are **trusted code** — never point one at anything payload-derived.
 
 ## Common mistakes
 
 | Mistake | Reality |
 |---|---|
-| Agent → render/branch with no parse stage between | Agent output is a STRING in `payload["raw"]`; `json_object` validates, never merges. Render emits literal `{{placeholders}}` and exits 0 — silent wrong output. Add the parse transform. |
+| Agent → render/branch with no parse stage between | Agent output is a STRING in `payload["raw"]`; `json_object` validates, never merges. Render now FAILS (`render_unfilled_placeholders`) pointing at the missing parse — it no longer ships literal `{{placeholders}}` at exit 0. Add the parse transform (or `allow_unfilled:true` for genuinely optional fields). |
 | Expecting a `by_model` string to script multiple attempts | A bare string = ONE reply (then exhaustion → default `""`). To script a refix loop, use a list — one entry per attempt. |
 | `call: "envelope"` fn with the wrong signature | It's `fn(envelope, config) -> dict` (dict spreads over payload). `fn(payload)` dies with a raw `TypeError` traceback, not a friendly message. |
 | Inventing a new node type to "encapsulate" a sub-graph | `fork` + `fanin` + `transform` likely compose it. `subpipeline` was added and retired in 24h for this reason. |
 | `human_gate` with only `then`, no `branch` on `decision` | It's a pause, not a gate. Human's reject is ignored. |
 | Validators with `max_attempts: 0` or no `feedback` | No retry / no refix loop. The agent gets one shot. |
-| Hardcoding `work_tmp/...` or repo specifics in the pipeline | Adaptation layer leaks. Keep host-specifics in the root config. |
+| Hardcoding work-tmp dirs or repo specifics in the pipeline | Adaptation layer leaks. Keep host-specifics in the root config. |
 | Skipping the `.fake.json` overlay | No CI scaffold. The next time you change the graph, drift starts. |
 | Copying the canonical graph into the `.fake` instead of `_extends` overlay | 3× the bytes, 3× the drift surface. Use `_extends`. |
 | Asking 9 questions when the user already gave the shape | Skip what they already specified. The Q&A header says this — apply it. |
@@ -242,7 +108,7 @@ The harness gives you three escalating ways to swap in fakes. **Default to the c
 | Writing root config with bare strings (`"transport": "inproc"`) | `yaah.validate.validate_root` catches this with a JSON-shaped rewrite suggestion (`rewrite as {"type": "inproc"}`), but emit the typed-block shape first so you don't see the error. Real roots use typed blocks (`{"type": "inproc"}`) and `providers`/`prompt_sources`/`state` are dicts of typed-blocks. |
 | Misspelling `trace.mode`, `transport.type`, `state.type`, `trace.capture`, or `trace.sinks[].type` | `validate_root` surfaces these at LOAD with `did you mean 'X'?` (R15). Use only values listed in `validate.py` / the module catalog. |
 | Setting `trace.capture` but `trace.mode: "none"` | Captures get silently dropped. `validate_root` surfaces this cross-field mistake — pick `mode: "tracer"` or remove `capture`. |
-| Maintaining two near-duplicate roots when only providers differ | Use the `_fake` block + `--fake` flag (see Fake-mode shapes). One root file. |
+| Maintaining two near-duplicate roots when only providers differ | Use the `_fake` block + `--fake` flag (see fake-mode shapes in [`pipeline-reference.md`](pipeline-reference.md)). One root file. |
 
 ## Before handoff — generate → validate → repair (R16)
 
@@ -284,6 +150,6 @@ Write four files plus the supporting tree, then **close with both** (1) a plain-
 ```bash
 yaah <name>.fake.local.json
 ```
-(After `pip install -e <repo>/yaah`. If uninstalled, prepend `PYTHONPATH=<abs>/yaah/src` and replace `yaah` with `python3 -m yaah.runtime`.)
+(After `pip install -e <repo>`. If uninstalled, prepend `PYTHONPATH=<abs>/src` and replace `yaah` with `python3 -m yaah.runtime`.)
 
 **Inspect first if curious about defaults:** `yaah <name>.fake.local.json --explain` (R13) prints the effective config with per-key provenance — `(user)` / `(extends:<base>)` / `(fake)` / `(default)` — and validates it. Useful when a dev asks "where did `trace.mode: tracer` come from?".

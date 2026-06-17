@@ -1,0 +1,20 @@
+{
+  "nodes": {
+    "role:summarize": {"type": "agent", "prompt": "file:summarize",
+                       "model": "fake:summarize", "stage": "summarize"},
+    "role:check":     {"type": "json_object", "required": ["summary"]},
+    "role:parse":     {"type": "transform", "target": "fn:hello_transforms:parse",
+                       "call": "envelope"},
+    "role:render":    {"type": "render", "template_file": "templates/output.html",
+                       "out": "summary.html"}
+  },
+  "graph": {
+    "start": "summarize",
+    "stages": {
+      "summarize": {"node": "role:summarize", "validators": ["role:check"],
+                    "max_attempts": 3, "feedback": true, "then": "parse"},
+      "parse":     {"node": "role:parse", "then": "render"},
+      "render":    {"node": "role:render", "then": null}
+    }
+  }
+}

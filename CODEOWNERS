@@ -1,0 +1,5 @@
+# Code owners — GitHub requests review from the owner of any path a PR touches.
+# Everything falls to the maintainer until adapter owners are named.
+# See GOVERNANCE.md for how roles change (recorded as an ADR).
+
+*       @Janne-ka

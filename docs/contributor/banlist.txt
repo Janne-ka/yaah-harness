@@ -1,0 +1,34 @@
+# Domain banlist (public)
+#
+# Words that must not appear in src/yaah/. They are app-specific terms that would
+# leak domain knowledge into the engine. If a word here turns out to be a generic
+# concept the engine genuinely needs, open an ADR instead of silently removing it.
+#
+# Format: one word per line. Comments start with '#'. Matching is case-insensitive
+# and whole-word (\b<word>\b), scanning ALL text in changed src/yaah/ files
+# (comments included) — so a term can only be listed if it appears nowhere in the
+# engine today.
+#
+# This file is PUBLIC. A consuming app's or company's proper nouns must NOT go here
+# — listing a secret string in a published file leaks it. Those live in the
+# gitignored `banlist.local.txt` beside this file (the checker unions both); they
+# travel only with the checkout that needs them.
+#
+# Grow it organically: add a term the first time a contribution tries to introduce
+# it into the engine and review catches it.
+
+# --- active: generic, non-identifying domain-leak guards ---------------------
+merge_request
+respec
+
+# --- deliberately NOT listed -------------------------------------------------
+# These read as domain-flavoured but already appear in LEGITIMATE engine prose, so
+# a whole-word grep can't separate a real leak from an illustrative comment. They
+# stay guarded by human review / ADR, not by this file:
+#   spec     — generic config / NodeConfig "spec" (the build layer's word)
+#   factory  — runtime_factories / builder factories (generic)
+#   RED GREEN — shell_check / validator docstrings explain the gate pattern
+#              generically (e.g. "the RED gate uses expect_nonzero")
+#   tenant   — "single-tenant" / "per-tenant" appear as generic multi-tenancy notes
+# If one of these starts appearing as an IDENTIFIER rather than a comment, that is
+# a real leak — open an ADR.

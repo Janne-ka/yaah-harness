@@ -14,8 +14,8 @@
 
   <!-- APPLICATION (domain) -->
   <rect x="48" y="74" width="556" height="58" rx="6" fill="#fde2c4" stroke="#e0892f" stroke-width="1.5"/>
-  <text x="60" y="98" font-size="15" font-weight="700" fill="#7a4a10">APPLICATION — s_factory</text>
-  <text x="60" y="118" font-size="12" fill="#7a4a10">pipeline graph (factory-pipeline.json) · prompts · transforms.py · domain validators · report templates</text>
+  <text x="60" y="98" font-size="15" font-weight="700" fill="#7a4a10">APPLICATION — an app</text>
+  <text x="60" y="118" font-size="12" fill="#7a4a10">pipeline graph (pipeline.json) · prompts · transforms.py · domain validators · report templates</text>
 
   <!-- ENGINE bracket label -->
   <text x="592" y="310" font-size="12" font-weight="700" fill="#3a5e88" transform="rotate(-90 592 310)" text-anchor="middle">ENGINE</text>

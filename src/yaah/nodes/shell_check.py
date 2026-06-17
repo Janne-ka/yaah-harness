@@ -15,7 +15,7 @@ from typing import List, Optional, Union
 
 from ..core import Envelope, Failure, NodeConfig, Verdict
 from ..cwd import resolve_cwd
-from ._shell import _run
+from ._shell import _run, ShellTimeout
 
 
 class ShellCheck:
@@ -34,7 +34,12 @@ class ShellCheck:
     async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
         cwd = resolve_cwd(input, self._cwd_from, self._cwd)  # per-run worktree, else static cwd
         timeout = config.timeout if config.timeout is not None else self._timeout  # #13
-        code, text = await _run(self._command, cwd=cwd, timeout=timeout, shell=self._shell)
+        try:
+            code, text = await _run(self._command, cwd=cwd, timeout=timeout, shell=self._shell)
+        except ShellTimeout as t:
+            # a timeout is NEVER a pass — not even for an expect_nonzero (RED) gate,
+            # which would otherwise read a hang as 'tests failed as required'.
+            return Verdict.failed(Failure("shell_timeout", t.note, "")).to_envelope(input)
         ok = (code != 0) if self._expect_nonzero else (code == self._expect)
         if ok:
             return Verdict.passed().to_envelope(input)

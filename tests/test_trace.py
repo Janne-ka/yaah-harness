@@ -274,6 +274,53 @@ async def scenario_langfuse_sink_mapping() -> None:
     assert len(stub.traces) == 1
 
 
+async def scenario_langfuse_v4_mapping() -> None:
+    # The v4 (OpenTelemetry) client surface: start_observation(as_type=...) -> obs,
+    # obs.end(). Detected by capability, so this stub (no .trace) takes the v4 path.
+    from yaah.adapters.trace import LangfuseTraceSink
+
+    ended = []
+
+    class _Obs:
+        def __init__(self, as_type):
+            self.as_type = as_type
+
+        def end(self):
+            ended.append(self.as_type)
+
+    class StubV4:
+        def __init__(self):
+            self.calls = []
+
+        def start_observation(self, **kw):
+            self.calls.append(kw)
+            return _Obs(kw.get("as_type"))
+
+    stub = StubV4()
+    sink = LangfuseTraceSink(client=stub)
+    corr = "abcd1234" * 4  # 32-hex -> a valid OTel trace id
+    await sink.handle(Envelope("event", {"name": "stage", "corr": corr,
+                                         "stage": "review", "status": "ok"}))
+    await sink.handle(Envelope("event", {"name": "model_call", "corr": corr,
+                                         "model": "claude", "tokens_in": 10, "tokens_out": 2}))
+
+    assert [c["as_type"] for c in stub.calls] == ["span", "generation"]
+    span_call, gen_call = stub.calls
+    assert span_call["name"] == "review"
+    assert span_call["trace_context"] == {"trace_id": corr}
+    assert gen_call["model"] == "claude"
+    assert gen_call["usage_details"] == {"input": 10, "output": 2}  # Langfuse computes $
+    assert gen_call["trace_context"] == {"trace_id": corr}
+    assert ended == ["span", "generation"]                          # every obs .end()ed
+    # a non-OTel corr -> no trace_context (let the SDK mint its own id), no crash
+    stub.calls.clear()
+    await sink.handle(Envelope("event", {"name": "stage", "corr": "run-1"}))
+    assert "trace_context" not in stub.calls[0]
+    # a record with no corr is ignored
+    await sink.handle(Envelope("event", {"name": "stage"}))
+    assert len(stub.calls) == 1
+
+
 async def scenario_emit_through_harness() -> None:
     # a one-stage agent pipeline, traced with phase+cost via build(tracer=)
     config = {
@@ -347,6 +394,7 @@ async def main() -> None:
     await scenario_console_sink()
     await scenario_file_sink_appends()
     await scenario_langfuse_sink_mapping()
+    await scenario_langfuse_v4_mapping()
     await scenario_emit_through_harness()
     await scenario_bad_sink_doesnt_abort_run()
     await scenario_cost_off_skips_gathering()
