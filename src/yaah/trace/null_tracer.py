@@ -12,7 +12,7 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, FrozenSet, List
+from typing import Any, Dict, FrozenSet, List, Optional
 
 from .span import Span
 
@@ -29,3 +29,6 @@ class NullTracer:
 
     async def ingest(self, records: List[Dict[str, Any]]) -> None:
         return None  # tracing off — drop remote records too (R6)
+
+    def last_model_call_span(self, correlation_id: str) -> Optional[Dict[str, Any]]:
+        return None  # ADR-0003: tracing off — no span to surface to attachers

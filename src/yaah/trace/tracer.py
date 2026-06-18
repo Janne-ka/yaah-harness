@@ -25,7 +25,7 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, FrozenSet, List, Protocol, runtime_checkable
+from typing import Any, Dict, FrozenSet, List, Optional, Protocol, runtime_checkable
 
 from .span import Span
 
@@ -53,4 +53,14 @@ class Tracer(Protocol):
         delivery — Bus republishes, Envelope appends to its own buffer, Null drops.
         Records were projected through contributors at emit time; ingest skips
         re-projection."""
+        ...
+
+    def last_model_call_span(self, correlation_id: str) -> Optional[Dict[str, Any]]:
+        """Return the most recent `model_call` projected record for this corr, or
+        None if no such span is available. ADR-0003 — the seam AttachingAgent
+        reads from. Sync (no I/O — pure local-state read). Per-corr lookup is
+        mandatory: in concurrent runs (R12 broker, nested agents) the tracer's
+        flat span buffer holds spans from many correlations. NullTracer always
+        returns None; BusTracer keeps a tiny per-corr last-span dict; Recording
+        and Envelope iterate their existing buffers."""
         ...

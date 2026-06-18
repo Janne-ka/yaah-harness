@@ -65,7 +65,7 @@ def _build_agent(spec: Dict[str, Any], ctx: BuildContext) -> Node:
         from ..filter_factories import build_filter
         envelope_filters = {name: build_filter(s, comms=ctx.comms)
                             for name, s in filters_spec.items()}
-    return Agent(
+    agent = Agent(
         ctx.backend,
         template=template,
         prompt_source=ctx.prompt_source,
@@ -86,6 +86,49 @@ def _build_agent(spec: Dict[str, Any], ctx: BuildContext) -> Node:
         broker=spec.get("broker"),                    # R12: node role for the fuzzy context broker
         envelope_filters=envelope_filters,             # R10: name->Filter, available via envelope_get's `filter:` arg
     )
+    # ADR-0003: opt-in `attach: [...]` wraps the agent so attachers can merge
+    # post-invoke data (tokens/usage/etc.) from the tracer's last span onto
+    # the output payload. Engine ships zero built-ins; items are `fn:` refs.
+    attach_spec = spec.get("attach")
+    if attach_spec:
+        from ..agents.attaching_agent import AttachingAgent
+        from ..agents.attacher import Attacher
+        from ..external_call import import_callable
+        attachers = []
+        for i, item in enumerate(attach_spec):
+            if not isinstance(item, str) or not item.startswith("fn:"):
+                raise ValueError(
+                    "agent 'attach[{}]' must be a 'fn:module:func' string "
+                    "(got {!r}); attachers ship in consumer code per ADR-0003".format(
+                        i, item))
+            cls = import_callable(item[len("fn:"):])
+            if not (isinstance(cls, type) and issubclass(cls, Attacher)):
+                raise ValueError(
+                    "agent 'attach[{}]' = {!r} resolved to {!r}, expected a "
+                    "subclass of yaah.agents.attacher.Attacher".format(
+                        i, item, cls))
+            attachers.append(cls())
+        # capture-check: any required tracer capture missing → reject at LOAD
+        # with the exact `trace:` snippet to add. NullTracer has empty
+        # captures, so this also rejects "attach without tracing" without a
+        # separate presence check.
+        captures = set(getattr(ctx.tracer, "captures", ()) or ())
+        missing: Dict[str, list] = {}
+        for a in attachers:
+            for cap in a.requires_capture:
+                if cap not in captures:
+                    missing.setdefault(cap, []).append(a.name or type(a).__name__)
+        if missing:
+            needed = sorted(missing)
+            raise ValueError(
+                "agent uses attach: [...] but the tracer is missing required "
+                "captures {!r} for attachers {!r}. Add to your root config: "
+                '"trace": {{"mode": "tracer", "capture": {}, '
+                '"sinks": [{{"type": "console"}}]}}'.format(
+                    needed, {c: missing[c] for c in needed},
+                    sorted(captures | set(needed))))
+        return AttachingAgent(agent, attachers, ctx.tracer)
+    return agent
 
 
 def _build_json_object(spec: Dict[str, Any], ctx: BuildContext) -> Node:

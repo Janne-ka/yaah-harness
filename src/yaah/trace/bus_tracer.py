@@ -12,7 +12,7 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, FrozenSet, List, Sequence
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence
 
 from ..comms import Comms
 from ..core import Envelope, Kind
@@ -29,16 +29,42 @@ class BusTracer:
     # worker flood every subscribed sink.
     INGEST_MAX = 1000
 
+    # ADR-0003: cap on the per-corr "last model_call span" dict — bounded by
+    # concurrent corrs, not pipeline depth. The dict holds exactly one record
+    # per corr (the most recent model_call); when the count exceeds the cap,
+    # the oldest-inserted entry is dropped. Most pipelines run sequentially
+    # so 256 entries is generous; a runaway concurrent fan-out would still be
+    # bounded.
+    ATTACH_BUFFER_MAX = 256
+
     def __init__(self, comms: Comms, *, topic: str = "trace",
                  contributors: Sequence[TraceContributor] = ()) -> None:
         self._comms = comms
         self._topic = topic
         self._contributors = list(contributors)
         self.captures: FrozenSet[str] = frozenset(c.name for c in self._contributors)
+        # ADR-0003: one slot per corr for the most recent model_call record.
+        # Populated in emit (in addition to publishing). Read by attachers via
+        # last_model_call_span. Insertion-ordered (Python 3.7+ dict), so the
+        # oldest entry is evicted when the cap is hit.
+        self._last_model_call: Dict[str, Dict[str, Any]] = {}
 
     async def emit(self, span: Span) -> None:
         record = project(span, self._contributors)
         await self._comms.publish(self._topic, Envelope(Kind.EVENT, record))
+        # ADR-0003: remember model_call records per corr for attachers
+        if span.name == "model_call":
+            corr = record.get("corr") or ""
+            # if updating existing entry, preserve insertion order by removing
+            # the old key first; otherwise the cap-eviction would treat this as
+            # the freshest entry and evict a different (older) corr.
+            if corr in self._last_model_call:
+                del self._last_model_call[corr]
+            self._last_model_call[corr] = record
+            if len(self._last_model_call) > self.ATTACH_BUFFER_MAX:
+                # drop oldest-inserted entry (FIFO)
+                oldest = next(iter(self._last_model_call))
+                del self._last_model_call[oldest]
 
     async def drain(self, corr: str) -> List[Dict[str, Any]]:
         return []  # delivery is via the bus, not via envelope headers
@@ -56,3 +82,9 @@ class BusTracer:
             clean = clean[:kept] + [{"name": "trace_truncated", "dropped": dropped}]
         for record in clean:
             await self._comms.publish(self._topic, Envelope(Kind.EVENT, record))
+
+    def last_model_call_span(self, correlation_id: str) -> Optional[Dict[str, Any]]:
+        """ADR-0003: return the most recent model_call record for this corr from
+        the small per-corr buffer maintained by emit(). The buffer is bounded by
+        ATTACH_BUFFER_MAX (one slot per active corr)."""
+        return self._last_model_call.get(correlation_id)

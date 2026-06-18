@@ -24,7 +24,7 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, FrozenSet, List, Sequence
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence
 
 from .contributor import TraceContributor
 from .record import project
@@ -72,3 +72,17 @@ class EnvelopeTracer:
             if len(buf) > self._buffer_max:
                 buf.pop(0)
                 self._dropped[corr] = self._dropped.get(corr, 0) + 1
+
+    def last_model_call_span(self, correlation_id: str) -> Optional[Dict[str, Any]]:
+        """ADR-0003: scan this corr's per-corr buffer in reverse for the most
+        recent model_call span. The buffer is not cleared by this read — only
+        drain() clears, since attachers run BEFORE the agent's reply carriage
+        drain (the order: agent emits span → attacher reads span → agent
+        returns reply → carriage wrapper drains for the outgoing envelope)."""
+        buf = self._by_corr.get(correlation_id)
+        if not buf:
+            return None
+        for record in reversed(buf):
+            if record.get("name") == "model_call":
+                return record
+        return None
