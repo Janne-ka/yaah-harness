@@ -1,0 +1,11 @@
+{
+  "_doc": "Real-model config for the arch-drift example. Uses claude-sonnet-4-6 via the claude_cli backend. Requires `claude` on PATH (https://docs.claude.com/en/docs/claude-code) and the mermaid renderer `mmdc` on PATH (`npm install -g @mermaid-js/mermaid-cli`). See arch-drift.local.json for the offline / fake run.",
+  "_extends": "arch-drift.local.json",
+  "providers": {
+    "claude": {
+      "type": "claude_cli",
+      "binary": "claude"
+    }
+  },
+  "state": {"type": "file", "dir": ".arch-drift-state"}
+}
