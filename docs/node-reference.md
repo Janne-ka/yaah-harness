@@ -117,11 +117,18 @@ for haiku-class workers (unreliable JSON → validator + retry-with-feedback).
 ## `human_gate` — park for a decision
 
 `ask` (template, `{{key}}` filled from the payload — what the mailbox shows),
-`awaiting` (tag, default `"human"`). Returns an AWAIT envelope; the harness
-parks the baton (artifact + the gate's rendered question; the gate's keys win a
-collision) until `resume()` merges the decision payload back (decision keys
-win). Route the decision with `branch: {on: "decision", ...}` — a gate with
-only `then` is a pause, not a gate.
+`awaiting` (tag, default `"human"`), `form` (optional — names a generic
+decision shape; one of `approve` / `approve_or_revise` / `free_text` /
+`json_schema`), `decision_schema` (required iff `form: "json_schema"`; inline
+JSON Schema for the one-off escape hatch — forbidden with the built-in forms).
+Returns an AWAIT envelope; the harness parks the baton (artifact + the gate's
+rendered question; the gate's keys win a collision) until `resume()` merges the
+decision payload back (decision keys win). Route the decision with
+`branch: {on: "decision", ...}` — a gate with only `then` is a pause, not a
+gate. When `form` is declared, `yaah baton-schema <root> <baton_id>` surfaces
+the matching JSON Schema so a driver skill composes `decision.json`
+mechanically; see [decision-forms.md](decision-forms.md) for the catalog and
+the extension story.
 
 ## `worktree` — git worktree isolation
 

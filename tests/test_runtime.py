@@ -188,7 +188,7 @@ def scenario_cli_parser() -> None:
     from yaah.runtime import _parse_cli
 
     assert _parse_cli(["root.json"]) == {"action": "run", "root": "root.json", "fake": False, "debug": False}
-    assert _parse_cli(["root.json", "--list"]) == {"action": "list", "root": "root.json", "fake": False, "debug": False}
+    assert _parse_cli(["root.json", "--list"]) == {"action": "list", "root": "root.json", "fake": False, "debug": False, "json": False}
     assert _parse_cli(["root.json", "--clear"]) == {"action": "clear", "root": "root.json", "fake": False, "debug": False}
     assert _parse_cli(["root.json", "--resume", "B"]) == {
         "action": "resume", "root": "root.json", "fake": False, "debug": False,
@@ -200,8 +200,8 @@ def scenario_cli_parser() -> None:
     # --fake / --debug are order-independent and compose with each action
     assert _parse_cli(["root.json", "--fake"]) == {"action": "run", "root": "root.json", "fake": True, "debug": False}
     assert _parse_cli(["root.json", "--debug"]) == {"action": "run", "root": "root.json", "fake": False, "debug": True}
-    assert _parse_cli(["root.json", "--fake", "--list"]) == {"action": "list", "root": "root.json", "fake": True, "debug": False}
-    assert _parse_cli(["root.json", "--list", "--fake"]) == {"action": "list", "root": "root.json", "fake": True, "debug": False}
+    assert _parse_cli(["root.json", "--fake", "--list"]) == {"action": "list", "root": "root.json", "fake": True, "debug": False, "json": False}
+    assert _parse_cli(["root.json", "--list", "--fake"]) == {"action": "list", "root": "root.json", "fake": True, "debug": False, "json": False}
     assert _parse_cli(["root.json", "--debug", "--fake", "--resume", "B"]) == {
         "action": "resume", "root": "root.json", "fake": True, "debug": True,
         "baton_id": "B", "decision_file": None}

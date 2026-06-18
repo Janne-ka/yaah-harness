@@ -99,7 +99,29 @@ def _build_json_schema(spec: Dict[str, Any], ctx: BuildContext) -> Node:
 
 
 def _build_human_gate(spec: Dict[str, Any], ctx: BuildContext) -> Node:
-    return HumanGate(ask=spec.get("ask", ""), awaiting=spec.get("awaiting"))
+    # `form` declares a generic decision shape from harness.decision_forms; the
+    # CLI's `yaah baton-schema` surfaces it to driver skills. Validate at LOAD —
+    # an unknown form or a misconfigured json_schema escape hatch is a config
+    # bug, not a run-time event. (Both belong in this builder because validate.py
+    # checks ROOT config only; per-node spec validation lives where the node is
+    # built — same pattern as agent/shell/render.)
+    from ..harness.decision_forms import FORMS
+    form = spec.get("form")
+    decision_schema = spec.get("decision_schema")
+    if form is not None and form not in FORMS:
+        raise ValueError(
+            "human_gate 'form' = {!r} is not a known decision form; known: {}".format(
+                form, sorted(FORMS)))
+    if form == "json_schema" and decision_schema is None:
+        raise ValueError(
+            "human_gate form 'json_schema' requires an inline 'decision_schema' "
+            "(the escape hatch's payload)")
+    if form != "json_schema" and decision_schema is not None:
+        raise ValueError(
+            "human_gate 'decision_schema' is only allowed when form == 'json_schema' "
+            "(got form={!r}) — for a built-in form, omit decision_schema".format(form))
+    return HumanGate(ask=spec.get("ask", ""), awaiting=spec.get("awaiting"),
+                     form=form, decision_schema=decision_schema)
 
 
 def _build_shell(spec: Dict[str, Any], ctx: BuildContext) -> Node:

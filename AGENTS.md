@@ -68,6 +68,35 @@ every third-party library is an opt-in adapter.
 - **No comments stating WHAT** (names do that) and no error handling for impossible
   internal cases — validate only at boundaries.
 
+## Engine boundary — what `{base_dir}` is, what yaah does NOT own
+
+Two misunderstandings that consumer-side agents recur to. Read this once and
+don't propose either as a "fix":
+
+- **`{base_dir}` is agent-tool-only by design, not by oversight.** The
+  substitution lives in `build/builders.py::_build_agent::_expand`, applied
+  only to `tools[*].usage` and `allowed_tools`. Reason in the file: tool
+  scripts ship beside the config, but a repo-bound agent runs with `cwd` in a
+  task worktree — the path must be **absolute at runtime yet relocatable in
+  the source file**. Other node configs don't have this tension: paths in
+  `state.dir`, prompt-source `dir`, file-data `dir`, etc. are resolved via
+  `_rel(base, …)` at construction time in `runtime_factories.py`, so they're
+  already relative-to-config without any `{…}` syntax. Generalizing
+  `{base_dir}` to all configs would add engine surface for no problem the
+  engine has.
+- **There is no `run_dir`, `task_dir`, or "current run's directory"
+  concept in the engine — and there won't be one.** `state.dir` is a string
+  passed to the `FileStore` adapter (`runtime_factories.py:289`); the engine
+  has no opinion about its parent, its siblings, or how a consumer nests
+  per-task artifacts under it. Proposals to add `{run_dir}` (defined as
+  "`state.dir`'s parent" or similar) are domain leaks: they bake an
+  application's tree-shape convention into the engine. The consumer owns its
+  filesystem layout — period. If a consumer wants templated paths in its own
+  transforms, it implements the templating in its own transform code.
+
+If you find yourself wanting either, the right move is in **the consumer's
+config or transform code**, not in `src/yaah/`.
+
 ## Security — the trust boundary is implicit and undefended
 
 - `fn:module:func` in config is **executed** — config is trusted code; a

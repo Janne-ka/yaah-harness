@@ -221,11 +221,31 @@ def _print_concerns(concerns: list) -> None:
         print(line)
 
 
-async def list_gates(root: Dict[str, Any], base: str) -> None:
+def _baton_json(b: "Baton") -> Dict[str, Any]:
+    """The mailbox-view JSON shape for one suspended baton. Stable contract for
+    driver skills consuming `yaah list --json`: `{id, stage, awaiting, concerns,
+    question}` (question is null when the gate has no `question`/`ask` key)."""
+    q = None
+    if b.pending is not None:
+        q = b.pending.payload.get("question") or b.pending.payload.get("ask")
+    return {"id": b.id, "stage": b.stage, "awaiting": b.awaiting,
+            "concerns": [dict(c) for c in b.concerns],
+            "question": q}
+
+
+async def list_gates(root: Dict[str, Any], base: str, *, as_json: bool = False) -> None:
     """The mailbox view: print every suspended run waiting on a decision. Needs a
-    durable `state:` to see gates parked by other processes. `--list` entrypoint."""
+    durable `state:` to see gates parked by other processes. `--list` entrypoint.
+
+    `as_json=True` emits a single JSON document `{"batons": [...]}` with the
+    same fields the prose view shows — so a driver skill can parse instead of
+    interpret. Per-baton shape lives in `_baton_json`.
+    """
     bstore = BatonStore(_build_store(root.get("state"), base))
     gates = await bstore.list_suspended()
+    if as_json:
+        print(json.dumps({"batons": [_baton_json(b) for b in gates]}, indent=2))
+        return
     for b in gates:
         print("GATE baton_id={} stage={} awaiting={} concerns={}".format(
             b.id, b.stage, b.awaiting, len(b.concerns)))
@@ -252,6 +272,35 @@ async def resume_gate(root: Dict[str, Any], base: str, baton_id: str,
         _print_concerns(out.concerns)
     print("RESULT:", _short(out))
     return getattr(out, "output", None)
+
+
+async def baton_schema(root: Dict[str, Any], base: str, baton_id: str) -> None:
+    """Surface a parked baton's decision-form shape — the contract a driver
+    skill composes decision.json against. Reads form/decision_schema off
+    baton.pending.payload (HumanGate stamps them on the AWAIT envelope; the
+    harness parks that envelope as baton.pending). Exit 1 if no such baton, or
+    if the baton wasn't parked by a HumanGate (no `form` declared)."""
+    from .harness.decision_forms import lookup
+    bstore = BatonStore(_build_store(root.get("state"), base))
+    baton = await bstore.load(baton_id)
+    if baton is None:
+        print("error: no baton with id {!r}".format(baton_id), file=sys.stderr)
+        raise SystemExit(1)
+    if baton.pending is None:
+        print("error: baton {!r} has no parked envelope (not a human gate?)".format(baton_id),
+              file=sys.stderr)
+        raise SystemExit(1)
+    form = baton.pending.payload.get("form")
+    inline = baton.pending.payload.get("decision_schema")
+    if form is None:
+        print("error: baton {!r} parked without a declared form — add `form: \"...\"` "
+              "to the human_gate node to surface its decision shape".format(baton_id),
+              file=sys.stderr)
+        raise SystemExit(1)
+    out = lookup(form, inline_schema=inline)
+    out["baton_id"] = baton_id
+    out["awaiting"] = baton.awaiting
+    print(json.dumps(out, indent=2))
 
 
 async def clear_state(root: Dict[str, Any], base: str) -> None:
@@ -394,25 +443,27 @@ def _print_blast_radius(nodes: Dict[str, Any]) -> None:
         print("  {:<28} {:<14} {}".format(role, kind, detail))
 
 
-_USAGE = ("yaah <root-config.json> "
-          "[--fake] [--debug] [--list | --resume <baton_id> [decision.json] | --clear | --explain | --lint-overlay]\n\n"
-          "  <root-config.json>       path to the root deployment JSON config\n"
-          "  (no flag)                 run the configured pipeline\n"
-          "  --fake                    merge the root's `_fake` block over the top level\n"
-          "                            (swap providers / state / etc. to a sidecar fake set\n"
-          "                            without maintaining a second root file)\n"
-          "  --debug                   full tracebacks on errors (default: message + exit\n"
-          "                            2 for config errors, 1 for a failed pipeline)\n"
-          "  --list                    show parked gates (the mailbox view)\n"
-          "  --clear                   graceful reset: broadcast clear + flush parked + drop batons\n"
-          "  --resume BATON_ID [FILE]  deliver a decision (optionally from FILE) to a parked gate\n"
-          "  --explain                 print the EFFECTIVE config (post-_extends + post-_fake +\n"
-          "                            defaults) with per-key provenance and exit (R13)\n"
-          "  --lint-overlay            treat the file as an _extends OVERLAY and lint it against\n"
-          "                            the AI-mutable surface (leaf, non-code-equivalent; exit 1\n"
-          "                            on rejection) — the gate for AI-authored config changes\n"
-          "  -h, --help                show this message\n\n"
-          "(equivalent: `python -m yaah.runtime <root-config.json> …` when not installed)")
+_USAGE = """\
+yaah <command> [args]
+
+Commands:
+  init <dir>                    scaffold a starter pipeline (runs on fake providers, no API key)
+  run <root>                    run the configured pipeline (the default)
+  list <root> [--json]          show parked gates (the mailbox view; --json for a parseable shape)
+  resume <root> ID [FILE]       deliver a decision (optionally from FILE) to a parked gate
+  clear <root>                  graceful reset: broadcast clear + flush parked + drop batons
+  validate <root>               validate the config and exit (no run)
+  explain <root>                print the EFFECTIVE config (post-_extends/_fake + defaults)
+  trace <trace.jsonl> [PRICES]  summarize a run's trace (cost / latency / retries / model mix)
+  baton-schema <root> <id>      print the JSON Schema of decision.json for one parked baton
+
+Options (on run/list/resume/clear/validate/explain):
+  --fake     merge the root's `_fake` block over the top level (sidecar fake providers/state)
+  --debug    full tracebacks on errors (default: message + exit 2 config / 1 run)
+  -h --help  show this message
+
+Legacy form (still supported): yaah <root> [--list | --resume ID [FILE] | --clear | --explain | --lint-overlay]
+(equivalent: `python -m yaah.runtime …` when not installed)"""
 
 
 def _usage_exit(msg: str = "") -> None:
@@ -443,7 +494,13 @@ def _parse_cli(argv: list) -> dict:
     if "--debug" in rest:  # global like --fake: full tracebacks instead of the
         debug = True       # message-only error boundary in main()
         rest.remove("--debug")
+    as_json = False
+    if "--json" in rest:   # scoped to --list (machine-readable mailbox view);
+        as_json = True     # noise on any other action triggers the unknown-arg path below
+        rest.remove("--json")
     if not rest:
+        if as_json:
+            _usage_exit("--json is only valid with --list")
         return {"action": "run", "root": root, "fake": fake, "debug": debug}
     cmd = rest[0]
     if cmd in ("-h", "--help"):
@@ -452,7 +509,10 @@ def _parse_cli(argv: list) -> dict:
     if cmd == "--list":
         if len(rest) > 1:
             _usage_exit("--list takes no extra arguments")
-        return {"action": "list", "root": root, "fake": fake, "debug": debug}
+        return {"action": "list", "root": root, "fake": fake, "debug": debug,
+                "json": as_json}
+    if as_json:
+        _usage_exit("--json is only valid with --list")
     if cmd == "--clear":
         if len(rest) > 1:
             _usage_exit("--clear takes no extra arguments")
@@ -476,6 +536,59 @@ def _parse_cli(argv: list) -> dict:
                 "decision_file": rest[2] if len(rest) == 3 else None}
     _usage_exit("unknown argument {!r}".format(cmd))
     return {}  # unreachable; satisfies type checkers
+
+
+# Git-style subcommands (usability-gaps #1): the surface users expect, on top of
+# the legacy `yaah <root> --flag` parser (kept working). Pipeline verbs translate
+# to the same action spec _parse_cli produces; `validate`/`trace` add two actions.
+_SUBCOMMANDS = ("init", "run", "list", "resume", "clear", "explain", "validate",
+                "trace", "baton-schema")
+_VERB_FLAG = {"list": "--list", "clear": "--clear", "explain": "--explain"}
+
+
+def _parse_subcommand(argv: list) -> dict:
+    verb, rest = argv[0], list(argv[1:])
+    if verb == "init":
+        if not rest:
+            _usage_exit("init needs a target directory")
+        if len(rest) > 1:
+            _usage_exit("init takes one argument (the target directory)")
+        return {"action": "init", "target_dir": rest[0]}
+    if verb == "run":
+        return _parse_cli(rest) if rest else _usage_exit("run needs a root config")
+    if verb in _VERB_FLAG:
+        if not rest:
+            _usage_exit("{} needs a root config".format(verb))
+        return _parse_cli([rest[0], _VERB_FLAG[verb]] + rest[1:])
+    if verb == "resume":
+        if len(rest) < 2:
+            _usage_exit("resume needs a root config and a baton id")
+        return _parse_cli([rest[0], "--resume", rest[1]] + rest[2:])
+    if verb == "validate":
+        if not rest:
+            _usage_exit("validate needs a root config")
+        spec = _parse_cli(rest)        # parse root + --fake/--debug, then
+        spec["action"] = "validate"    # check-only (never runs the pipeline)
+        return spec
+    if verb == "trace":
+        files = [a for a in rest if a != "--debug"]
+        if not files:
+            _usage_exit("trace needs a trace.jsonl path")
+        return {"action": "trace", "trace_path": files[0],
+                "price_map": files[1] if len(files) > 1 else None,
+                "debug": "--debug" in rest}
+    if verb == "baton-schema":
+        # surface the decision-form shape of one parked baton so a driver skill
+        # can compose decision.json mechanically. Needs a durable state: to see
+        # batons parked by other processes.
+        if len(rest) < 2:
+            _usage_exit("baton-schema needs a root config and a baton id")
+        if len(rest) > 2:
+            _usage_exit("baton-schema takes one root config and one baton id")
+        return {"action": "baton-schema", "root": rest[0], "baton_id": rest[1],
+                "fake": False, "debug": False}
+    _usage_exit("unknown command {!r}".format(verb))
+    return {}  # unreachable
 
 
 def _apply_fake_overlay(root: Dict[str, Any]) -> Dict[str, Any]:
@@ -511,6 +624,25 @@ def _dispatch(spec: Dict[str, Any]) -> None:
             raise SystemExit(1)
         print("overlay ok — within the AI-mutable surface")
         return
+    if spec["action"] == "trace":
+        # summarize a run's trace JSONL — no root config involved
+        from .trace.aggregate import aggregate, load_jsonl
+        records = load_jsonl(spec["trace_path"])
+        price_map = _read_json(spec["price_map"]) if spec.get("price_map") else None
+        print(json.dumps(aggregate(records, price_map=price_map), indent=2))
+        return
+    if spec["action"] == "init":
+        # scaffold the embedded hello-yaah template into target_dir
+        from .init_template import scaffold
+        target = spec["target_dir"]
+        try:
+            n = scaffold(target)
+        except FileExistsError as e:
+            print("error: " + str(e), file=sys.stderr)
+            raise SystemExit(2)
+        print("Created {} files in {}/".format(n, target))
+        print("Next: yaah run {}/starter.local.json".format(target))
+        return
     root = _read_json(spec["root"])
     if spec.get("fake"):
         root = _apply_fake_overlay(root)
@@ -524,8 +656,14 @@ def _dispatch(spec: Dict[str, Any]) -> None:
         explain_root(raw_user, root, base, root_path=spec["root"], fake=spec.get("fake", False))
         return
     validate_root(root)  # R15: one entry — unknown-key, shape, enum, cross-field
+    if action == "validate":
+        print("ok: {} is a valid root config".format(spec["root"]))
+        return
+    if action == "baton-schema":
+        asyncio.run(baton_schema(root, base, spec["baton_id"]))
+        return
     if action == "list":
-        asyncio.run(list_gates(root, base))
+        asyncio.run(list_gates(root, base, as_json=bool(spec.get("json"))))
     elif action == "clear":
         asyncio.run(clear_state(root, base))
     elif action == "resume":
@@ -536,7 +674,8 @@ def _dispatch(spec: Dict[str, Any]) -> None:
 
 
 def main() -> None:
-    spec = _parse_cli(sys.argv[1:])
+    argv = sys.argv[1:]
+    spec = _parse_subcommand(argv) if (argv and argv[0] in _SUBCOMMANDS) else _parse_cli(argv)
     try:
         _dispatch(spec)
     except StageFailed as e:

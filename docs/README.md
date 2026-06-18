@@ -35,6 +35,7 @@ This folder is the deeper reference.
 |---|---|
 | [agent-tools.md](agent-tools.md) | giving an agent tools + MCP |
 | [durable-state.md](durable-state.md) | batons, idempotency, working memory, suspend/resume across restarts |
+| [decision-forms.md](decision-forms.md) | the shared decision-shape vocabulary for human gates (`yaah baton-schema`) — including how to extend it |
 
 ## Project
 
