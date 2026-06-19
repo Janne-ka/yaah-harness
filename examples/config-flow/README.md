@@ -51,10 +51,11 @@ config-flow-ab.dogfood.json           ← A/B comparison (sonnet vs haiku), auto
 ```
 
 Plus:
-- `config-flow-pipeline.json` — 5 stages: snapshot → extract → check → parse → render-svg → land. **No human gate** — config-flow is regenerable; the user re-runs whenever. Default model: `claude-sonnet-4-6` (haiku tested in the 2026-06-19 A/B run; cheaper but produced denser, less-readable layouts on this task — see "A/B comparison" below).
-- `config-flow-pipeline-ab.json` — A/B variant. **No gate** — writes BOTH SVGs to disk with `-a` and `-b` appended, in the same dir. The comparison IS the artifact; you open both and pick visually.
+- `config-flow-pipeline.json` — 5 stages: snapshot → extract → check → parse → render-svg → land. **No human gate** — config-flow is regenerable; the user re-runs whenever. Default model: `claude-haiku-4-5`. (The 2026-06-19 A/B run initially showed haiku producing denser/less-clear output; a tightened prompt — explicit 4-subgraph structure with named IDs and required layout directions — closed the gap. With the current prompt, haiku produces output structurally equivalent to sonnet at ~3.4× lower cost and ~2× faster.)
+- `config-flow-pipeline-ab.json` — A/B variant. **No gate** — writes BOTH SVGs to disk with `-a` and `-b` appended, in the same dir. The comparison IS the artifact; you open both and pick visually. Sonnet uses `prompts/extract.md` (loose); haiku uses `prompts/extract-strict.md` (tight) — see "Two prompts, one per model" below.
 - `transforms.py` — `snapshot_config_flow` (the new one) + `parse`/`render`/`write` (copied from arch-drift) + A/B helpers (`UsageAttacher`, `merge_candidates`, `prepare_ab_template`, `write_both_candidates`).
-- `prompts/extract.md` — config-flow-specific prompt.
+- `prompts/extract.md` — loose prompt: gives the model freedom on layout. Used by sonnet in A/B. Sonnet's judgment beats the over-constrained prompt for it.
+- `prompts/extract-strict.md` — tight prompt: explicit 4-subgraph spec with named IDs + skeleton example. Used by haiku in A/B AND in the single-model pipeline (default haiku). Closes haiku's natural-layout gap.
 - `fixtures/input.json` — default target (arch-drift.dogfood-self.json — full chain, most to show).
 - `visualize` — the wrapper script described above.
 
@@ -62,7 +63,7 @@ Plus:
 
 | Run | Use when | Cost |
 |---|---|---|
-| `./visualize <target>` | One-shot SVG production for any config. The convenient default. | ~$0.05–0.20 + ~80s (sonnet; variance) |
+| `./visualize <target>` | One-shot SVG production for any config. The convenient default. | ~$0.07 + ~40s (haiku) |
 | `python3 -m yaah.runtime config-flow.real.json` | Default target (arch-drift), runs end-to-end with no human input. | same |
 | `python3 -m yaah.runtime config-flow-ab.real.json` | A/B comparison sonnet vs haiku — produces BOTH SVGs (`<stem>-a.svg` + `<stem>-b.svg`) side-by-side in the target's `diagrams/` dir. Fully automated, no gate. Use to verify haiku is still good enough on a new config shape. | ~$0.23 + ~85s |
 | `MERMAID_RENDERER=:canned python3 -m yaah.runtime config-flow.local.json` | Verify the pipeline shape without an LLM key. Output is a canned SVG (visually meaningless). | zero |
@@ -96,27 +97,29 @@ exist because yaah's root configs reference inputs by *path* — no `--input`
 CLI flag. The two extra files are the price of keeping the engine surface
 small.
 
+## Two prompts, one per model
+
+The first A/B revealed something useful: a prompt good for one model can
+be wrong for another. We now ship two:
+
+- **`prompts/extract.md`** (loose) — gives the model freedom on layout
+  choices. Sonnet's judgment produces better layouts when it has room.
+  Used by sonnet in the A/B variant.
+- **`prompts/extract-strict.md`** (tight) — explicit 4-subgraph IDs,
+  required per-subgraph directions, skeleton example. Closes haiku's
+  natural-layout gap. Used by haiku everywhere (single-model + A/B).
+
+Why not one prompt? With the tight prompt, sonnet drops from ~17K → ~10K
+output tokens — the constraint cuts its "freedom budget" and the result
+gets blander. With the loose prompt, haiku picks structurally worse
+layouts (3 subgraphs instead of 4, vertical extends chain, mixed flow/
+class-diagram cues). The right tool per model: sonnet wants room; haiku
+wants rails. A/B without that asymmetry would be unfair to either side.
+
 ## A/B comparison mode (sonnet vs haiku)
 
-The single-model pipeline defaults to **`claude-sonnet-4-6`**. The 2026-06-19
-A/B run on the arch-drift.dogfood-self target showed both models can produce
-a valid config-flow diagram, but sonnet draws cleaner layouts on this task:
-
-| | Sonnet | Haiku |
-|---|---|---|
-| Cost (this run) | $0.18–$0.34 (variance) | ~$0.045 |
-| Wall (extract) | 84–230s (high variance) | ~37s (consistent) |
-| Out-tokens | 6900–17400 | ~5900 |
-| Layout quality | clean subgraph separation; extends-chain horizontal | denser; mixes flow-vs-class-diagram styles; extends-chain vertical |
-
-Haiku is cheaper and faster, but the layout it picks is less readable —
-subgraph boundaries blur, references cross more, the extends chain
-renders vertically instead of as a stack. **A better prompt with
-explicit layout hints could probably close the gap**, but the current
-prompt gives the model freedom and haiku makes worse layout choices.
-Until the prompt is tightened, sonnet is the default.
-
-To re-compare on a config you find tougher:
+The single-model pipeline defaults to **`claude-haiku-4-5`** — see below
+for how that decision got made. To re-compare on a config you find tougher:
 
 ```bash
 cd examples/config-flow
@@ -124,12 +127,51 @@ python3 -m yaah.runtime config-flow-ab.real.json
 # → produces TWO SVGs side-by-side in the target's diagrams/:
 #     <stem>-a-claude-sonnet-4-6-<utc>.svg + <stem>-a.svg  (latest pointer)
 #     <stem>-b-claude-haiku-4-5-<utc>.svg  + <stem>-b.svg
-# → prints paths on stderr; `open <both>` to compare visually
+# → prints paths on stderr; open both SVGs in browser to compare
 ```
 
 Stderr at exit shows tokens-per-candidate so you can see the cost delta.
-If you've prompt-tuned haiku into producing layouts as clean as sonnet's,
-switch the default in `config-flow-pipeline.json`'s `role:extract`.
+
+### How the haiku default got chosen (a case study for using A/B)
+
+Two A/B runs on 2026-06-19, both against
+`examples/arch-drift/arch-drift.dogfood-self.json` (a 4-layer `_extends`
+chain — non-trivial target):
+
+**Run 1 — original prompt (gave model lots of layout freedom):**
+
+| | Sonnet | Haiku |
+|---|---|---|
+| Cost | $0.18–$0.34 (high variance) | ~$0.045 |
+| Wall (extract) | 84–230s | ~37s |
+| Output | 4 clean subgraphs, clear separation | 3 subgraphs, denser, harder to parse |
+
+Haiku was cheaper but the layout it picked was meaningfully worse.
+Initial reaction: keep sonnet as default. Then: "haiku would need more
+instructions" — try tightening the prompt.
+
+**Run 2 — tightened prompt (explicit 4-subgraph IDs + layout
+directions + skeleton example):**
+
+| | Sonnet | Haiku |
+|---|---|---|
+| Cost | ~$0.24 | ~$0.07 |
+| Wall (extract) | ~144s | ~37s |
+| Output | 4 subgraphs, exactly the spec | 4 subgraphs, exactly the spec |
+| Quality | structurally equivalent | structurally equivalent |
+
+With the constrained prompt, **haiku closed the gap**. Both models now
+produce ~the same structure; haiku's labels are slightly more verbose,
+sonnet includes one extra registry box, neither honors `direction LR`
+on the extends chain (universal model behavior, not a quality issue).
+
+Conclusion: switch to haiku at the default, ~3.4× cheaper, ~2× faster,
+output indistinguishable in quality. The deciding artifact was running
+the A/B with the same constrained prompt twice and comparing the SVGs
+in a browser. If you ever find a config shape where haiku visibly
+underperforms, switch the default back in
+`config-flow-pipeline.json`'s `role:extract` — but tune the prompt
+first; that closed the gap last time too.
 
 ## Adding to your own project
 

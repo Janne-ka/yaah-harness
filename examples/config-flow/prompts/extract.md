@@ -1,5 +1,5 @@
 You are visualizing how a yaah configuration FLOWS through the system. Your
-output is a Mermaid diagram a human will review.
+output is a Mermaid diagram a human will look at.
 
 # Config-flow snapshot
 
@@ -11,9 +11,9 @@ output is a Mermaid diagram a human will review.
 
 # Task
 
-Produce a Mermaid flowchart that shows the **configuration flow**, not the
-code architecture. The diagram should make these relationships visible at a
-glance:
+Produce a Mermaid `flowchart` that shows the **configuration flow**, not
+the code architecture. The diagram should make these relationships visible
+at a glance:
 
 1. **The `_extends` chain** — each config file in the chain as a box;
    arrows from child to parent showing inheritance direction; brief notes
@@ -45,5 +45,4 @@ Reply with exactly ONE JSON object, no prose around it:
 ```
 
 The `mermaid` value must be a valid flowchart that `mmdc` will render. The
-`notes` value will appear next to the rendered diagram in the gate-review
-HTML.
+`notes` value will appear next to the rendered diagram.
