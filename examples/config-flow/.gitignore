@@ -7,5 +7,5 @@ __pycache__/
 fixtures/_runtime.json
 _visualize-run.json
 
-# UTC-timestamped versioned diagram outputs — keep only the latest pointers
-diagrams/*[0-9]Z.svg
+# diagram outputs — fully regenerable; the pipeline IS what we commit, not its output
+diagrams/
