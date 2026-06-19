@@ -1,0 +1,25 @@
+{
+  "_doc": "Offline / fake config for the config-flow visualizer. Same trick as arch-drift.local.json: fake_scripted provider returns a canned mermaid response, MERMAID_RENDERER=:canned returns a canned SVG. Runs end-to-end with no API key and no mmdc install — for verifying the pipeline shape, the snapshot output, and the gate/render flow. trace.capture includes 'cost' so future attacher use works without re-editing.",
+  "transport": {"type": "inproc"},
+  "providers": {
+    "claude": {
+      "type": "fake_scripted",
+      "by_model": {
+        "claude-haiku-4-5": [
+          "{\"mermaid\":\"flowchart TD\\n  root[root config] --> pipeline\\n  root --> fixture\\n  pipeline --> nodes\\n  fixture --> nodes\",\"notes\":\"Canned response for offline runs — the real model produces a richer diagram from the snapshot.\"}"
+        ],
+        "claude-sonnet-4-6": [
+          "{\"mermaid\":\"flowchart TD\\n  root[root config] --> pipeline\\n  root --> fixture\\n  pipeline --> nodes\\n  fixture --> nodes\",\"notes\":\"Canned response — sonnet variant for A/B fake runs.\"}"
+        ]
+      }
+    }
+  },
+  "default_provider": "claude",
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "file", "dir": ".config-flow-state"},
+  "trace": {"mode": "tracer", "capture": ["phase", "cost"], "sinks": [{"type": "console"}]},
+  "pipeline": "config-flow-pipeline.json",
+  "input": "fixtures/input.json",
+  "run": true
+}

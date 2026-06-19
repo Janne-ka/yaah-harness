@@ -11,7 +11,7 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, FrozenSet, List, Sequence
+from typing import Any, Dict, FrozenSet, List, Optional, Sequence
 
 from .contributor import TraceContributor
 from .record import project
@@ -44,3 +44,14 @@ class RecordingTracer:
         """Tracer-port `ingest` (R6): append remote records to `records` so test
         inspection sees them. No re-projection (records arrive already projected)."""
         self.records.extend(records or ())
+
+    def last_model_call_span(self, correlation_id: str) -> Optional[Dict[str, Any]]:
+        """ADR-0003: scan records in reverse for the most recent model_call span
+        under this corr. records hold every emit (and ingest) since construction,
+        so a nested-agent's span and the outer agent's span are both present —
+        the corr filter is what disambiguates."""
+        for record in reversed(self.records):
+            if (record.get("corr") == correlation_id
+                    and record.get("name") == "model_call"):
+                return record
+        return None

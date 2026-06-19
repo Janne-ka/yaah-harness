@@ -1,0 +1,75 @@
+{
+  "_doc": "A/B variant of arch-drift: fork the extract stage to two models (claude-sonnet-4-6 vs claude-haiku-4-5), each agent ATTACHES its own usage stats via the attacher port (ADR-0003 — UsageAttacher lives in transforms.py, not in the engine). Fanin merges the two candidates; the report shows both side-by-side with tokens-per-candidate; the human picks one (or revises — v1 exits with feedback, no loop). Demonstrates yaah's fork+fanin, the attacher port, and the json_schema decision form escape hatch.",
+  "nodes": {
+    "role:snapshot":     {"type": "transform", "target": "fn:transforms:snapshot", "call": "envelope"},
+    "role:read-svg":     {"type": "transform", "target": "fn:transforms:read_committed_svg", "call": "envelope"},
+
+    "role:extract-a":    {"type": "agent", "prompt": "file:extract",
+                           "model": "claude:claude-sonnet-4-6", "stage": "extract-a",
+                           "carry": ["repo_path", "arch_svg_path", "arch_svg_dir", "committed_svg", "committed_svg_path", "snapshot", "feedback"],
+                           "attach": ["fn:transforms:UsageAttacher"]},
+    "role:extract-b":    {"type": "agent", "prompt": "file:extract",
+                           "model": "claude:claude-haiku-4-5", "stage": "extract-b",
+                           "carry": ["repo_path", "arch_svg_path", "arch_svg_dir", "committed_svg", "committed_svg_path", "snapshot", "feedback"],
+                           "attach": ["fn:transforms:UsageAttacher"]},
+
+    "role:check":        {"type": "json_object", "required": ["mermaid"]},
+    "role:parse":        {"type": "transform", "target": "fn:transforms:parse_extracted", "call": "envelope"},
+    "role:render-svg":   {"type": "transform", "target": "fn:transforms:render_mermaid", "call": "envelope"},
+
+    "role:prepare":      {"type": "transform", "target": "fn:transforms:prepare_ab_template", "call": "envelope",
+                           "config": {"prices": {
+                              "claude-sonnet-4-6": {"in": 3.0, "out": 15.0},
+                              "claude-haiku-4-5": {"in": 0.25, "out": 1.25}}}},
+
+    "role:report":       {"type": "render", "template_file": "templates/report-ab.html", "out": "arch-report-ab.html"},
+
+    "role:gate":         {"type": "human_gate",
+                           "ask": "Review arch-report-ab.html (two candidates: A=sonnet, B=haiku). Pick one with {\"decision\":\"approve_a\"} or {\"decision\":\"approve_b\"}, or revise with {\"decision\":\"revise\",\"feedback\":\"...\"}.",
+                           "awaiting": "human:arch-review-ab",
+                           "form": "json_schema",
+                           "decision_schema": {"type": "object",
+                              "properties": {"decision": {"enum": ["approve_a", "approve_b", "revise"]},
+                                              "feedback": {"type": "string"}},
+                              "required": ["decision"]}},
+
+    "role:land-a":       {"type": "transform", "target": "fn:transforms:write_candidate", "call": "envelope",
+                           "config": {"which": "a"}},
+    "role:land-b":       {"type": "transform", "target": "fn:transforms:write_candidate", "call": "envelope",
+                           "config": {"which": "b"}},
+    "role:revise-exit":  {"type": "transform", "target": "fn:transforms:revise_exit", "call": "envelope"}
+  },
+  "graph": {
+    "start": "snapshot",
+    "stages": {
+      "snapshot":       {"node": "role:snapshot", "then": "read-svg"},
+      "read-svg":       {"node": "role:read-svg", "then": "fork-extract"},
+
+      "fork-extract":   {"node": "", "fork": ["extract-a", "extract-b"], "then": "prepare"},
+
+      "extract-a":      {"node": "role:extract-a", "validators": ["role:check"], "max_attempts": 2, "feedback": true, "then": "parse-a"},
+      "parse-a":        {"node": "role:parse",     "then": "render-svg-a"},
+      "render-svg-a":   {"node": "role:render-svg", "then": "join"},
+
+      "extract-b":      {"node": "role:extract-b", "validators": ["role:check"], "max_attempts": 2, "feedback": true, "then": "parse-b"},
+      "parse-b":        {"node": "role:parse",     "then": "render-svg-b"},
+      "render-svg-b":   {"node": "role:render-svg", "then": "join"},
+
+      "join":           {"node": "",
+                          "fanin": {"expect": ["extract-a", "extract-b"], "wait": "all",
+                                     "reduce": "fn:transforms:merge_candidates"},
+                          "then": null},
+
+      "prepare":        {"node": "role:prepare", "then": "report"},
+      "report":         {"node": "role:report",  "then": "gate"},
+
+      "gate":           {"node": "role:gate",
+                          "branch": {"on": "decision",
+                                      "routes": {"approve_a": "land-a", "approve_b": "land-b", "revise": "revise-exit"}}},
+
+      "land-a":         {"node": "role:land-a",      "then": null},
+      "land-b":         {"node": "role:land-b",      "then": null},
+      "revise-exit":    {"node": "role:revise-exit", "then": null}
+    }
+  }
+}

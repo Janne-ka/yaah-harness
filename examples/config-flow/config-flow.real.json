@@ -1,0 +1,11 @@
+{
+  "_doc": "Real-model config for the config-flow visualizer. Extends local, swaps the fake provider for the real claude_cli backend. Parks at the gate for human review — for unattended runs (used by the `visualize` wrapper), see config-flow.dogfood.json which auto-approves.",
+  "_extends": "config-flow.local.json",
+  "providers": {
+    "claude": {
+      "type": "claude_cli",
+      "binary": "claude",
+      "by_model": null
+    }
+  }
+}

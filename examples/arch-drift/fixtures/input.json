@@ -1,0 +1,7 @@
+{
+  "_doc": "Default input fixture: arch-drift run against YAAH (the harness) — target (b) of the dog-food story (yaah's internals fully visible). Lands under docs/architecture/yaah-with-arch-drift.svg so target (a) (arch-drift-only.svg) can coexist in the same dir. For target (a), use fixtures/input-self.json — the example dir IS the architecture there.",
+  "repo_path": "../..",
+  "arch_svg_path": "docs/architecture/yaah-with-arch-drift.svg",
+  "arch_svg_dir": "docs/architecture",
+  "snapshot_strategy": "imports"
+}

@@ -1,0 +1,6 @@
+{
+  "_doc": "Dog-food config for target (a) — arch-drift pointed at ITSELF (yaah-as-black-box). Real claude_cli + real mmdc + auto-approve. Produces docs/architecture/arch-drift-only.svg. See arch-drift.dogfood.json for target (b) (yaah's internals visible).",
+  "_extends": "arch-drift.dogfood.json",
+  "input": "fixtures/input-self.json",
+  "state": {"type": "file", "dir": ".arch-drift-state-dogfood-self"}
+}

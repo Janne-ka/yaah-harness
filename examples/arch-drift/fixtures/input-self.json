@@ -1,0 +1,7 @@
+{
+  "_doc": "Input fixture for target (a) of the dog-food run: arch-drift pointed at ITSELF, with yaah treated as a single black-box external dependency. Uses the snapshot_pipeline_json strategy (the arch-drift example isn't packaged Python — its architecture IS the pipeline graph). Output goes to docs/architecture/arch-drift-only.svg, separate from target (b) so both can coexist.",
+  "repo_path": ".",
+  "arch_svg_path": "../../docs/architecture/arch-drift-only.svg",
+  "arch_svg_dir": "../../docs/architecture",
+  "snapshot_strategy": "pipeline_json"
+}

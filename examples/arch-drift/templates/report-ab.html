@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Architecture drift report — A/B</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 1400px; margin: 2em auto; padding: 0 1em; color: #222; }
+    h1 { margin-bottom: .2em; }
+    .lead { color: #555; }
+    .columns { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1em; margin-top: 1.5em; }
+    .col { border: 1px solid #ddd; border-radius: 6px; padding: 1em; background: #fdfdfd; }
+    .col h2 { margin-top: 0; font-size: 1.05em; color: #444; }
+    .stats { font-family: monospace; font-size: .9em; background: #f4f4f4; padding: .5em .75em; border-radius: 4px; margin: .5em 0; }
+    .svg-wrap { background: #fafafa; padding: .75em; border-radius: 4px; overflow: auto; max-height: 360px; }
+    .svg-wrap svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+    .notes { font-size: .9em; color: #555; margin-top: .5em; padding-top: .5em; border-top: 1px solid #eee; }
+    .gate { margin-top: 2em; padding: 1em; background: #fff8e0; border-left: 4px solid #d4a900; border-radius: 4px; }
+    .gate code { background: #fff; padding: .15em .4em; border-radius: 3px; border: 1px solid #ddd; }
+    .empty { color: #888; font-style: italic; padding: 2em; text-align: center; }
+  </style>
+</head>
+<body>
+  <h1>Architecture drift report — A/B</h1>
+  <p class="lead">Two models drafted the architecture from the same repo snapshot. Pick one, or revise.</p>
+
+  <div class="columns">
+    <div class="col">
+      <h2>Committed (currently at {{committed_svg_path}})</h2>
+      <div class="svg-wrap">{{committed_svg}}</div>
+    </div>
+
+    <div class="col">
+      <h2>Candidate A — {{candidate_a_model}}</h2>
+      <div class="stats">
+        tokens in: {{candidate_a_tokens_in}} &middot; out: {{candidate_a_tokens_out}} &middot; cost: {{candidate_a_cost}}
+      </div>
+      <div class="svg-wrap">{{candidate_a_svg}}</div>
+      <div class="notes"><strong>Notes:</strong> {{candidate_a_notes}}</div>
+    </div>
+
+    <div class="col">
+      <h2>Candidate B — {{candidate_b_model}}</h2>
+      <div class="stats">
+        tokens in: {{candidate_b_tokens_in}} &middot; out: {{candidate_b_tokens_out}} &middot; cost: {{candidate_b_cost}}
+      </div>
+      <div class="svg-wrap">{{candidate_b_svg}}</div>
+      <div class="notes"><strong>Notes:</strong> {{candidate_b_notes}}</div>
+    </div>
+  </div>
+
+  <div class="gate">
+    <strong>Resume the parked baton with one of:</strong><br>
+    <code>{"decision":"approve_a"}</code> &nbsp; lands candidate A and writes a versioned SVG<br>
+    <code>{"decision":"approve_b"}</code> &nbsp; lands candidate B<br>
+    <code>{"decision":"revise","feedback":"..."}</code> &nbsp; exits with feedback (v1 — the revise loop is deferred to v2; re-run the pipeline with the feedback applied)
+  </div>
+</body>
+</html>

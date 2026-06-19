@@ -1,0 +1,44 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Architecture drift report</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 1100px; margin: 2em auto; padding: 0 1em; color: #222; }
+    h1 { margin-bottom: .2em; }
+    .summary { background: #fff4d6; padding: .75em 1em; border-left: 4px solid #d4a900; margin: 1em 0; }
+    .columns { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5em; margin-top: 1.5em; }
+    .col { border: 1px solid #ddd; border-radius: 6px; padding: 1em; }
+    .col h2 { margin-top: 0; font-size: 1.1em; color: #444; }
+    .svg-wrap { background: #fafafa; padding: 1em; border-radius: 4px; overflow: auto; max-height: 480px; }
+    .svg-wrap svg { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+    .notes { background: #f0f7ff; padding: .75em 1em; border-left: 4px solid #5a8edc; margin-top: 1.5em; border-radius: 4px; }
+    .next { font-family: monospace; background: #f4f4f4; padding: .75em 1em; border-radius: 4px; margin-top: 1em; font-size: .9em; word-break: break-all; }
+    .empty { color: #888; font-style: italic; padding: 2em; text-align: center; }
+  </style>
+</head>
+<body>
+  <h1>Architecture drift report</h1>
+  <div class="summary"><strong>Summary:</strong> {{summary}}</div>
+
+  <div class="columns">
+    <div class="col">
+      <h2>Committed (currently at {{committed_svg_path}})</h2>
+      <div class="svg-wrap">{{committed_svg}}</div>
+    </div>
+    <div class="col">
+      <h2>Extracted from current code</h2>
+      <div class="svg-wrap">{{new_svg}}</div>
+    </div>
+  </div>
+
+  <div class="notes">
+    <strong>Notes from the extractor:</strong> {{notes}}
+  </div>
+
+  <p>To approve and land the new SVG, resume the parked baton with
+     <code>{"decision":"approve"}</code>. To revise, send
+     <code>{"decision":"revise","feedback":"..."}</code> and the next attempt
+     will incorporate the feedback.</p>
+</body>
+</html>

@@ -1,0 +1,11 @@
+# run artifacts
+.config-flow-state*/
+config-flow-report.html
+__pycache__/
+
+# wrapper-generated fixture (regenerated on every `visualize` invocation)
+fixtures/_runtime.json
+_visualize-run.json
+
+# diagram outputs — fully regenerable; the pipeline IS what we commit, not its output
+diagrams/

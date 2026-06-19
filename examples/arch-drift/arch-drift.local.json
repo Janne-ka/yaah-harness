@@ -1,0 +1,21 @@
+{
+  "_doc": "Offline / fake config for the arch-drift example. Runs end-to-end with no API key and no mmdc install. The provider NAMED `claude` is wired here to a fake_scripted backend, so the pipeline's `model: \"claude:claude-sonnet-4-6\"` resolves to a canned reply. The mermaid renderer returns a canned SVG when MERMAID_RENDERER=:canned (see README). For the real-model run, use arch-drift.real.json.",
+  "transport": {"type": "inproc"},
+  "providers": {
+    "claude": {
+      "type": "fake_scripted",
+      "by_model": {
+        "claude-sonnet-4-6": [
+          "{\"mermaid\":\"flowchart LR\\n  core --> harness\\n  harness --> adapters\",\"notes\":\"3-layer split: core defines the message shape, harness orchestrates, adapters bind to outside systems.\"}"
+        ]
+      }
+    }
+  },
+  "default_provider": "claude",
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "file", "dir": ".arch-drift-state"},
+  "pipeline": "arch-drift-pipeline.json",
+  "input": "fixtures/input.json",
+  "run": true
+}

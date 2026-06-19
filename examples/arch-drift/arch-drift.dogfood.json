@@ -1,0 +1,6 @@
+{
+  "_doc": "Dog-food config: real claude_cli + real mmdc + auto-approve. Used to PRODUCE the demo SVG artifacts committed under docs/architecture/. Not for normal example runs (those use arch-drift.local.json or arch-drift.real.json which park at the gate for human review). The `decisions:` block answers the gate driver automatically, so this runs end-to-end unattended.",
+  "_extends": "arch-drift.real.json",
+  "decisions": {"human:arch-review": {"decision": "approve"}},
+  "state": {"type": "file", "dir": ".arch-drift-state-dogfood"}
+}

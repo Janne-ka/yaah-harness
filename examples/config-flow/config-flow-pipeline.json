@@ -1,0 +1,22 @@
+{
+  "_doc": "Config-flow visualizer pipeline. Snapshot the target config, ask the agent to draw it, render, land. Fully automated — no human gate (the artifact is regenerable; the user can re-run any time). For A/B model comparison, see config-flow-pipeline-ab.json.",
+  "nodes": {
+    "role:snapshot":   {"type": "transform", "target": "fn:transforms:snapshot_config_flow", "call": "envelope"},
+    "role:extract":    {"type": "agent", "prompt": "file:extract", "model": "claude:claude-sonnet-4-6", "stage": "extract",
+                         "carry": ["target_config_path", "arch_svg_path", "arch_svg_dir", "snapshot"]},
+    "role:check":      {"type": "json_object", "required": ["mermaid"]},
+    "role:parse":      {"type": "transform", "target": "fn:transforms:parse_extracted", "call": "envelope"},
+    "role:render-svg": {"type": "transform", "target": "fn:transforms:render_mermaid",  "call": "envelope"},
+    "role:land":       {"type": "transform", "target": "fn:transforms:write_versioned", "call": "envelope"}
+  },
+  "graph": {
+    "start": "snapshot",
+    "stages": {
+      "snapshot":   {"node": "role:snapshot",   "then": "extract"},
+      "extract":    {"node": "role:extract",    "validators": ["role:check"], "max_attempts": 2, "feedback": true, "then": "parse"},
+      "parse":      {"node": "role:parse",      "then": "render-svg"},
+      "render-svg": {"node": "role:render-svg", "then": "land"},
+      "land":       {"node": "role:land",       "then": null}
+    }
+  }
+}

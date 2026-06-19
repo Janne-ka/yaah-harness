@@ -1,0 +1,37 @@
+{
+  "_doc": "Architecture-drift detector (A-only: single model). Snapshot the repo, ask the agent for mermaid markup, render it, diff against the committed SVG, branch on changed, optionally park for human review, land a versioned SVG on approve.",
+  "nodes": {
+    "role:snapshot":    {"type": "transform", "target": "fn:transforms:snapshot", "call": "envelope"},
+    "role:read-svg":    {"type": "transform", "target": "fn:transforms:read_committed_svg", "call": "envelope"},
+    "role:extract":     {"type": "agent", "prompt": "file:extract", "model": "claude:claude-sonnet-4-6", "stage": "extract",
+                          "carry": ["repo_path", "arch_svg_path", "arch_svg_dir", "committed_svg", "committed_svg_path", "snapshot", "feedback"]},
+    "role:check":       {"type": "json_object", "required": ["mermaid"]},
+    "role:parse":       {"type": "transform", "target": "fn:transforms:parse_extracted", "call": "envelope"},
+    "role:render-svg":  {"type": "transform", "target": "fn:transforms:render_mermaid", "call": "envelope"},
+    "role:diff":        {"type": "transform", "target": "fn:transforms:diff_svgs", "call": "envelope"},
+    "role:report":      {"type": "render", "template_file": "templates/report.html", "out": "arch-report.html"},
+    "role:gate":        {"type": "human_gate",
+                         "ask": "Review arch-report.html. {{summary}}. Decide: approve to land, or revise with feedback.",
+                         "awaiting": "human:arch-review",
+                         "form": "approve_or_revise"},
+    "role:land":        {"type": "transform", "target": "fn:transforms:write_versioned", "call": "envelope"},
+    "role:done":        {"type": "transform", "target": "fn:transforms:noop_done", "call": "envelope"}
+  },
+  "graph": {
+    "start": "snapshot",
+    "stages": {
+      "snapshot":   {"node": "role:snapshot",   "then": "read-svg"},
+      "read-svg":   {"node": "role:read-svg",   "then": "extract"},
+      "extract":    {"node": "role:extract", "validators": ["role:check"], "max_attempts": 2, "feedback": true, "then": "parse"},
+      "parse":      {"node": "role:parse",      "then": "render-svg"},
+      "render-svg": {"node": "role:render-svg", "then": "diff"},
+      "diff":       {"node": "role:diff",
+                     "branch": {"on": "changed", "routes": {"yes": "report", "no": "done"}}},
+      "report":     {"node": "role:report",     "then": "gate"},
+      "gate":       {"node": "role:gate",
+                     "branch": {"on": "decision", "routes": {"approve": "land", "revise": "extract"}}},
+      "land":       {"node": "role:land",       "then": null},
+      "done":       {"node": "role:done",       "then": null}
+    }
+  }
+}
