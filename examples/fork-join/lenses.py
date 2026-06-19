@@ -5,15 +5,16 @@ lens left its JSON finding in `payload["raw"]`. We merge them into one report.
 The engine never learns the data shape; the reduce owns it (that's why it's an
 `fn:` target, not engine code).
 """
-import json
+from yaah.jsonio import extract_json
 
 
 def merge(arrived):
+    # extract_json — sonnet/haiku fence their JSON; strict json.loads would break.
     lines = []
     for branch in sorted(arrived):
         raw = arrived[branch].get("raw", "{}")
         try:
-            finding = json.loads(raw).get("finding", "")
+            finding = extract_json(raw).get("finding", "")
         except Exception:
             finding = "(unreadable)"
         lines.append("- [{}] {}".format(branch, finding))

@@ -227,6 +227,15 @@ def render_mermaid(envelope, config) -> Dict[str, Any]:
     declared but not on PATH."""
     renderer = os.environ.get("MERMAID_RENDERER", "mmdc")
     if renderer == ":canned":
+        # The canned renderer returns ONE fixed SVG regardless of the mermaid
+        # input — it's an offline placeholder, not a lighter real renderer.
+        # Print to stderr so a user who set this env var sees they did NOT get
+        # a real render of their diagram. (Quiet `or "1"` env opts out.)
+        if os.environ.get("YAAH_CANNED_QUIET", "") != "1":
+            sys.stderr.write(
+                "[arch-drift] WARNING: MERMAID_RENDERER=:canned — returning a "
+                "fixed placeholder SVG that does NOT reflect the agent's mermaid "
+                "output. For real artifacts, unset the env var and install mmdc.\n")
         return {**envelope.payload, "new_svg": _CANNED_SVG}
     if shutil.which(renderer) is None:
         raise RuntimeError(
@@ -327,18 +336,12 @@ def noop_done(envelope, config) -> Dict[str, Any]:
 
 # ---------- A/B variant: usage attacher + fanin reducer + per-candidate ops --
 
+# Source: docs/cookbook/attachers/usage.py
+# Copy-paste reference per ADR-0003 (engine ships zero attachers). See the
+# canonical file for the full docstring + design rationale; we keep the class
+# terse here to read smoothly inside the example.
 class UsageAttacher(Attacher):
-    """Reference `usage` attacher implementation (ADR-0003 — engine ships
-    zero built-ins; the canonical implementation lives here for consumers
-    to copy into their own transforms file).
-
-    Reads the tracer's most recent model_call span for the current
-    correlation. Returns the projected cost data (tokens + model) under
-    payload key `usage`. Dollar conversion is NOT here — yaah deliberately
-    externalizes pricing via the aggregator's price-map (see
-    src/yaah/trace/contributors/cost.py:8-9). Downstream code that wants $
-    multiplies tokens by a config-supplied price-map (the A/B report
-    template does this via a `prices` key)."""
+    """`usage` attacher — tokens + model from the last model_call span."""
 
     name = "usage"
     requires_capture = ("cost",)

@@ -30,6 +30,7 @@ from yaah import (
     Verdict,
 )
 from yaah.agents import Agent, FakeBackend, RoutingBackend
+from yaah.jsonio import extract_json  # fence-tolerant — real models wrap JSON in markdown
 
 # from yaah.agents import ClaudeCliBackend, LiteLLMBackend  # real backends
 
@@ -43,7 +44,7 @@ class JsonObjectValidator:
     async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
         raw = input.payload.get("raw", "")
         try:
-            obj = json.loads(raw)
+            obj = extract_json(raw)
         except json.JSONDecodeError as e:
             return Verdict.failed(Failure(
                 "not_json", "output is not valid JSON: {}".format(e),
@@ -109,7 +110,7 @@ async def main() -> None:
     outcome = await Harness(comms, graph).run(Envelope("task", {"task": "review the diff"}))
 
     assert isinstance(outcome, Done), outcome
-    artifact = json.loads(outcome.output.payload["raw"])
+    artifact = extract_json(outcome.output.payload["raw"])
     assert artifact["summary"] and artifact["items"], artifact
     print("DONE artifact:", json.dumps(artifact))
     print("ok")

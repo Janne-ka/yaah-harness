@@ -38,6 +38,7 @@ This folder is the deeper reference.
 | [decision-forms.md](decision-forms.md) | the shared decision-shape vocabulary for human gates (`yaah baton-schema`) — including how to extend it |
 | [decisions/0003-attacher-port.md](decisions/0003-attacher-port.md) | the `attach: [...]` opt-in on agent nodes — surfacing tracer-captured data (tokens/usage/etc.) to in-flight payload for branching, budgeting, A/B comparison |
 | [case-study/prompt-tuning/](case-study/prompt-tuning/) | three SVGs + walkthrough: how `examples/config-flow`'s A/B run drove the haiku default and two-prompt strategy (sonnet wants room, haiku wants rails) |
+| [cookbook/](cookbook/) | non-importable reference recipes — copy-paste into your own project. Currently: `attachers/usage.py` (tokens + model from the tracer's last model_call span) |
 
 ## Project
 

@@ -60,11 +60,14 @@ STARTER_TEMPLATE: Dict[str, str] = {
         'real payload key the `render` stage can interpolate — an agent\'s output arrives as\n'
         'a STRING in `payload["raw"]`, and nothing merges it until a parse step like this.\n'
         '"""\n'
-        'import json\n'
+        'from yaah.jsonio import extract_json\n'
         '\n'
         '\n'
         'def parse(envelope, config):\n'
-        '    return json.loads(envelope.payload.get("raw", "{}"))\n'
+        '    # extract_json (not json.loads) — sonnet/haiku wrap JSON in markdown\n'
+        '    # fences; strict json.loads breaks on real-model runs. opus is the\n'
+        '    # only model that reliably emits bare JSON.\n'
+        '    return extract_json(envelope.payload.get("raw", "{}"))\n'
     ),
     "prompts/summarize.md": (
         'Summarize {{text}} in one sentence. Return JSON: {"summary": "..."}\n'

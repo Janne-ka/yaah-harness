@@ -98,8 +98,10 @@ class Attacher:
 
     Subclass and override `attach()`. Configuration declares attachers
     by `fn:module:func` reference — the engine ships no built-ins.
-    The canonical reference implementation is the `usage` attacher in
-    `examples/arch-drift/transforms.py`.
+    The canonical reference implementation lives at
+    `docs/cookbook/attachers/usage.py`; copy it into your own
+    transforms module rather than importing it (the cookbook is
+    intentionally non-importable, see `docs/cookbook/README.md`).
 
     Implementations may declare `requires_capture` — a tuple of tracer
     capture names. The builder enforces that the configured tracer has
