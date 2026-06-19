@@ -307,9 +307,15 @@ def write_versioned(envelope, config) -> Dict[str, Any]:
     # every platform — symlinks across Windows / CI checkouts are fiddly
     with open(latest, "w", encoding="utf-8") as f:
         f.write(new_svg)
+    next_step = "git add {} {} && git commit -m 'docs: update architecture diagram ({})'".format(
+        versioned, latest, latest_name)
+    # surface destinations on stderr — the operator shouldn't have to read the
+    # verbose RESULT envelope to find where the SVG landed. (Original bit a
+    # user: "when exiting it does not tell me where the images are.")
+    print("\nSVG landed:\n  {}\n  {}\nNext: {}".format(
+        latest, versioned, next_step), file=sys.stderr)
     return {"written": True, "versioned_path": versioned, "latest_path": latest,
-            "next_step": "git add {} {} && git commit -m 'docs: update architecture diagram ({})'".format(
-                versioned, latest, latest_name)}
+            "next_step": next_step}
 
 
 def noop_done(envelope, config) -> Dict[str, Any]:
@@ -433,10 +439,13 @@ def write_candidate(envelope, config) -> Dict[str, Any]:
         f.write(new_svg)
     with open(latest, "w", encoding="utf-8") as f:
         f.write(new_svg)
+    next_step = "git add {} {} && git commit -m 'docs: update architecture diagram (candidate {} / {})'".format(
+        versioned, latest, which, model_short)
+    print("\nSVG landed (candidate {} / {}):\n  {}\n  {}\nNext: {}".format(
+        which, model_short, latest, versioned, next_step), file=sys.stderr)
     return {**envelope.payload, "written": True, "versioned_path": versioned,
             "latest_path": latest, "chose": which,
-            "next_step": "git add {} {} && git commit -m 'docs: update architecture diagram (candidate {} / {})'".format(
-                versioned, latest, which, model_short)}
+            "next_step": next_step}
 
 
 def revise_exit(envelope, config) -> Dict[str, Any]:

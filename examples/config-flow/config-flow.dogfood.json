@@ -1,0 +1,6 @@
+{
+  "_doc": "Dog-food / unattended config: real claude_cli + real mmdc + auto-approve at the gate. Used by the `visualize` shell wrapper for one-shot SVG production. Decisions block matches the gate's awaiting tag.",
+  "_extends": "config-flow.real.json",
+  "decisions": {"human:config-flow-review": {"decision": "approve"}},
+  "state": {"type": "file", "dir": ".config-flow-state-dogfood"}
+}

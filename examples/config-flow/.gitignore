@@ -1,0 +1,8 @@
+# run artifacts
+.config-flow-state*/
+config-flow-report.html
+__pycache__/
+
+# wrapper-generated fixture (regenerated on every `visualize` invocation)
+fixtures/_runtime.json
+_visualize-run.json

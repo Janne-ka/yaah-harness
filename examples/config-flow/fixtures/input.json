@@ -1,0 +1,7 @@
+{
+  "_doc": "Default fixture: visualize the config flow of arch-drift's dogfood-self config (the full _extends chain, most to show). Output lands in <target-dir>/diagrams/ so it sits next to the config it documents. For one-shot SVG production on any other config, use the `visualize` wrapper script — it generates a fixture for you.",
+  "target_config_path": "../arch-drift/arch-drift.dogfood-self.json",
+  "repo_path": "../arch-drift",
+  "arch_svg_path": "diagrams/arch-drift.dogfood-self_config-flow.svg",
+  "arch_svg_dir": "diagrams"
+}
