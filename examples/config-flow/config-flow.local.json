@@ -5,8 +5,11 @@
     "claude": {
       "type": "fake_scripted",
       "by_model": {
-        "claude-sonnet-4-6": [
+        "claude-haiku-4-5": [
           "{\"mermaid\":\"flowchart TD\\n  root[root config] --> pipeline\\n  root --> fixture\\n  pipeline --> nodes\\n  fixture --> nodes\",\"notes\":\"Canned response for offline runs — the real model produces a richer diagram from the snapshot.\"}"
+        ],
+        "claude-sonnet-4-6": [
+          "{\"mermaid\":\"flowchart TD\\n  root[root config] --> pipeline\\n  root --> fixture\\n  pipeline --> nodes\\n  fixture --> nodes\",\"notes\":\"Canned response — sonnet variant for A/B fake runs.\"}"
         ]
       }
     }

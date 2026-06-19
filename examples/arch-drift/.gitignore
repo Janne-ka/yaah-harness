@@ -2,3 +2,7 @@
 .arch-drift-state*/
 arch-report*.html
 __pycache__/
+
+# UTC-timestamped versioned diagram outputs — pile up over time; commit
+# only the `-a.svg` / `-b.svg` / `latest.svg` pointers next to them
+diagrams/*[0-9]Z.svg

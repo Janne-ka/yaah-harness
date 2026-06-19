@@ -1,0 +1,6 @@
+{
+  "_doc": "A/B real-mode config: real claude_cli (both sonnet and haiku) + real mmdc. Fully automated — produces BOTH SVGs in <target-dir>/diagrams/ with `-a` and `-b` suffixes. Use when verifying haiku is still good enough on a config shape you find tougher (deep _extends, complex fork/fanin, lots of cross-references).",
+  "_extends": "config-flow.real.json",
+  "pipeline": "config-flow-pipeline-ab.json",
+  "state": {"type": "file", "dir": ".config-flow-state-ab"}
+}

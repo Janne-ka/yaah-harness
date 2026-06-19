@@ -26,6 +26,9 @@ import sys
 import tempfile
 from typing import Any, Dict, List, Optional
 
+from yaah.agents.attacher import Attacher   # ADR-0003 — engine ships zero built-ins;
+                                             # this file holds the reference impl.
+
 
 # ---------- snapshot_config_flow: the new one ---------------------------------
 
@@ -331,6 +334,160 @@ def write_versioned(envelope, config) -> Dict[str, Any]:
 
 def noop_done(envelope, config) -> Dict[str, Any]:
     return {"ok": True}
+
+
+# ---------- A/B variant: usage attacher + fanin reducer + per-candidate ops --
+# Copied from examples/arch-drift/transforms.py (each example owns its own
+# transforms — see ADR-0003 rationale). If a third example needs the same
+# triad, factor a yaah-transforms-cookbook helper module then.
+
+class UsageAttacher(Attacher):
+    """Reference `usage` attacher: surfaces tokens + model under payload `usage`
+    from the tracer's last model_call span. Dollar cost NOT here — yaah keeps
+    pricing in the aggregator's price-map so history can be re-priced."""
+    name = "usage"
+    requires_capture = ("cost",)
+
+    def attach(self, envelope, span):
+        if not span:
+            return {}
+        return {"usage": {
+            "tokens_in": span.get("tokens_in", 0),
+            "tokens_out": span.get("tokens_out", 0),
+            "model": span.get("model"),
+        }}
+
+
+def merge_candidates(arrived: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Fanin reducer for the A/B fork. `arrived` is `{branch_id: payload}`
+    keyed by the FORK BRANCH NAMES (extract-a / extract-b for our pipeline)."""
+    candidates: List[Dict[str, Any]] = []
+    shared: Dict[str, Any] = {}
+    per_branch_keys = {"mermaid", "notes", "usage", "new_svg", "raw"}
+    for branch_id, payload in arrived.items():
+        label = branch_id.rsplit("-", 1)[-1]
+        candidates.append({
+            "label": label,
+            "mermaid": payload.get("mermaid", ""),
+            "notes": payload.get("notes", ""),
+            "usage": payload.get("usage") or {},
+            "new_svg": payload.get("new_svg", ""),
+        })
+        if not shared:
+            shared = {k: v for k, v in payload.items() if k not in per_branch_keys}
+    candidates.sort(key=lambda c: c["label"])
+    return {**shared, "candidates": candidates}
+
+
+def prepare_ab_template(envelope, config) -> Dict[str, Any]:
+    """Flatten `candidates` into per-candidate template keys + compute approx $
+    from a `prices` config block (per-million pricing; multiplication done here
+    so the engine stays out of pricing)."""
+    candidates = envelope.payload.get("candidates", [])
+    prices = (config.extras or {}).get("prices", {})
+    out: Dict[str, Any] = {**envelope.payload}
+    for c in candidates:
+        label = c["label"]
+        model = (c.get("usage") or {}).get("model") or "?"
+        tin = (c.get("usage") or {}).get("tokens_in", 0) or 0
+        tout = (c.get("usage") or {}).get("tokens_out", 0) or 0
+        rate = prices.get(model, {"in": 0.0, "out": 0.0})
+        cost_usd = round((tin * rate.get("in", 0.0) + tout * rate.get("out", 0.0)) / 1_000_000, 6)
+        out["candidate_{}_label".format(label)] = label
+        out["candidate_{}_model".format(label)] = model
+        out["candidate_{}_tokens_in".format(label)] = str(tin)
+        out["candidate_{}_tokens_out".format(label)] = str(tout)
+        out["candidate_{}_cost".format(label)] = "${:.6f}".format(cost_usd) if cost_usd else "$0.00"
+        out["candidate_{}_svg".format(label)] = c.get("new_svg", "")
+        out["candidate_{}_notes".format(label)] = c.get("notes", "")
+    return out
+
+
+def write_both_candidates(envelope, config) -> Dict[str, Any]:
+    """A/B output: write BOTH candidates' SVGs to disk side-by-side, with
+    `-a`/`-b` appended to the filename so the user can flip between them
+    in their file manager. No gate, no picking — the comparison IS the
+    artifact. Per the 2026-06-19 design call: "store the end results to
+    same dir WITH NAMES appended to have A or B."
+    """
+    candidates = envelope.payload.get("candidates", [])
+    repo = os.path.abspath(envelope.payload.get("repo_path", "."))
+    versioned_dir = os.path.join(repo, envelope.payload.get("arch_svg_dir", "diagrams"))
+    os.makedirs(versioned_dir, exist_ok=True)
+    stamp = _utc_stamp(envelope)
+    aspath = envelope.payload.get("arch_svg_path") or ""
+    base_stem = os.path.splitext(os.path.basename(aspath))[0] if aspath else "config-flow"
+    written: List[Dict[str, str]] = []
+    for c in candidates:
+        which = c["label"]
+        model_full = (c.get("usage") or {}).get("model") or "model"
+        model_short = model_full.rsplit(":", 1)[-1].replace("/", "-")
+        versioned = os.path.join(versioned_dir, "{}-{}-{}-{}.svg".format(base_stem, which, model_short, stamp))
+        latest = os.path.join(versioned_dir, "{}-{}.svg".format(base_stem, which))
+        new_svg = c.get("new_svg", "")
+        with open(versioned, "w", encoding="utf-8") as f:
+            f.write(new_svg)
+        with open(latest, "w", encoding="utf-8") as f:
+            f.write(new_svg)
+        written.append({"label": which, "model": model_short,
+                        "latest": latest, "versioned": versioned})
+    print("\nBoth A/B candidates landed:", file=sys.stderr)
+    for w in written:
+        usage_str = ""
+        for c in candidates:
+            if c["label"] == w["label"]:
+                u = c.get("usage") or {}
+                usage_str = "  tokens: {}in/{}out".format(
+                    u.get("tokens_in", 0), u.get("tokens_out", 0))
+                break
+        print("  ({} / {}){}\n    {}".format(
+            w["label"], w["model"], usage_str, w["latest"]), file=sys.stderr)
+    if len(written) >= 2:
+        print("\ncompare:\n  open {} {}".format(written[0]["latest"], written[1]["latest"]),
+              file=sys.stderr)
+    return {**envelope.payload, "written": True,
+            "written_paths": [w["latest"] for w in written]}
+
+
+def write_candidate(envelope, config) -> Dict[str, Any]:
+    """Write the chosen candidate's SVG. config.extras['which'] = 'a' or 'b'."""
+    which = (config.extras or {}).get("which")
+    if which not in ("a", "b"):
+        raise ValueError("write_candidate config.which must be 'a' or 'b' (got {!r})".format(which))
+    candidates = envelope.payload.get("candidates", [])
+    chosen = next((c for c in candidates if c["label"] == which), None)
+    if chosen is None:
+        raise ValueError("no candidate with label {!r}".format(which))
+    repo = os.path.abspath(envelope.payload.get("repo_path", "."))
+    versioned_dir = os.path.join(repo, envelope.payload.get("arch_svg_dir", "diagrams"))
+    os.makedirs(versioned_dir, exist_ok=True)
+    stamp = _utc_stamp(envelope)
+    model_full = (chosen.get("usage") or {}).get("model") or "model"
+    model_short = model_full.rsplit(":", 1)[-1].replace("/", "-")
+    aspath = envelope.payload.get("arch_svg_path") or ""
+    base_stem = os.path.splitext(os.path.basename(aspath))[0] if aspath else "config-flow"
+    versioned = os.path.join(versioned_dir, "{}_{}-{}-{}.svg".format(base_stem, which, model_short, stamp))
+    latest = os.path.join(versioned_dir, "{}-{}.svg".format(base_stem, which))
+    new_svg = chosen.get("new_svg", "")
+    with open(versioned, "w", encoding="utf-8") as f:
+        f.write(new_svg)
+    with open(latest, "w", encoding="utf-8") as f:
+        f.write(new_svg)
+    next_step = "open {}".format(latest)
+    print("\nSVG landed (candidate {} / {}):\n  {}\n  {}\nNext: {}".format(
+        which, model_short, latest, versioned, next_step), file=sys.stderr)
+    return {**envelope.payload, "written": True, "versioned_path": versioned,
+            "latest_path": latest, "chose": which, "next_step": next_step}
+
+
+def revise_exit(envelope, config) -> Dict[str, Any]:
+    """A/B v1 revise: print feedback, exit. (Looping revise deferred to v2.)"""
+    feedback = envelope.payload.get("feedback", "")
+    print("REVISE: human asked for a revision. feedback: {!r}".format(feedback),
+          file=sys.stderr)
+    print("v1 of the A/B pipeline does not loop on revise; re-run with the "
+          "feedback applied to your prompt or input.", file=sys.stderr)
+    return {**envelope.payload, "revised": True, "feedback": feedback}
 
 
 def _utc_stamp(envelope) -> str:

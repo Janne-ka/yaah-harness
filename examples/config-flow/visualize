@@ -59,12 +59,13 @@ cat > "$RUNTIME_FIXTURE" <<EOF
 }
 EOF
 
-# tiny shim root: extends the dogfood config and overrides `input` to point
-# at the runtime fixture we just wrote
+# tiny shim root: extends the real config and overrides `input` to point at
+# the runtime fixture we just wrote. (No dogfood layer — the pipeline is
+# fully automated, no human gate to auto-approve.)
 SHIM_ROOT="$SCRIPT_DIR/_visualize-run.json"
 cat > "$SHIM_ROOT" <<EOF
 {
-  "_extends": "config-flow.dogfood.json",
+  "_extends": "config-flow.real.json",
   "input": "fixtures/_runtime.json"
 }
 EOF

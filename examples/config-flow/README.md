@@ -45,15 +45,16 @@ This tool walks ALL of that and asks claude to draw it.
 
 ```
 config-flow.local.json                ← offline / fake provider / canned renderer
-  └─ config-flow.real.json            ← swaps in real claude + real mmdc + by_model:null
-       └─ config-flow.dogfood.json    ← auto-approve at the gate (used by `visualize`)
+  └─ config-flow.real.json            ← real claude + real mmdc + by_model:null
+
+config-flow-ab.dogfood.json           ← A/B comparison (sonnet vs haiku), auto-approve at gate
 ```
 
 Plus:
-- `config-flow-pipeline.json` — 8 stages: snapshot → extract → check → parse → render-svg → report → gate → land (revise loops back to extract).
-- `transforms.py` — `snapshot_config_flow` (the new one) + `parse`/`render`/`write` (copied from arch-drift).
+- `config-flow-pipeline.json` — 5 stages: snapshot → extract → check → parse → render-svg → land. **No human gate** — config-flow is regenerable; the user re-runs whenever. Default model: `claude-sonnet-4-6` (haiku tested in the 2026-06-19 A/B run; cheaper but produced denser, less-readable layouts on this task — see "A/B comparison" below).
+- `config-flow-pipeline-ab.json` — A/B variant. **No gate** — writes BOTH SVGs to disk with `-a` and `-b` appended, in the same dir. The comparison IS the artifact; you open both and pick visually.
+- `transforms.py` — `snapshot_config_flow` (the new one) + `parse`/`render`/`write` (copied from arch-drift) + A/B helpers (`UsageAttacher`, `merge_candidates`, `prepare_ab_template`, `write_both_candidates`).
 - `prompts/extract.md` — config-flow-specific prompt.
-- `templates/report.html` — gate-review page.
 - `fixtures/input.json` — default target (arch-drift.dogfood-self.json — full chain, most to show).
 - `visualize` — the wrapper script described above.
 
@@ -61,8 +62,9 @@ Plus:
 
 | Run | Use when | Cost |
 |---|---|---|
-| `./visualize <target>` | One-shot SVG production for any config. | ~$0.05 + ~70s |
-| `python3 -m yaah.runtime config-flow.real.json` | Default target (arch-drift), park at the gate for review. Use `yaah list` + `yaah resume` to drive. | ~$0.05 + ~70s + your time |
+| `./visualize <target>` | One-shot SVG production for any config. The convenient default. | ~$0.05–0.20 + ~80s (sonnet; variance) |
+| `python3 -m yaah.runtime config-flow.real.json` | Default target (arch-drift), runs end-to-end with no human input. | same |
+| `python3 -m yaah.runtime config-flow-ab.real.json` | A/B comparison sonnet vs haiku — produces BOTH SVGs (`<stem>-a.svg` + `<stem>-b.svg`) side-by-side in the target's `diagrams/` dir. Fully automated, no gate. Use to verify haiku is still good enough on a new config shape. | ~$0.23 + ~85s |
 | `MERMAID_RENDERER=:canned python3 -m yaah.runtime config-flow.local.json` | Verify the pipeline shape without an LLM key. Output is a canned SVG (visually meaningless). | zero |
 
 ## Dependencies
@@ -94,30 +96,40 @@ exist because yaah's root configs reference inputs by *path* — no `--input`
 CLI flag. The two extra files are the price of keeping the engine surface
 small.
 
-## Interactive (review-before-land) mode
+## A/B comparison mode (sonnet vs haiku)
 
-When the diagram needs human judgment before it's "official," skip the
-wrapper and run the real config directly:
+The single-model pipeline defaults to **`claude-sonnet-4-6`**. The 2026-06-19
+A/B run on the arch-drift.dogfood-self target showed both models can produce
+a valid config-flow diagram, but sonnet draws cleaner layouts on this task:
+
+| | Sonnet | Haiku |
+|---|---|---|
+| Cost (this run) | $0.18–$0.34 (variance) | ~$0.045 |
+| Wall (extract) | 84–230s (high variance) | ~37s (consistent) |
+| Out-tokens | 6900–17400 | ~5900 |
+| Layout quality | clean subgraph separation; extends-chain horizontal | denser; mixes flow-vs-class-diagram styles; extends-chain vertical |
+
+Haiku is cheaper and faster, but the layout it picks is less readable —
+subgraph boundaries blur, references cross more, the extends chain
+renders vertically instead of as a stack. **A better prompt with
+explicit layout hints could probably close the gap**, but the current
+prompt gives the model freedom and haiku makes worse layout choices.
+Until the prompt is tightened, sonnet is the default.
+
+To re-compare on a config you find tougher:
 
 ```bash
 cd examples/config-flow
-# 1) writes report.html, parks at the gate
-python3 -m yaah.runtime config-flow.real.json
-# 2) look at the parked baton
-python3 -m yaah.runtime list config-flow.real.json
-# 3) (driver-skill helper) get the decision schema
-python3 -m yaah.runtime baton-schema config-flow.real.json <baton-id>
-# 4) deliver a decision
-echo '{"decision":"approve"}' > /tmp/d.json
-python3 -m yaah.runtime resume config-flow.real.json <baton-id> /tmp/d.json
+python3 -m yaah.runtime config-flow-ab.real.json
+# → produces TWO SVGs side-by-side in the target's diagrams/:
+#     <stem>-a-claude-sonnet-4-6-<utc>.svg + <stem>-a.svg  (latest pointer)
+#     <stem>-b-claude-haiku-4-5-<utc>.svg  + <stem>-b.svg
+# → prints paths on stderr; `open <both>` to compare visually
 ```
 
-Or revise with feedback (loops back to the extractor with the feedback in the prompt):
-
-```bash
-echo '{"decision":"revise","feedback":"group the extends chain into a subgraph"}' > /tmp/d.json
-python3 -m yaah.runtime resume config-flow.real.json <baton-id> /tmp/d.json
-```
+Stderr at exit shows tokens-per-candidate so you can see the cost delta.
+If you've prompt-tuned haiku into producing layouts as clean as sonnet's,
+switch the default in `config-flow-pipeline.json`'s `role:extract`.
 
 ## Adding to your own project
 
