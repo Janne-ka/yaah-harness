@@ -2,7 +2,7 @@
   "_doc": "Config-flow visualizer pipeline. Snapshot the target config, ask the agent to draw it, render, land. Fully automated — no human gate (the artifact is regenerable; the user can re-run any time). For A/B model comparison, see config-flow-pipeline-ab.json.",
   "nodes": {
     "role:snapshot":   {"type": "transform", "target": "fn:transforms:snapshot_config_flow", "call": "envelope"},
-    "role:extract":    {"type": "agent", "prompt": "file:extract", "model": "claude:claude-sonnet-4-6", "stage": "extract",
+    "role:extract":    {"type": "agent", "prompt": "file:extract-strict", "model": "claude:claude-haiku-4-5", "stage": "extract",
                          "carry": ["target_config_path", "arch_svg_path", "arch_svg_dir", "snapshot"]},
     "role:check":      {"type": "json_object", "required": ["mermaid"]},
     "role:parse":      {"type": "transform", "target": "fn:transforms:parse_extracted", "call": "envelope"},

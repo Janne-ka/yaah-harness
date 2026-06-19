@@ -7,7 +7,7 @@
                            "model": "claude:claude-sonnet-4-6", "stage": "extract-a",
                            "carry": ["target_config_path", "repo_path", "arch_svg_path", "arch_svg_dir", "snapshot"],
                            "attach": ["fn:transforms:UsageAttacher"]},
-    "role:extract-b":    {"type": "agent", "prompt": "file:extract",
+    "role:extract-b":    {"type": "agent", "prompt": "file:extract-strict",
                            "model": "claude:claude-haiku-4-5", "stage": "extract-b",
                            "carry": ["target_config_path", "repo_path", "arch_svg_path", "arch_svg_dir", "snapshot"],
                            "attach": ["fn:transforms:UsageAttacher"]},

@@ -7,5 +7,8 @@ __pycache__/
 fixtures/_runtime.json
 _visualize-run.json
 
-# diagram outputs — fully regenerable; the pipeline IS what we commit, not its output
-diagrams/
+# diagram outputs — fully regenerable; the pipeline IS what we commit, not its
+# output. Keep the dir (via .gitkeep) so the path always resolves; ignore the
+# generated SVGs. To commit a specific one as a polished demo: `git add -f
+# diagrams/<name>.svg`.
+diagrams/*.svg
