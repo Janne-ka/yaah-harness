@@ -37,6 +37,7 @@ This folder is the deeper reference.
 | [durable-state.md](durable-state.md) | batons, idempotency, working memory, suspend/resume across restarts |
 | [decision-forms.md](decision-forms.md) | the shared decision-shape vocabulary for human gates (`yaah baton-schema`) — including how to extend it |
 | [decisions/0003-attacher-port.md](decisions/0003-attacher-port.md) | the `attach: [...]` opt-in on agent nodes — surfacing tracer-captured data (tokens/usage/etc.) to in-flight payload for branching, budgeting, A/B comparison |
+| [case-study/prompt-tuning/](case-study/prompt-tuning/) | three SVGs + walkthrough: how `examples/config-flow`'s A/B run drove the haiku default and two-prompt strategy (sonnet wants room, haiku wants rails) |
 
 ## Project
 

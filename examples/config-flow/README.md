@@ -173,6 +173,11 @@ underperforms, switch the default back in
 `config-flow-pipeline.json`'s `role:extract` — but tune the prompt
 first; that closed the gap last time too.
 
+The full walkthrough — three SVGs side-by-side (sonnet+loose,
+haiku+loose, haiku+strict) and the asymmetry that explains why the
+single prompt didn't work — is in
+[`docs/case-study/prompt-tuning/`](../../docs/case-study/prompt-tuning/).
+
 ## Adding to your own project
 
 If you publish a yaah-based pipeline and want a config-flow diagram in your
