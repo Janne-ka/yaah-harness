@@ -1,7 +1,7 @@
 {
   "_doc": "Architecture-drift detector (A-only: single model). Snapshot the repo, ask the agent for mermaid markup, render it, diff against the committed SVG, branch on changed, optionally park for human review, land a versioned SVG on approve.",
   "nodes": {
-    "role:snapshot":    {"type": "transform", "target": "fn:transforms:snapshot_imports", "call": "envelope"},
+    "role:snapshot":    {"type": "transform", "target": "fn:transforms:snapshot", "call": "envelope"},
     "role:read-svg":    {"type": "transform", "target": "fn:transforms:read_committed_svg", "call": "envelope"},
     "role:extract":     {"type": "agent", "prompt": "file:extract", "model": "claude:claude-sonnet-4-6", "stage": "extract",
                           "carry": ["repo_path", "arch_svg_path", "arch_svg_dir", "committed_svg", "committed_svg_path", "snapshot", "feedback"]},

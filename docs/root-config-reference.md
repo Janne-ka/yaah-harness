@@ -25,6 +25,20 @@ provenance; a malformed root fails fast with a did-you-mean.
 (install-safe). See [node-reference.md](node-reference.md) for `_extends`
 merge semantics (RFC 7396: objects merge, lists replace, `null` deletes).
 
+**The `null`-deletes pattern bites** the first time you extend a fake-overlay
+config with a real-provider override. Example: `arch-drift.local.json` has
+`providers.claude = {type: "fake_scripted", by_model: {…}}`; the real config
+says `providers.claude = {type: "claude_cli", binary: "claude"}` thinking it
+overrides. It doesn't — deep merge keeps `by_model` from the base, and
+`ClaudeCliBackend` rejects the extra key. **Explicitly null it:**
+```json
+"providers": {"claude": {"type": "claude_cli", "binary": "claude",
+                          "by_model": null}}
+```
+RFC 7396 says child `null` deletes the key from the merged result. Apply
+whenever a child config swaps a typed-block's `type` and the base had
+type-specific fields the new type doesn't accept.
+
 ## Top-level keys
 
 | Key | Shape | Meaning |

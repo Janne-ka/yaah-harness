@@ -9,7 +9,7 @@ This folder is the deeper reference.
 |---|---|
 | [quickstart.md](quickstart.md) | run a pipeline in 5 minutes (fake backend, no API key) |
 | [tutorial.md](tutorial.md) | build your own — a 5-step recipe, then each concept in a runnable example |
-| [../examples/](../examples/) | `hello-yaah` (linear), `review-pipeline` (branch + human gate), `fork-join` (parallel) |
+| [../examples/](../examples/) | `hello-yaah` (linear), `review-pipeline` (branch + human gate), `fork-join` (parallel), `arch-drift` (full multi-stage with attachers; A-only + A/B model comparison) |
 | [../AGENTS.md](../AGENTS.md) | point an AI assistant at this to author pipelines for you |
 
 ## Understand it
@@ -36,6 +36,7 @@ This folder is the deeper reference.
 | [agent-tools.md](agent-tools.md) | giving an agent tools + MCP |
 | [durable-state.md](durable-state.md) | batons, idempotency, working memory, suspend/resume across restarts |
 | [decision-forms.md](decision-forms.md) | the shared decision-shape vocabulary for human gates (`yaah baton-schema`) — including how to extend it |
+| [decisions/0003-attacher-port.md](decisions/0003-attacher-port.md) | the `attach: [...]` opt-in on agent nodes — surfacing tracer-captured data (tokens/usage/etc.) to in-flight payload for branching, budgeting, A/B comparison |
 
 ## Project
 

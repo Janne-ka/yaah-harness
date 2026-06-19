@@ -1,0 +1,27 @@
+{
+  "_doc": "Offline / fake config for the arch-drift A/B variant. Same fake-provider trick as arch-drift.local.json but scripts TWO distinct mermaid responses keyed by model name — one each for sonnet (candidate A) and haiku (candidate B), so the report shows visibly-different markup per candidate even on fake. Both render to the SAME canned SVG (mermaid renderer is the canned shortcut to skip the mmdc dep); the demo's cost-comparison story is the load-bearing part, not the visual variation. For real per-model SVG output, use the .real.json config with mmdc installed.",
+  "_note_renderer": "Set MERMAID_RENDERER=:canned in the env before running, or wrap the command (the render_mermaid transform reads it).",
+  "_note_tracer": "trace.capture must include `cost` — without it the UsageAttacher's requires_capture=('cost',) check rejects at build time. The capture-check is the engine surface that catches `attach used without the data` silently-wrong, per ADR-0003.",
+  "transport": {"type": "inproc"},
+  "providers": {
+    "claude": {
+      "type": "fake_scripted",
+      "by_model": {
+        "claude-sonnet-4-6": [
+          "{\"mermaid\":\"flowchart TD\\n  subgraph core\\n    envelope\\n    kind\\n  end\\n  subgraph harness\\n    graph_runner\\n    baton\\n  end\\n  subgraph adapters\\n    transports\\n    backends\\n    stores\\n  end\\n  harness --> core\\n  adapters --> core\",\"notes\":\"3-layer with subgraphs: core defines the wire shape, harness owns orchestration, adapters bind to outside systems.\"}"
+        ],
+        "claude-haiku-4-5": [
+          "{\"mermaid\":\"flowchart LR\\n  core --> harness\\n  harness --> adapters\",\"notes\":\"Simple 3-node left-to-right. Less detail than sonnet's grouping; if you want a one-glance picture this is it, if you want layer membership use A.\"}"
+        ]
+      }
+    }
+  },
+  "default_provider": "claude",
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "file", "dir": ".arch-drift-state"},
+  "trace": {"mode": "tracer", "capture": ["phase", "cost"], "sinks": [{"type": "console"}]},
+  "pipeline": "arch-drift-pipeline-ab.json",
+  "input": "fixtures/input.json",
+  "run": true
+}

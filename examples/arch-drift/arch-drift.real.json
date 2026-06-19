@@ -4,7 +4,8 @@
   "providers": {
     "claude": {
       "type": "claude_cli",
-      "binary": "claude"
+      "binary": "claude",
+      "by_model": null
     }
   },
   "state": {"type": "file", "dir": ".arch-drift-state"}

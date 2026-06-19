@@ -38,9 +38,14 @@ label), `cwd_from`, `carry` (payload keys forwarded into the reply — agents
 REPLACE the payload otherwise; prefer graph `sticky` for run-wide keys),
 `tools` (model-initiated, needs a turn-capable backend), `allowed_tools` +
 `permission_mode` (claude-native), `mcp` (inline servers or `"source:key"`),
-`expose`/`filters`/`max_chars`/`broker` (R9–R12 envelope access).
+`expose`/`filters`/`max_chars`/`broker` (R9–R12 envelope access), `attach`
+(opt-in list of `fn:module:func` references to `Attacher` subclasses; the
+agent gets wrapped in `AttachingAgent` and each attacher merges post-invoke
+data — e.g. tokens/usage — onto the output payload from the tracer's last
+span; see [ADR-0003](decisions/0003-attacher-port.md)).
 
-Output: `{raw: <model text>, ...carry keys, ...cwd carry}` — payload REPLACED.
+Output: `{raw: <model text>, ...carry keys, ...cwd carry, ...attacher keys}`
+— payload REPLACED.
 
 ```json
 "role:review": {"type": "agent", "prompt": "file:review",
@@ -57,6 +62,11 @@ payload-derived**), `node:role` (another node over Comms), or `http(s)://url`
   key); result lands under `into` (default `"result"`) — enrich, don't replace.
 - `call: "envelope"` (fn: only): `fn(envelope, config)`; the returned dict
   SPREADS over the payload top-level — the config-aware deterministic step.
+  **Gotcha:** "spread" here means "the returned dict IS the new payload" —
+  multi-stage pipelines must explicitly carry prior keys forward, e.g.
+  `return {**envelope.payload, "new_key": value}`. The hello-yaah and
+  review-pipeline examples don't trip on this because each is a one-key
+  pipeline; arch-drift (multi-stage) does it explicitly at every transform.
 
 ```json
 "role:flatten": {"type": "transform", "call": "envelope",

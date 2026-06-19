@@ -4,6 +4,34 @@ A pipeline that compares the architecture extracted from the code with the
 currently-committed architecture SVG. If they disagree, it parks for a human
 review and — on approve — lands a new versioned SVG.
 
+## Files at a glance (inheritance map)
+
+```
+arch-drift.local.json                  ← offline / fake provider / canned renderer
+  └─ arch-drift.real.json              ← swaps in real claude + real mmdc + by_model:null
+       └─ arch-drift.dogfood.json      ← adds decisions:{} to auto-approve unattended
+            └─ arch-drift.dogfood-self.json
+                                       ← overrides `input` to point at input-self.json
+
+arch-drift-ab.local.json               ← A/B variant on fake (two scripted models)
+
+(pipelines, referenced by `pipeline:` in roots:)
+arch-drift-pipeline.json               ← A-only graph
+arch-drift-pipeline-ab.json            ← A/B graph (fork + fanin)
+
+(fixtures, referenced by `input:` in roots:)
+fixtures/input.json                    ← target (b) — yaah's internals visible
+fixtures/input-self.json               ← target (a) — yaah as a black box
+```
+
+| Config | Use when | Costs |
+|---|---|---|
+| `arch-drift.local.json` | Testing the pipeline shape without an LLM key. Runs end-to-end on canned mermaid and a fixed SVG. | zero |
+| `arch-drift.real.json` | First real run; parks at the gate for you to review. | ~$0.05 claude tokens + ~70s wall |
+| `arch-drift.dogfood.json` | CI / unattended → produces `docs/architecture/yaah-with-arch-drift.svg`. | same |
+| `arch-drift.dogfood-self.json` | CI / unattended → produces `docs/architecture/arch-drift-only.svg`. | same |
+| `arch-drift-ab.local.json` | Demo the A/B model-comparison + attached-cost flow on fake. | zero |
+
 ## What it does, stage by stage
 
 ```
@@ -91,16 +119,67 @@ attempts again with that guidance.
 
 ## Run it for real (claude-sonnet-4-6 + mmdc)
 
-```bash
-# install mermaid-cli once
-npm install -g @mermaid-js/mermaid-cli
+### Production checklist
 
-# then
+Real-mode has three setup gotchas the offline run hides. All three were hit
+the first time we ran this end-to-end. Address them once and you're set.
+
+| Need | Why |
+|---|---|
+| `mmdc` on PATH | `npm install -g @mermaid-js/mermaid-cli` (may need sudo depending on your npm prefix). The `MERMAID_RENDERER=:canned` override is **test-only** — it returns a fixed pre-baked SVG that doesn't vary by input, so real artifacts need the real renderer. |
+| `claude` on PATH | yaah's `claude_cli` backend shells out to it. Comes with Claude Code; check with `which claude`. |
+| `extract_json` (already in `transforms.py`) | Real sonnet/haiku wrap JSON in markdown fences; strict `json.loads` fails. Only opus is reliably strict. The example uses `yaah.jsonio.extract_json` (fence/prose-tolerant) — copy that pattern in your own transforms. |
+| `by_model: null` in real config (already there) | yaah's `_extends` is a deep merge per RFC 7396 JSON Merge Patch — child `null` deletes a key from the base. `arch-drift.real.json` extends `.local.json` and explicitly nulls the `by_model` field so the `claude_cli` backend doesn't get the fake's `by_model` map. See [docs/root-config-reference.md](../../docs/root-config-reference.md). |
+| `decisions:` block for unattended runs | When running headlessly (CI, dog-food), set `decisions: {"<awaiting-tag>": {<decision>}}` in the root so the gate driver auto-resolves instead of parking. See `arch-drift.dogfood.json` for the pattern. |
+
+### Interactive run (you approve at the gate)
+
+```bash
 yaah run examples/arch-drift/arch-drift.real.json
+# parks at the gate; another terminal:
+yaah list   examples/arch-drift/arch-drift.real.json --json
+yaah baton-schema examples/arch-drift/arch-drift.real.json <baton-id>
+echo '{"decision":"approve"}' > /tmp/d.json
+yaah resume examples/arch-drift/arch-drift.real.json <baton-id> /tmp/d.json
 ```
 
-`arch-drift.real.json` `_extends` the local config and swaps the `claude`
-provider from `fake_scripted` to the real `claude_cli` backend.
+### Unattended run (auto-approve at the gate)
+
+```bash
+yaah run examples/arch-drift/arch-drift.dogfood.json
+# end-to-end, no human input; lands SVG under docs/architecture/
+```
+
+## Dog-food: produce two diagrams of arch-drift itself
+
+`docs/architecture/` is the home for the diagrams arch-drift produces of its
+own world. Two targets coexist there, written by the same pipeline pointed
+at different roots via different fixtures:
+
+| Target | Input fixture | Output | What it shows |
+|---|---|---|---|
+| **(a) arch-drift only** (yaah as a black box) | `fixtures/input-self.json` | `docs/architecture/arch-drift-only.svg` | The example's own pipeline graph (snapshot strategy: `pipeline_json`). yaah is a single external node. |
+| **(b) yaah + arch-drift** (yaah's internals visible) | `fixtures/input.json` (default) | `docs/architecture/yaah-with-arch-drift.svg` | yaah's `core` / `harness` / `comms` / `adapters` layers extracted from the actual code (snapshot strategy: `imports`). |
+
+To produce target (a) yourself — the diagram of arch-drift only:
+
+```bash
+cd examples/arch-drift
+yaah run arch-drift.dogfood-self.json
+# auto-approves; writes docs/architecture/arch-drift-only.svg
+```
+
+To (re-)produce target (b):
+
+```bash
+cd examples/arch-drift
+yaah run arch-drift.dogfood.json
+# auto-approves; writes docs/architecture/yaah-with-arch-drift.svg
+```
+
+Both runs cost a few cents of claude tokens and ~70s of wall time (model
+extract ~30s, mermaid render ~5s). Commit the resulting SVGs to track
+architectural drift over time.
 
 ## Run it on another Python repo
 
@@ -138,23 +217,62 @@ To use one, add the function in `transforms.py` and change the pipeline's
 `role:snapshot` `target` to `fn:transforms:your_new_function`. No engine
 change needed.
 
-## Planned variant: A/B model comparison
+## A/B variant — model comparison with attached cost data
 
-When we have signal that the pipeline works at all, the natural next step is
-a second pipeline JSON that **forks** the `extract` stage to two models in
-parallel — typically `claude-sonnet-4-6` (A) vs `claude-haiku-4-5` (B) — and
-shows BOTH candidates in the report. The human picks one. This is genuinely
-yaah-shaped (real fork, real fanin, real human judging) and answers an
-empirical question: "is haiku good enough at this task to halve the cost?"
+A second pipeline that **forks** the `extract` stage to two models in
+parallel — sonnet (A) and haiku (B) — and shows BOTH candidates in the
+report alongside their token usage. The human picks one. This answers
+the empirical question every advanced yaah user has: *is the cheaper
+model good enough for my task?*
 
-The open design question deferred to that variant: **what does "revise"
-mean when there are two candidates?** Options: feedback goes to both
-branches and they retry in parallel; feedback goes only to the human's
-preferred candidate; the loser is dropped after revise. To be decided
-when we build it. (The new `form: "json_schema"` escape hatch on
-`human_gate` lets us define a richer decision shape — e.g.
-`{decision: "approve_a"|"approve_b"|"revise", feedback: "..."}` — without
-adding to the generic catalog.)
+Files: `arch-drift-pipeline-ab.json` + `templates/report-ab.html` +
+`arch-drift-ab.local.json`.
+
+Demonstrates the `attach: [...]` opt-in (see
+[decisions/0003-attacher-port.md](../../docs/decisions/0003-attacher-port.md)):
+each fork branch uses `attach: ["fn:transforms:UsageAttacher"]`. The
+reference `UsageAttacher` lives in `transforms.py` (engine ships zero
+built-ins per ADR-0003 — every consumer copies the 10-line reference).
+The report template flattens the `candidates` list into per-candidate
+keys and computes approximate $ from a `prices` map on the prepare stage
+(pricing stays in config per yaah's existing rule).
+
+Run it offline:
+
+```bash
+MERMAID_RENDERER=:canned yaah run examples/arch-drift/arch-drift-ab.local.json
+```
+
+The fake provider scripts two distinct mermaid responses (visible
+differences between A and B even on fake), and the gate uses the
+`json_schema` decision form (see
+[decision-forms.md](../../docs/decision-forms.md)) with decision shape
+`{"decision": "approve_a"|"approve_b"|"revise", "feedback": "string?"}`.
+Inspect with `yaah list <root> --json` and `yaah baton-schema <root> <id>`.
+
+To approve:
+
+```bash
+echo '{"decision":"approve_a"}' > /tmp/d.json
+yaah resume examples/arch-drift/arch-drift-ab.local.json <id> /tmp/d.json
+```
+
+Lands `docs/architecture/<utc>-a-claude-sonnet-4-6.svg` (the model name
+gets embedded in the filename so the versioned dir disambiguates between
+A and B runs).
+
+**v1 limitation: revise is a non-looping exit.** Sending
+`{"decision":"revise","feedback":"..."}` surfaces the feedback on stderr
+and ends the run; re-run the pipeline with the feedback applied to your
+prompt or input. The looping variant (feedback flows back to both
+extract branches, both retry) is the v2 design question we deferred.
+
+**Cost data on the fake provider is zero** (fake_scripted doesn't
+populate `on_usage`). The price-map multiplication still happens but
+produces `$0.00`. For real cost signals, use a real provider (`claude`,
+`openai-compatible` etc.) — see the canonical `arch-drift.real.json`
+shape for how to wire one up; you'd extend it to declare both sonnet
+and haiku providers under the `claude` provider name.
 
 ## What this example demonstrates
 
