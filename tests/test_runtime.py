@@ -9,8 +9,11 @@ Run: cd yaah && PYTHONPATH=src python3 tests/test_runtime.py
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import json
 import os
+import sys
 import tempfile
 
 from yaah import Kind
@@ -277,6 +280,40 @@ def scenario_read_json_extends() -> None:
         assert _read_json(p) == {"q": "p"}
 
 
+def scenario_main_catches_import_error() -> None:
+    """Y1 — an `ImportError` raised on an eager build path (e.g. attach: [fn:...]
+    whose module isn't on PYTHONPATH) used to escape main() as a 30-line
+    ModuleNotFoundError traceback because the handler caught only ValueError/
+    OSError. Now ImportError is in the same except clause: the operator gets
+    one actionable line + exit 2, matching the existing config-error UX."""
+    # Monkey-patch the dispatcher to raise the exact exception class — tests
+    # main()'s except clause directly, independent of WHERE in the engine the
+    # eager import lives. (The lazy `fn:` path inside a stage gets wrapped as
+    # StageFailed instead, which is a different code path; this test pins the
+    # clean-exit contract for the eager build path.)
+    prev_dispatch = r._dispatch
+    prev_argv = sys.argv
+    sys.argv = ["yaah", "irrelevant.json"]
+    r._dispatch = lambda _spec: (_ for _ in ()).throw(
+        ModuleNotFoundError("No module named 'yaah_app_demo'"))
+    stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(stderr):
+            r.main()
+    except SystemExit as e:
+        assert e.code == 2, "expected clean exit 2 for ImportError, got {}".format(e.code)
+    else:
+        raise AssertionError("expected SystemExit; ImportError escaped")
+    finally:
+        r._dispatch = prev_dispatch
+        sys.argv = prev_argv
+    # the operator sees ONE line, not a traceback; the module name is in it
+    # so they know what to add to PYTHONPATH.
+    msg = stderr.getvalue()
+    assert msg.startswith("error: "), msg
+    assert "yaah_app_demo" in msg, msg
+
+
 def main() -> None:
     scenario_resolve_serve()
     scenario_validate_root()
@@ -288,6 +325,7 @@ def main() -> None:
     scenario_stats_sink_price_map_file()
     scenario_cli_parser()
     scenario_read_json_extends()
+    scenario_main_catches_import_error()
     print("ok")
 
 

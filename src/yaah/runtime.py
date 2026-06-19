@@ -265,6 +265,11 @@ async def resume_gate(root: Dict[str, Any], base: str, baton_id: str,
     possibly in a different process than the one that suspended it (the durable
     store is the rendezvous). `--resume` entrypoint."""
     harness = await _assemble_harness(root, base)
+    # The originally-detached engine has exited at the park; THIS process
+    # now runs the engine in-process until the next gate or completion.
+    # Banner sets expectations (was previously silently blocking).
+    print("[yaah resume] engine running in this process until next gate or completion",
+          file=sys.stderr)
     out = await harness.resume(baton_id, Envelope(Kind.RESUME, decision))
     if isinstance(out, Suspended):  # hit the next gate
         print("GATE baton_id={} awaiting={} concerns={}".format(
@@ -686,10 +691,11 @@ def main() -> None:
             raise
         print("pipeline failed: {}".format(e), file=sys.stderr)
         raise SystemExit(1) from None
-    except (ValueError, OSError) as e:
+    except (ValueError, OSError, ImportError) as e:
         # config-class errors (missing file, bad JSON, failed validation,
-        # unknown type mid-build): the message IS the fix; a 40-line traceback
-        # into the factory buries it (assessment DX). --debug restores it.
+        # unknown type mid-build, fn: target whose module isn't on PYTHONPATH):
+        # the message IS the fix; a 40-line traceback into the factory or
+        # importlib buries it. --debug restores it.
         if spec.get("debug"):
             raise
         print("error: {}".format(e), file=sys.stderr)

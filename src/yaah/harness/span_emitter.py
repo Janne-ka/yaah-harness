@@ -43,7 +43,8 @@ class SpanEmitter:
 
     async def stage(self, stage_name: str, input: Envelope, t0: float,
                     *, status: str, concerns: Optional[list] = None,
-                    output: Optional[Envelope] = None, route: Any = None) -> None:
+                    output: Optional[Envelope] = None, route: Any = None,
+                    awaiting: Optional[str] = None) -> None:
         """Emit a `stage` span for a completed stage. Status reflects the stage
         outcome: 'ok' (passed), 'suspended' (parked at gate), 'cleared'
         (cancelled in-flight). Soft concerns (validators that flagged but
@@ -64,6 +65,11 @@ class SpanEmitter:
         # transient payload, never a span).
         if route is not None:
             attrs["route"] = route
+        # Suspend context — who/what the gate is waiting for. The progress
+        # sink renders this inline so an operator tailing the log doesn't
+        # have to `yaah list` to find out what just parked.
+        if awaiting is not None:
+            attrs["awaiting"] = awaiting
         await self._tracer.emit(Span.timed(
             "stage", corr=input.correlation_id, parent=input.id,
             t0=t0, t1=self._clock(), status=status, attrs=attrs))

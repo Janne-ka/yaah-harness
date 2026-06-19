@@ -230,7 +230,8 @@ class Harness:
         baton = await self.batons.load(baton_id)
         if baton is None:
             raise KeyError(
-                "no resumable baton {!r} (it finished, expired, or never existed)".format(baton_id))
+                "no resumable baton {!r} — run `yaah list`; each baton is "
+                "single-shot, and TTLs expire abandoned ones".format(baton_id))
         if baton.status != "suspended":
             raise ValueError("baton {!r} is not suspended".format(baton_id))
         if baton.stage is None:
@@ -334,7 +335,8 @@ class Harness:
         await self._spans.stage(stage.name, input, t0,
                                 status=_status,
                                 concerns=getattr(result, "concerns", None),
-                                output=out, route=route)
+                                output=out, route=route,
+                                awaiting=getattr(result, "awaiting", None))
         return result
 
     def _fold_sticky(self, stage_input: Envelope, stage_output: Envelope) -> None:

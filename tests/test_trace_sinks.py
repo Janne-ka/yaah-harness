@@ -72,9 +72,26 @@ async def scenario_stats_file_overwrites_with_latest() -> None:
         assert json.load(open(path))["totals"]["stage_spans"] == 2  # latest snapshot, not appended
 
 
+async def scenario_progress_file_suspend_shows_awaiting() -> None:
+    # A suspended stage span carries `awaiting`; the line MUST surface it so
+    # the operator tailing progress.log doesn't have to `yaah list` separately
+    # to see what just parked. Other statuses keep the legacy short form.
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "progress.log")
+        sink = ProgressFileSink(path, clock=lambda: 0.0)
+        await sink.handle(_rec(name="stage", stage="extract", status="ok", duration_ms=12.0))
+        await sink.handle(_rec(name="stage", stage="review", status="suspended",
+                               duration_ms=3.0, awaiting="human:arch-review"))
+        lines = open(path, encoding="utf-8").read().splitlines()
+        assert "awaiting" not in lines[0], lines[0]            # ok status: no awaiting label
+        assert "awaiting=human:arch-review" in lines[1], lines[1]
+        assert "suspended" in lines[1], lines[1]
+
+
 async def main() -> None:
     await scenario_progress_file()
     await scenario_progress_appends()
+    await scenario_progress_file_suspend_shows_awaiting()
     await scenario_stats_file_rolls_up()
     await scenario_stats_file_overwrites_with_latest()
     print("ok")

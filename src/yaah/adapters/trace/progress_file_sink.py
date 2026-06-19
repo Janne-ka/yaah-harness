@@ -10,7 +10,8 @@ the statistics rollup (StatsFileSink) and the machine JSONL (FileTraceSink): a
 progress file you watch, a stats file you read, a JSONL you aggregate.
 
 Renders only `stage` spans (the phase signal); richer records go to the other
-sinks. Each line: `<HH:MM:SS> <stage> <status> (<dur>ms)`.
+sinks. Each line: `<HH:MM:SS> <stage> <status> (<dur>ms)`, with
+` awaiting=<label>` appended on suspend.
 
 Targets Python 3.9+.
 """
@@ -36,7 +37,14 @@ class ProgressFileSink:
         if r.get("name") != "stage":
             return  # progress = stage completions; other spans go to richer sinks
         ts = time.strftime("%H:%M:%S", time.localtime(self._clock()))
-        line = "{} {:<18} {} ({:.0f}ms)\n".format(
+        line = "{} {:<18} {} ({:.0f}ms)".format(
             ts, r.get("stage", "?"), r.get("status", "?"), r.get("duration_ms", 0.0))
+        # On suspend the operator wants the awaiting label inline so they don't
+        # have to `yaah list` to find out what just parked. Other statuses
+        # keep the legacy short form.
+        awaiting = r.get("awaiting")
+        if awaiting:
+            line += " awaiting={}".format(awaiting)
+        line += "\n"
         with open(self._path, "a", encoding="utf-8") as f:
             f.write(line)
