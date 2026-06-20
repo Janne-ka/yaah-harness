@@ -36,11 +36,13 @@ A YAAH review judges **four axes** (elegant, simple, working, extensible) alongs
 | 4 | Nodes / build / runtime | `nodes/`, `build/`, `runtime*.py`, `external_call.py`, `cwd.py` |
 | 5 | Ports & adapters | `data/`, `prompts/`, `mcp/`, `adapters/{data,prompts,mcp,trace}/`, `trace/`, `validators.py`, `recall.py`, `jsonio.py` |
 | 6 | App on YAAH (only if your project ships one) | its pipeline configs, transforms, prompts, renderers |
+| 7 | Form + docs consistency (when the change touches code surface) | `docs/archetypes.md`, `docs/shape-grammar.md`, `docs/node-reference.md`, `docs/root-config-reference.md`, `docs/cookbook/`, `AGENTS.md`, `.claude/skills/`. A node-type / config-key change with stale docs is a real defect — verdict WARN minimum. |
 
 ## Invariants to check (yaah-specific)
 
-These are **enforced**, not aspirational:
+These are **enforced**, not aspirational. Cross-reference the relevant ADRs ([0001 — three concepts](../../../docs/decisions/0001-three-concepts.md), [0002 — decision forms](../../../docs/decisions/0002-decision-forms.md), [0003 — attacher port](../../../docs/decisions/0003-attacher-port.md)) when judging.
 
+- **Three concepts only.** Envelope / Node / Comms. Any change introducing a fourth top-level concept must link to an ADR in the PR description.
 - **Domain-free engine.** No application-specific (domain) references in `src/`. Engine never references stages by name, tenant fields, test runners.
 - **One class per file** + use-case docstring (who calls, where, why).
 - **Hug-the-world ports.** Each port has a `routing_*` multiplexer + concrete adapters (`file_*`, `http_*`). Triad must be consistent across data/prompts/mcp.
@@ -49,14 +51,17 @@ These are **enforced**, not aspirational:
 - **RED/GREEN.** Tests fail before code (hard verdict, `max_attempts:1`); pass after (`shell_check`, feedback refix). Verify both gate sides.
 - **Hard human gates must `branch` on `decision`.** A gate with only `then` is decision-blind — a pause, not a gate.
 - **Counterfactual sceptics cold-read.** Separate cheap agent, never sees the canonical agent's reasoning.
+- **Engine ships zero attachers** (ADR-0003) and **decision-forms stays generic** (ADR-0002). A new attacher under `src/yaah/agents/` or a domain-named entry in `harness/decision_forms.py`'s `FORMS` is a violation; flag it.
+- **Form-consistency** (the spine + cookbook). If the diff adds a node type, a config key, or a new example shape, the corresponding doc surfaces must update in the same PR: [`docs/node-reference.md`](../../../docs/node-reference.md), [`docs/shape-grammar.md`](../../../docs/shape-grammar.md), [`docs/archetypes.md`](../../../docs/archetypes.md), [`docs/cookbook/`](../../../docs/cookbook/). A code change that leaves doc surfaces stale is a real defect, not a nit.
+- **Error voice.** Every `raise` in `src/yaah/` should name the next move ("what + how to fix"). Spot-check during cluster review; flag any "states problem only" messages as cluster-level rework.
 
 ## Method
 
-1. **Ground truth first.** Run the test suite — it's script-style, not pytest:
+1. **Ground truth first.** Run the test suite via the runner (script-style, not pytest; enforces coverage floor):
    ```bash
-   cd yaah; PY="${PY:-$([ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)}"
-   for f in tests/test_*.py; do PYTHONPATH=src "$PY" "$f" >/tmp/o 2>&1 && pass=$((pass+1)) || { fail=$((fail+1)); failed="$failed $f"; }; done
-   echo "PASS=$pass FAIL=$fail$failed"
+   python3 scripts/run_tests.py
+   # single test in isolation:
+   # PYTHONPATH=src python3 tests/test_<name>.py
    ```
    If a test fails, run it once verbose — distinguish missing-infra from real bug *before* delegating.
 

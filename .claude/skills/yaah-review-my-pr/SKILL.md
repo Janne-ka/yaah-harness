@@ -68,6 +68,7 @@ For each remaining check, read the diff with the rule in mind:
 | 7 — three lenses | Read the PR description. Does it answer all of: *simpler? more elegant? easier to use?* with concrete pointers? Hand-waves fail. |
 | 8 — data-flow footgun | Any pipeline JSON in the diff under `examples/` or `tests/`. For every edge `agent → render` or `agent → branch`, is there a `transform` with `call: "envelope"` in between? If no, silent-wrong rendering at exit 0. |
 | 9 — tests for behavior | Behavior change in `src/yaah/` ⇒ corresponding `tests/test_*.py` change. Refactor-only PRs get a pass. |
+| 10 — form consistency | If the diff adds an example pipeline, does it match one of the five archetypes in [`docs/archetypes.md`](../../../docs/archetypes.md)? If it adds a node type, is the corresponding row added to [`docs/node-reference.md`](../../../docs/node-reference.md) AND [`docs/shape-grammar.md`](../../../docs/shape-grammar.md)? If it adds a root-config key, is `docs/root-config-reference.md` updated? A code change with stale doc surfaces is WARN minimum (not just a nit). |
 
 ### 4. Judge the three lenses (this is the part only you can do)
 
@@ -122,6 +123,7 @@ CHECK 7b — elegance evidence   : INFO  (human judgment; see evidence pack)
 CHECK 7c — easier to use?      : <PASS | WARN | FAIL>  <one line>
 CHECK 8  — data-flow footgun   : <PASS | WARN | FAIL | N/A>  <one line>
 CHECK 9  — tests for behavior  : <PASS | WARN | FAIL | N/A>  <one line>
+CHECK 10 — form consistency    : <PASS | WARN | FAIL | N/A>  <one line>
 
 VERDICT: <ready | needs revision | blocked>
 
