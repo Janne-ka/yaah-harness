@@ -3,7 +3,7 @@
 Guidance for AI coding assistants (Codex, Cursor, Copilot, Claude Code, …) working
 in this repo. It's portable — the essentials are inline here. **Claude Code** users
 also have richer structured skills in [`.claude/skills/`](.claude/skills/)
-(`yaah-pipeline-authoring`, `yaah-extending`, `yaah-reviewing`); this file is the
+(`yaah-pipeline-authoring`, `yaah-extending`, `yaah-driving`, `yaah-reviewing`, `yaah-review-my-pr`); this file is the
 distilled cross-tool version.
 
 ## What YAAH is
@@ -78,20 +78,48 @@ are battle-tested in ways a fresh design isn't.
   block shapes, enum values, every `then`/`branch`/`fanin` target resolves) before
   handing it over. Don't ship a draft you haven't checked.
 
-## Editing the engine (`src/yaah/`) — invariants, enforced
+## Editing the engine (`src/yaah/`) — invariants
 
-- **Domain-free.** Nothing in `src/yaah/` may name a stage, tenant field, test
-  runner, or anything app-specific. Adaptation lives in the consuming app's config.
-- **One class per file**, filename = class, with a top docstring stating **who calls
-  it, where, why** (the use case). No docstring → reviewer rejects.
-- **Hug-the-world ports.** Extend an existing port (`routing_*` multiplexer + a
-  `file_*`/`http_*` adapter) before inventing a new one.
-- **Agent isolation.** Each stage is a fresh agent; never feed an agent its own
-  critic's output. Counterfactual critics cold-read, never see the author's reasoning.
-- **Minimal first.** In-memory before durable, in-process before distributed; no
-  premature abstraction. Delete an unused capability the day you notice it.
-- **No comments stating WHAT** (names do that) and no error handling for impossible
-  internal cases — validate only at boundaries.
+Two tiers: **enforced at LOAD time** by `validate.py` / `build/`, and
+**convention** maintained by author discipline + the pre-submission
+rubric (`docs/contributor/pre-submission-check.md`). Be honest about
+which is which.
+
+**Load-enforced (the runtime rejects violations):**
+
+- **Domain-free top-level keys** — `validate.py` checks every root key
+  against `_ROOT_KEYS` with did-you-mean.
+- **Pipeline shape** — every `then`/`branch`/`fork`/`fanin` target
+  resolves; every `node`/`validators[*]` reference resolves; unknown
+  stage / node keys rejected; data-flow contract (agent → render /
+  branch needs a parse transform between) checked.
+- **Trace + transport + state enums** — `validate.py` covers these.
+
+**Convention (author discipline + pre-submission rubric checks):**
+
+- **Domain-free engine prose.** Nothing in `src/yaah/` may *name* a
+  stage, tenant field, test runner, or anything app-specific.
+  Caught by `scripts/review_my_pr.py`'s grep checks, not by runtime.
+- **One class per file**, filename = class, with a top docstring
+  stating **who calls it, where, why**. Caught by code review.
+- **Hug-the-world ports.** Extend an existing port (`routing_*`
+  multiplexer + a `file_*`/`http_*` adapter) before inventing one.
+  Caught by review.
+- **Agent isolation.** Each stage is a fresh agent; never feed an
+  agent its own critic's output. Counterfactual critics cold-read,
+  never see the author's reasoning. **Not runtime-checked** — author
+  discipline + the pre-submission rubric's "agent isolation" item.
+- **Minimal first.** In-memory before durable, in-process before
+  distributed; no premature abstraction. Delete an unused capability
+  the day you notice it. Cultural rule; review catches deviations.
+- **No comments stating WHAT** (names do that) and no error handling
+  for impossible internal cases — validate only at boundaries.
+  Cultural rule; review catches.
+
+The honest framing matters: load-enforced rules are runtime-correct
+even when the author misses them; convention rules survive only as
+long as the author/reviewer pair holds. Don't claim convention is
+enforcement — readers spot it and the credibility cost compounds.
 
 ## Engine boundary — what `{base_dir}` is, what yaah does NOT own
 
