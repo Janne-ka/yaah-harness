@@ -496,8 +496,73 @@ def validate_pipeline(config: Dict[str, Any]) -> None:
     cons = g.get("constraints")
     if cons is not None:
         _check_constraints(cons, start, stages, errs)
+    _check_data_flow_contract(config.get("nodes") or {}, stages, errs)
     if errs:
         raise ValueError("invalid pipeline:\n  - " + "\n  - ".join(errs))
+
+
+def _check_data_flow_contract(
+    nodes_dict: Dict[str, Any],
+    stages: Dict[str, Any],
+    errs: List[str],
+) -> None:
+    """The data-flow contract (AGENTS.md §rules-that-bite): an agent's reply
+    is a STRING in payload['raw']. Nothing merges it until a `transform`
+    with `call: "envelope"` does. So an `agent` stage flowing directly to a
+    `render` stage or a stage with a `branch:` attribute is silent-wrong:
+    render finds {{placeholders}} it cannot fill; branch reads payload keys
+    that were never merged.
+
+    This check catches at LOAD what previously surfaced at runtime
+    (the CHECK 8 footgun in the pre-submission rubric)."""
+    for s_name, s in stages.items():
+        s_node_name = s.get("node")
+        if not s_node_name:
+            continue
+        s_node = nodes_dict.get(s_node_name) or {}
+        if s_node.get("type") != "agent":
+            continue
+        t_name = s.get("then")
+        if t_name is None or t_name not in stages:
+            continue  # terminal or already-flagged by the .then validity check
+        t = stages[t_name]
+        t_node_name = t.get("node")
+        t_node = nodes_dict.get(t_node_name) or {} if t_node_name else {}
+        t_type = t_node.get("type") or ""
+        # Agent → render is silent-wrong: render finds {{placeholders}} it
+        # cannot fill. `allow_unfilled: true` on the render node is the
+        # explicit opt-out for "the raw payload is intentional".
+        if t_type == "render" and not t_node.get("allow_unfilled"):
+            errs.append(
+                "stage {!r} (agent) → stage {!r} (render) with no parse "
+                "between — the agent's reply is a STRING in payload['raw'], "
+                "so `render` finds {{placeholders}} it cannot fill. Insert a "
+                "`transform` stage with `call: \"envelope\"` that parses + "
+                "merges (e.g. `examples/hello-yaah/hello_transforms.py:parse`), "
+                "OR set `allow_unfilled: true` on the render node if the "
+                "unparsed payload is intentional".format(s_name, t_name))
+            continue
+        # Agent → stage-with-branch is silent-wrong WHEN the merging stage's
+        # NODE doesn't itself merge keys onto the payload. Two node types
+        # legitimately merge here and so are exceptions:
+        #   - `transform`: the canonical parse step (the whole point).
+        #   - `human_gate`: the operator's `decision.json` becomes the
+        #     payload's `decision` key during resume; the branch reads what
+        #     the human typed, not the agent's raw.
+        # Anything else (json_object validator, expect_field, render with
+        # branch, another agent, etc.) does NOT merge, so branching on a key
+        # the agent never produced reads as missing → branch.default fires
+        # every time.
+        if t.get("branch") and t_type not in ("transform", "human_gate"):
+            errs.append(
+                "stage {!r} (agent) → stage {!r} (type {!r}) which has a "
+                "`branch:` — the agent's reply is a STRING in payload['raw'], "
+                "and {!r} does not merge keys onto the payload, so `branch.on` "
+                "reads as missing and the run takes `branch.default` every "
+                "time. Insert a `transform` stage with `call: \"envelope\"` "
+                "between them that parses + merges (see `examples/hello-yaah/"
+                "hello_transforms.py:parse` for the canonical shape).".format(
+                    s_name, t_name, t_type or "?", t_type or "?"))
 
 
 def validate_budgets(root: Dict[str, Any], pipeline: Dict[str, Any]) -> None:

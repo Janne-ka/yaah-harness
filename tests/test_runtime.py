@@ -280,6 +280,122 @@ def scenario_read_json_extends() -> None:
         assert _read_json(p) == {"q": "p"}
 
 
+def scenario_data_flow_contract_load_time() -> None:
+    """The data-flow contract (agent reply is a STRING in payload['raw']) is
+    now enforced at LOAD time, not just at runtime via the
+    `render_unfilled_placeholders` failure mid-run. This converts the project's
+    biggest documented authoring footgun (CHECK 8 in the pre-submission rubric)
+    from 'fails when you run it' to 'fails when you save it'."""
+    from yaah.validate import validate_pipeline
+
+    # BAD: agent → render with no parse between
+    bad_render = {
+        "nodes": {
+            "role:agent":  {"type": "agent", "template": "x", "model": "fake:x"},
+            "role:render": {"type": "render", "template_text": "{{summary}}"},
+        },
+        "graph": {"start": "a", "stages": {
+            "a": {"node": "role:agent", "then": "r"},
+            "r": {"node": "role:render", "then": None},
+        }},
+    }
+    try:
+        validate_pipeline(bad_render)
+    except ValueError as e:
+        msg = str(e)
+        assert "agent" in msg and "render" in msg, msg
+        assert "transform" in msg and "envelope" in msg, msg
+        assert "allow_unfilled" in msg, msg
+    else:
+        raise AssertionError("agent → render without parse must fail validation")
+
+    # OPT-OUT: agent → render with allow_unfilled is permitted (the explicit
+    # "the unparsed payload is intentional" escape hatch).
+    opt_out_render = {
+        "nodes": {
+            "role:agent":  {"type": "agent", "template": "x", "model": "fake:x"},
+            "role:render": {"type": "render", "template_text": "{{raw}}",
+                            "allow_unfilled": True},
+        },
+        "graph": {"start": "a", "stages": {
+            "a": {"node": "role:agent", "then": "r"},
+            "r": {"node": "role:render", "then": None},
+        }},
+    }
+    validate_pipeline(opt_out_render)  # no raise
+
+    # GOOD: agent → transform (parse) → render is the canonical shape.
+    good = {
+        "nodes": {
+            "role:agent":  {"type": "agent", "template": "x", "model": "fake:x"},
+            "role:parse":  {"type": "transform", "target": "fn:t:parse",
+                            "call": "envelope"},
+            "role:render": {"type": "render", "template_text": "{{summary}}"},
+        },
+        "graph": {"start": "a", "stages": {
+            "a": {"node": "role:agent",  "then": "p"},
+            "p": {"node": "role:parse",  "then": "r"},
+            "r": {"node": "role:render", "then": None},
+        }},
+    }
+    validate_pipeline(good)  # no raise
+
+    # BAD: agent → stage-with-branch where the merging stage's node is NOT
+    # one of the two exceptions (transform/human_gate). expect_field doesn't
+    # merge keys; branching off it after an agent reads as missing.
+    bad_branch = {
+        "nodes": {
+            "role:agent":  {"type": "agent", "template": "x", "model": "fake:x"},
+            "role:check":  {"type": "expect_field", "key": "ok", "equals": True},
+        },
+        "graph": {"start": "a", "stages": {
+            "a": {"node": "role:agent", "then": "c"},
+            "c": {"node": "role:check",
+                  "branch": {"on": "ok", "routes": {True: "a"}, "default": None}},
+        }},
+    }
+    try:
+        validate_pipeline(bad_branch)
+    except ValueError as e:
+        msg = str(e)
+        assert "agent" in msg and "branch" in msg, msg
+        assert "expect_field" in msg, msg
+    else:
+        raise AssertionError(
+            "agent → expect_field-with-branch must fail (the validator doesn't merge)")
+
+    # EXCEPTION: agent → human_gate-with-branch is OK — the human gate
+    # merges the operator's decision.json into the payload during resume.
+    agent_to_human_gate = {
+        "nodes": {
+            "role:writer": {"type": "agent", "template": "draft", "model": "fake:writer"},
+            "role:gate":   {"type": "human_gate", "ask": "Approve?", "awaiting": "review"},
+        },
+        "graph": {"start": "w", "stages": {
+            "w": {"node": "role:writer", "then": "g"},
+            "g": {"node": "role:gate",
+                  "branch": {"on": "decision", "routes": {"revise": "w"}, "default": None}},
+        }},
+    }
+    validate_pipeline(agent_to_human_gate)  # no raise — human_gate IS a merge point
+
+    # EXCEPTION: agent → transform-with-branch is OK — the transform IS the
+    # parse step (the whole point of having a branch right after).
+    agent_to_transform_branch = {
+        "nodes": {
+            "role:agent": {"type": "agent", "template": "x", "model": "fake:x"},
+            "role:parse_and_route": {"type": "transform",
+                                     "target": "fn:t:parse", "call": "envelope"},
+        },
+        "graph": {"start": "a", "stages": {
+            "a": {"node": "role:agent", "then": "p"},
+            "p": {"node": "role:parse_and_route",
+                  "branch": {"on": "route", "routes": {"x": "a"}, "default": None}},
+        }},
+    }
+    validate_pipeline(agent_to_transform_branch)  # no raise
+
+
 def scenario_main_catches_import_error() -> None:
     """Y1 — an `ImportError` raised on an eager build path (e.g. attach: [fn:...]
     whose module isn't on PYTHONPATH) used to escape main() as a 30-line
@@ -325,6 +441,7 @@ def main() -> None:
     scenario_stats_sink_price_map_file()
     scenario_cli_parser()
     scenario_read_json_extends()
+    scenario_data_flow_contract_load_time()
     scenario_main_catches_import_error()
     print("ok")
 
