@@ -123,7 +123,7 @@ async def scenario_nested_broker_spans_survive() -> None:
     comms = InProcessComms()
 
     # broker node: a real Agent — emits its own model_call under the SAME corr.
-    broker = Agent(_UsageBackend(), template="slice {{query}}", stage="broker", tracer=tr)
+    broker = Agent(_UsageBackend(), template="slice {{query}}", stage="broker", tracer=tr, parse=False)
     # the serve boundary _wrap_node would apply in a worker:
     comms.register("role:broker", CarriageBoundaryNode(broker, tr), NodeConfig())
 
@@ -134,7 +134,7 @@ async def scenario_nested_broker_spans_survive() -> None:
             {"text": "done"},
         ]),
         template="go", stage="main", events=comms, tracer=tr,
-        broker="role:broker", expose={"payload": ["diff"]})
+        broker="role:broker", expose={"payload": ["diff"]}, parse=False)
     out = await main.invoke(
         Envelope("task", {"diff": "x"}, {"correlation_id": "R7"}), NodeConfig())
     assert out.payload["raw"] == "done", out.payload

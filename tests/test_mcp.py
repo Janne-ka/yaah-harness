@@ -55,13 +55,13 @@ async def scenario_agent_resolves_ref_and_inline() -> None:
 
     # a 'source:key' ref is fetched and handed to the backend as opts["mcp"]
     cap = CaptureBackend()
-    a = Agent(cap, template="hi", mcp="registry:prod", mcp_source=src)
+    a = Agent(cap, template="hi", mcp="registry:prod", mcp_source=src, parse=False)
     await a.invoke(Envelope(Kind.TASK, {}), NodeConfig())
     assert cap.opts["mcp"] == SERVERS, cap.opts
 
     # an inline servers map needs no source
     cap2 = CaptureBackend()
-    a2 = Agent(cap2, template="hi", mcp={"mcpServers": SERVERS})
+    a2 = Agent(cap2, template="hi", mcp={"mcpServers": SERVERS}, parse=False)
     await a2.invoke(Envelope(Kind.TASK, {}), NodeConfig())
     assert cap2.opts["mcp"] == SERVERS, cap2.opts
 

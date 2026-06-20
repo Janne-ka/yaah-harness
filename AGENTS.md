@@ -59,13 +59,17 @@ are battle-tested in ways a fresh design isn't.
 
 ## Authoring a pipeline (the rules that bite)
 
-- **The data-flow contract.** An agent's reply is a STRING in `payload["raw"]`. A
-  `json_object` validator only *checks* it; a `transform` with `call:"envelope"`
-  (`fn(envelope, config) -> dict`, returned dict spreads onto the payload) is what
-  merges it. Every `agent → render`/`branch` edge needs a parse step, or `render`
-  fails (`render_unfilled_placeholders`) pointing at the missing parse — it no
-  longer ships a literal `{{placeholder}}` at exit 0. (`allow_unfilled: true` opts
-  a render out, for intentionally-optional fields.)
+- **Agent output: parse-by-default** (ADR-0004). An `agent` node returns its
+  model text in `payload["raw"]` AND auto-merges the parsed JSON keys onto
+  the payload (`extract_json`-tolerant of markdown fences). So
+  `{"summary": "..."}` from the model becomes `payload["summary"]` directly
+  — downstream `render` / `branch` find the keys they need without an
+  intermediate `transform`. On parse failure the agent emits a failed
+  verdict that the harness's retry+feedback loop catches the same way a
+  `json_object` validator would. Opt out with `"parse": false` on the
+  agent node for streaming/raw-only cases; the load-time graph linter
+  will then require a `transform` between the agent and any
+  render/branch.
 - **A human gate must `branch` on `decision`** — a gate with only `then` is a pause,
   not a gate; the human's reject is ignored.
 - **Compose, don't invent.** `fork`+`fanin`+`transform` express most things; a new
@@ -211,11 +215,11 @@ checks in one screen:
    and append the pack after the VERDICT line. CHECK 7b never blocks. Full
    spec in
    [`docs/contributor/pre-submission-check.md`](docs/contributor/pre-submission-check.md).
-8. **The data-flow footgun** — for every pipeline JSON in the diff
-   (`examples/`, `tests/`), every edge `agent → render` or `agent → branch`
-   has a `transform` with `call: "envelope"` in between. Without it the render
-   fails (`render_unfilled_placeholders`) — formerly silent `{{placeholder}}` at
-   exit 0.
+8. **The data-flow footgun** — agents are parse-by-default (ADR-0004), so
+   the common shape `agent → render`/`branch` works without a parse step.
+   The pre-submission check fires only when `"parse": false` is set on an
+   agent flowing into a render/branch with no transform between; `validate.py`
+   catches it at LOAD time with the actionable message.
 9. **Tests for behavior** — behavior change in `src/yaah/` requires a
    `tests/test_*.py` change. Refactor-only PRs get a pass here.
 

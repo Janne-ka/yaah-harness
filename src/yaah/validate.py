@@ -522,6 +522,13 @@ def _check_data_flow_contract(
         s_node = nodes_dict.get(s_node_name) or {}
         if s_node.get("type") != "agent":
             continue
+        # ADR-0004: an agent with parse=True (the default) runs extract_json
+        # on its own output and merges parsed keys onto the reply. The
+        # data-flow contract is satisfied by the agent itself; downstream
+        # render/branch find the keys they expect. Only flag when the user
+        # explicitly opts out via parse=False.
+        if s_node.get("parse", True):
+            continue
         t_name = s.get("then")
         if t_name is None or t_name not in stages:
             continue  # terminal or already-flagged by the .then validity check

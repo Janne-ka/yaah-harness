@@ -36,12 +36,13 @@ the work can run in parallel, or one branch's outcome should skip
 another.
 
 **Reference example:** [`examples/hello-yaah/`](../examples/hello-yaah/).
-Smallest real pipeline: `agent → validate+retry → parse → render`.
-Read the whole thing in one sitting.
+Smallest real pipeline: `agent (parse=true, retry on bad JSON) → render`.
+Two stages. Read the whole thing in one sitting.
 
 **Variations seen in the wild:**
 - Add validation feedback loops (`max_attempts`, `feedback: true`) —
-  hello-yaah already does this on the agent stage.
+  hello-yaah already does this on the agent stage. Parse failures
+  emit a verdict the retry loop catches.
 - Swap the final `render` for a `transform` that posts an HTTP webhook
   or writes a file — the shape stays linear.
 - Replace `agent` with a `transform` whose `fn:` target hits a non-LLM
@@ -49,14 +50,14 @@ Read the whole thing in one sitting.
   right runtime for the trace + retry + suspend story.
 
 **Known footguns:**
-- An `agent`'s output is a STRING in `payload["raw"]` — nothing merges
-  it into the payload top-level until a `transform` does. Every
-  `agent → render` edge needs a `parse` transform between them or
-  `render` fails with `render_unfilled_placeholders`. See [AGENTS.md
-  §"Data-flow contract"](../AGENTS.md).
 - Transforms with `call: "envelope"` REPLACE the payload by default.
   Use `return {**envelope.payload, ...new_keys}` to enrich rather than
   overwrite. See [`docs/node-reference.md`](node-reference.md).
+- Opting out of parse-by-default (`"parse": false` on the agent) makes
+  the agent return `{raw: <model text>}` only — downstream `render` /
+  `branch` then need an explicit `transform` with `call: "envelope"`
+  to merge keys. The load-time graph linter catches this and tells
+  you the fix.
 
 ---
 

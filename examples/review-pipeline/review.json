@@ -2,9 +2,6 @@
   "nodes": {
     "role:draft":   {"type": "agent", "prompt": "file:draft",
                      "model": "fake:draft", "stage": "draft"},
-    "role:check":   {"type": "json_object", "required": ["summary"]},
-    "role:parse":   {"type": "transform", "target": "fn:review_transforms:parse",
-                     "call": "envelope"},
     "role:approve": {"type": "human_gate", "awaiting": "review",
                      "ask": "Review the draft:\n\n  {{summary}}\n\nReply {\"decision\": \"approve\"} to publish, or {\"decision\": \"revise\"} to redraft."},
     "role:publish": {"type": "render", "template_file": "templates/published.html",
@@ -13,9 +10,8 @@
   "graph": {
     "start": "draft",
     "stages": {
-      "draft":   {"node": "role:draft", "validators": ["role:check"],
-                  "max_attempts": 3, "feedback": true, "then": "parse"},
-      "parse":   {"node": "role:parse", "then": "approve"},
+      "draft":   {"node": "role:draft",
+                  "max_attempts": 3, "feedback": true, "then": "approve"},
       "approve": {"node": "role:approve",
                   "branch": {"on": "decision", "routes": {"revise": "draft"},
                              "default": "publish"}},

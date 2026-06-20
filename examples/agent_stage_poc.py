@@ -97,7 +97,7 @@ async def main() -> None:
 
     comms.register(
         "role:spec",
-        Agent(BACKEND, SPEC_PROMPT, events=comms, stage="spec"),
+        Agent(BACKEND, SPEC_PROMPT, events=comms, stage="spec", parse=False),
         NodeConfig(model=NODE_MODEL, effort="low"),
     )
     comms.register("role:json", JsonObjectValidator(required=["summary", "items"]))

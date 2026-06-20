@@ -288,10 +288,13 @@ def scenario_data_flow_contract_load_time() -> None:
     from 'fails when you run it' to 'fails when you save it'."""
     from yaah.validate import validate_pipeline
 
-    # BAD: agent → render with no parse between
+    # BAD: agent → render with no parse between. parse=False is the explicit
+    # opt-out; without it the agent self-parses (ADR-0004) and the contract
+    # holds. The check fires only when the user actively opts out.
     bad_render = {
         "nodes": {
-            "role:agent":  {"type": "agent", "template": "x", "model": "fake:x"},
+            "role:agent":  {"type": "agent", "template": "x", "model": "fake:x",
+                            "parse": False},
             "role:render": {"type": "render", "template_text": "{{summary}}"},
         },
         "graph": {"start": "a", "stages": {
@@ -309,11 +312,12 @@ def scenario_data_flow_contract_load_time() -> None:
     else:
         raise AssertionError("agent → render without parse must fail validation")
 
-    # OPT-OUT: agent → render with allow_unfilled is permitted (the explicit
-    # "the unparsed payload is intentional" escape hatch).
+    # OPT-OUT: agent (parse=False) → render with allow_unfilled is permitted
+    # (the explicit "the unparsed payload is intentional" escape hatch).
     opt_out_render = {
         "nodes": {
-            "role:agent":  {"type": "agent", "template": "x", "model": "fake:x"},
+            "role:agent":  {"type": "agent", "template": "x", "model": "fake:x",
+                            "parse": False},
             "role:render": {"type": "render", "template_text": "{{raw}}",
                             "allow_unfilled": True},
         },
@@ -340,12 +344,14 @@ def scenario_data_flow_contract_load_time() -> None:
     }
     validate_pipeline(good)  # no raise
 
-    # BAD: agent → stage-with-branch where the merging stage's node is NOT
-    # one of the two exceptions (transform/human_gate). expect_field doesn't
-    # merge keys; branching off it after an agent reads as missing.
+    # BAD: agent (parse=False) → stage-with-branch where the merging stage's
+    # node is NOT one of the two exceptions (transform/human_gate).
+    # expect_field doesn't merge keys; branching off it after an opted-out
+    # agent reads as missing.
     bad_branch = {
         "nodes": {
-            "role:agent":  {"type": "agent", "template": "x", "model": "fake:x"},
+            "role:agent":  {"type": "agent", "template": "x", "model": "fake:x",
+                            "parse": False},
             "role:check":  {"type": "expect_field", "key": "ok", "equals": True},
         },
         "graph": {"start": "a", "stages": {

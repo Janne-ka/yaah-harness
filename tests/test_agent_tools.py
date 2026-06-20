@@ -39,7 +39,7 @@ async def scenario_fn_tool() -> None:
         {"calls": [{"id": "c1", "name": "rec", "args": {"x": 1}}]},  # model calls the tool
         {"text": "done"},                                            # then answers
     ])}, default="tool")
-    agent = Agent(backend, template="ignored",
+    agent = Agent(backend, template="ignored", parse=False,
                   tools=[Tool("rec", "fn:test_agent_tools:record", "record args")])
     out = await agent.invoke(Envelope(Kind.TASK, {}), NodeConfig(model="tool:m"))
 
@@ -56,7 +56,7 @@ async def scenario_node_tool() -> None:
         {"text": "the sum is 5"},
     ])}, default="tool")
     # events=comms so the loop can resolve the node: tool impl over Comms
-    agent = Agent(backend, template="ignored", events=comms,
+    agent = Agent(backend, template="ignored", events=comms, parse=False,
                   tools=[Tool("add", "node:role:adder", "add two ints")])
     out = await agent.invoke(Envelope(Kind.TASK, {}), NodeConfig(model="tool:m"))
     assert out.payload["raw"] == "the sum is 5", out.payload
@@ -65,7 +65,7 @@ async def scenario_node_tool() -> None:
 async def scenario_no_tools_still_completes() -> None:
     """An agent without tools (or a backend without turn) uses plain complete."""
     backend = RoutingBackend({"tool": ScriptedToolBackend([], default="plain")}, default="tool")
-    agent = Agent(backend, template="hi")
+    agent = Agent(backend, template="hi", parse=False)
     out = await agent.invoke(Envelope(Kind.TASK, {}), NodeConfig(model="tool:m"))
     assert out.payload["raw"] == "plain", out.payload
 
@@ -101,7 +101,7 @@ async def scenario_multiturn_wire_shape_and_usage() -> None:
             return {"text": "done"}
 
     tracer = RecordingTracer([CostContributor()])  # cost capture on -> on_usage flows
-    agent = Agent(TwoTurn(), template="ignored", tracer=tracer,
+    agent = Agent(TwoTurn(), template="ignored", tracer=tracer, parse=False,
                   tools=[Tool("rec", "fn:test_agent_tools:record", "rec args")])
     if os.path.exists(_MARKER):
         os.remove(_MARKER)
@@ -168,7 +168,7 @@ async def scenario_manifest_injected_when_backend_lacks_turn() -> None:
     # complete-only backend + tools + a prompt that uses {{tool_manifest}} →
     # the manifest replaces the placeholder; the model sees how to call the tool.
     be = _CompleteOnlyBackend()
-    a = Agent(be, template="Review the code.\n\n{{tool_manifest}}", stage="r",
+    a = Agent(be, template="Review the code.\n\n{{tool_manifest}}", stage="r", parse=False,
               tools=[Tool(name="fetch", impl=lambda a: a,
                           description="Read changed code",
                           usage="Run: bash $REPO/tools/fetch.sh")])
@@ -184,7 +184,7 @@ async def scenario_manifest_empty_when_backend_has_turn() -> None:
     # body stays clean. run_tool_loop normalizes prompt into a messages list,
     # so we assert on the stringified shape.
     be = _TurnCapableBackend()
-    a = Agent(be, template="Review.\n{{tool_manifest}}END", stage="r",
+    a = Agent(be, template="Review.\n{{tool_manifest}}END", stage="r", parse=False,
               tools=[Tool(name="fetch", impl=lambda a: a, description="x")])
     await a.invoke(Envelope(Kind.TASK, {}, {"correlation_id": "c1"}), NodeConfig())
     captured = str(be.last_prompt)
@@ -203,7 +203,7 @@ async def scenario_manifest_injected_behind_router_without_turn() -> None:
     router = RoutingBackend({"cli": leaf}, default="cli")
     # closure tool WITH an author usage line — renderable on the prompt side
     # (a usage-less closure would be skipped, assessment #10)
-    a = Agent(router, template="Review.\n{{tool_manifest}}", stage="r",
+    a = Agent(router, template="Review.\n{{tool_manifest}}", stage="r", parse=False,
               tools=[Tool(name="fetch", impl=lambda a: a, description="Read changed code",
                           usage="Run: bash fetch-changed-code.sh")])
     out = await a.invoke(Envelope(Kind.TASK, {}, {"correlation_id": "c1"}),
@@ -214,7 +214,7 @@ async def scenario_manifest_injected_behind_router_without_turn() -> None:
     # and a TURN-capable leaf behind the same router still takes the tool loop
     leaf2 = ScriptedToolBackend([{"text": "looped"}])
     router2 = RoutingBackend({"tool": leaf2}, default="tool")
-    a2 = Agent(router2, template="Go.\n{{tool_manifest}}", stage="r",
+    a2 = Agent(router2, template="Go.\n{{tool_manifest}}", stage="r", parse=False,
                tools=[Tool(name="fetch", impl=lambda a: a, description="x")])
     out2 = await a2.invoke(Envelope(Kind.TASK, {}, {"correlation_id": "c2"}),
                            NodeConfig(model="tool:m"))
@@ -229,7 +229,7 @@ async def scenario_manifest_omits_uncallable_closure_tools() -> None:
     # behind a turn-capable backend it still flows via function-calling.
     be = _CompleteOnlyBackend()
     a = Agent(be, template="{{tool_manifest}}", stage="r",
-              expose={"payload": ["diff"], "header": []})
+              expose={"payload": ["diff"], "header": []}, parse=False)
     await a.invoke(Envelope(Kind.TASK, {"diff": "x"}, {"correlation_id": "c1"}),
                    NodeConfig())
     assert "envelope_get" not in be.last_prompt, be.last_prompt

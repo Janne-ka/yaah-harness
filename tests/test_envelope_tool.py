@@ -34,7 +34,7 @@ async def scenario_tool_loop_pull() -> None:
         {"text": "done"},
     ])})
     agent = Agent(backend, template="review the diff", stage="rev",
-                  expose={"payload": ["diff"]})
+                  expose={"payload": ["diff"]}, parse=False)
     out = await agent.invoke(
         Envelope(Kind.TASK, {"diff": "the change"}, {"correlation_id": "R"}),
         NodeConfig(model="tool:x"))

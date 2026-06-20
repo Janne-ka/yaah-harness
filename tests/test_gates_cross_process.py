@@ -21,7 +21,7 @@ SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
 PIPELINE = {
     "nodes": {
         # a gate stage whose validator always fails -> escalates to a human
-        "role:gate": {"type": "agent", "template": "decide:", "model": "fake:gate", "stage": "gate"},
+        "role:gate": {"type": "agent", "template": "decide:", "model": "fake:gate", "stage": "gate", "parse": False},
         "role:check": {"type": "expect_field", "key": "ok", "equals": True},
     },
     "graph": {"start": "gate", "stages": {
@@ -55,7 +55,7 @@ def _run(tmp, *args):
 SPEC_PIPELINE = {
     "nodes": {
         "role:writer": {"type": "agent", "template": "write a spec for {{request}}",
-                        "model": "fake:writer", "stage": "writer"},
+                        "model": "fake:writer", "stage": "writer", "parse": False},
         "role:gate": {"type": "human_gate", "ask": "Approve this spec?\n{{raw}}",
                       "awaiting": "spec:approve"},
     },

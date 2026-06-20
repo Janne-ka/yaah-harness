@@ -61,7 +61,7 @@ If the user accepts, run the command (or have them run it), then **drive the Q&A
 
 If the archetype is `instrumented` or `meta-tool` and no template ships yet, fall through to the Q&A and copy from the reference example listed in `docs/archetypes.md`.
 
-The data-flow contract that EVERY scaffold teaches (agent output is a STRING in `payload["raw"]`; every agent→render/branch edge needs a parse transform) is the #1 authoring trap — it's also the first row of Common mistakes below.
+Agents are parse-by-default ([ADR-0004](../../../docs/decisions/0004-parse-by-default.md)). The model's JSON output is auto-merged onto the payload — `render` and `branch` find the keys they need without an intermediate `transform`. The data-flow footgun is gone for the common case; it fires only when the user opts out via `"parse": false`, and `validate.py` catches THAT at load time.
 
 ## The Q&A (in order — **skip what the user already specified**)
 
@@ -112,7 +112,8 @@ Two rules that travel with every template: the parse stage between an agent and 
 
 | Mistake | Reality |
 |---|---|
-| Agent → render/branch with no parse stage between | Agent output is a STRING in `payload["raw"]`; `json_object` validates, never merges. Render now FAILS (`render_unfilled_placeholders`) pointing at the missing parse — it no longer ships literal `{{placeholders}}` at exit 0. Add the parse transform (or `allow_unfilled:true` for genuinely optional fields). |
+| Adding `json_object` + explicit `transform` parse between an agent and render/branch | Agents are parse-by-default (ADR-0004) — they `extract_json` their own output and emit a failed verdict on bad JSON (which the retry+feedback loop catches). Drop the extra stages; the pipeline is shorter and the data-flow contract is automatic. The validator+parse pattern still works (the inner parse is a no-op merge) but it's noise. |
+| Setting `"parse": false` on an agent that flows into render/branch | The data-flow graph linter rejects this at load time with the exact fix. If you actually want raw text downstream, add an explicit `transform` with `call: "envelope"` to merge. If you want render to render `{{raw}}` literally, set `allow_unfilled: true` on the render node. |
 | Expecting a `by_model` string to script multiple attempts | A bare string = ONE reply (then exhaustion → default `""`). To script a refix loop, use a list — one entry per attempt. |
 | `call: "envelope"` fn with the wrong signature | It's `fn(envelope, config) -> dict` (dict spreads over payload). `fn(payload)` dies with a raw `TypeError` traceback, not a friendly message. |
 | Parse transform using `json.loads` on agent output | Real `sonnet`/`haiku` wrap JSON in markdown fences; strict `json.loads` breaks on the first real-model run. Use `from yaah.jsonio import extract_json` and `extract_json(envelope.payload.get("raw", "{}"))` — the engine's `JsonObjectValidator` already does this; examples should match. |

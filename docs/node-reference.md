@@ -36,6 +36,9 @@ fence-mimicking sequences neutralized (the instruction-channel defense).
 Config: `template` *or* `prompt` (required), `model`, `stage` (trace/event
 label), `cwd_from`, `carry` (payload keys forwarded into the reply — agents
 REPLACE the payload otherwise; prefer graph `sticky` for run-wide keys),
+`parse` (bool, default `true` — [ADR-0004](decisions/0004-parse-by-default.md):
+agent runs `extract_json` on its output and merges the parsed keys onto the
+reply; opt out with `parse: false` for streaming/raw-only cases),
 `tools` (model-initiated, needs a turn-capable backend), `allowed_tools` +
 `permission_mode` (claude-native), `mcp` (inline servers or `"source:key"`),
 `expose`/`filters`/`max_chars`/`broker` (R9–R12 envelope access), `attach`
@@ -44,8 +47,15 @@ agent gets wrapped in `AttachingAgent` and each attacher merges post-invoke
 data — e.g. tokens/usage — onto the output payload from the tracer's last
 span; see [ADR-0003](decisions/0003-attacher-port.md)).
 
-Output: `{raw: <model text>, ...carry keys, ...cwd carry, ...attacher keys}`
-— payload REPLACED.
+Output (`parse=true`, default): `{raw: <model text>, ...parsed JSON keys,
+...carry keys, ...cwd carry, ...attacher keys}` — payload REPLACED. On
+parse failure / non-object JSON the agent emits a failed Verdict envelope
+the retry+feedback loop catches.
+
+Output (`parse=false`, opt-out): `{raw: <model text>, ...carry keys, ...cwd
+carry, ...attacher keys}` — `raw` only; downstream stages need an explicit
+`transform` with `call: "envelope"` to merge the model's structured output
+(load-time graph linter enforces this).
 
 ```json
 "role:review": {"type": "agent", "prompt": "file:review",
@@ -121,8 +131,14 @@ The cheapest hard gate (`placement_ok`, `scope_ok`, ...).
 
 Parse `payload[key]` (default `"raw"`, fence/prose-tolerant via
 `yaah.jsonio.extract_json`). `json_object`: optional `required` key list.
-`json_schema`: `schema` (required, JSON-Schema subset). The standard pairing
-for haiku-class workers (unreliable JSON → validator + retry-with-feedback).
+`json_schema`: `schema` (required, JSON-Schema subset).
+
+**Usually unnecessary on `agent` outputs**: per [ADR-0004](decisions/0004-parse-by-default.md)
+agents are parse-by-default (they run `extract_json` themselves and emit a
+failed verdict on bad JSON, triggering the retry+feedback loop). Reach for
+these validators when validating a `transform` output, OR when you need
+the SCHEMA shape (`json_schema.schema` does structural checking the
+agent's plain `extract_json` doesn't).
 
 ## `human_gate` — park for a decision
 
