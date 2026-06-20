@@ -14,13 +14,38 @@ interchangeable. It runs in-process, over a local bus, or distributed over NATS 
 placement is configuration, not code. The core has **zero runtime dependencies**;
 every third-party library is an opt-in adapter.
 
+## Authoring a pipeline? Start here
+
+If a user asks you to author or modify a YAAH pipeline, the workflow
+is deterministic — DO NOT design from first principles:
+
+1. Read **[docs/archetypes.md](docs/archetypes.md)**. Five shapes;
+   almost every pipeline is one of them: `linear`, `branch-with-gate`,
+   `fork-fanin`, `instrumented`, `meta-tool`.
+2. Match the user's request against the **"Reach for this when…"**
+   lines in each archetype. Pick the nearest one.
+3. Open the named **Reference example** and copy from there. Adapt
+   stage names, prompts, transforms — keep the shape.
+4. If the user's idea doesn't fit any archetype, re-read once. Most
+   "doesn't fit" cases are the pipeline doing too much; split into
+   two simpler pipelines that each match an archetype.
+
+The archetype map exists so you don't have to invent. The examples
+are battle-tested in ways a fresh design isn't.
+
 ## Get oriented first
 
+- **[docs/archetypes.md](docs/archetypes.md)** — the five pipeline
+  shapes + reference examples (read FIRST when authoring).
 - **[docs/quickstart.md](docs/quickstart.md)** — run a pipeline in 5 minutes.
 - **[docs/tutorial.md](docs/tutorial.md)** — every core concept, progressively.
-- **[examples/](examples/)** — runnable: `hello-yaah` (linear), `review-pipeline`
-  (branch + human gate), `fork-join` (parallel + reduce).
+- **[examples/](examples/)** — runnable: `hello-yaah` (linear),
+  `review-pipeline` (branch + human gate), `fork-join`
+  (parallel + reduce), `arch-drift` (instrumented),
+  `config-flow` (meta-tool).
 - **[docs/node-reference.md](docs/node-reference.md)** + **[docs/root-config-reference.md](docs/root-config-reference.md)** — every node type and config key (single source of truth: `docs/module-catalog.md`, generated from the code).
+- **[docs/cookbook/](docs/cookbook/)** — non-importable reference
+  recipes; copy-paste into your own project.
 - **[docs/design.md](docs/design.md)** / **[docs/why-yaah.md](docs/why-yaah.md)** — architecture + rationale.
 
 ## Mental model

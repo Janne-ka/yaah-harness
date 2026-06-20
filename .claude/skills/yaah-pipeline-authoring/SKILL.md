@@ -7,9 +7,15 @@ description: Use when the user wants a new or modified YAAH pipeline config — 
 
 **Standing rule:** never commit unless explicitly asked.
 
+## Step 0 — pick an archetype (read this BEFORE asking the user anything)
+
+Open [`docs/archetypes.md`](../../../docs/archetypes.md). Match the user's request against the **"Reach for this when…"** lines of the five archetypes (`linear`, `branch-with-gate`, `fork-fanin`, `instrumented`, `meta-tool`). The match dictates the reference example to copy from. **Don't design from first principles** — the archetype map exists precisely so you don't have to, and the named examples are battle-tested.
+
+If no archetype obviously fits, re-read once. Most "doesn't fit" cases are the user describing a pipeline that's doing too much; split into two simpler pipelines that each match an archetype, then ask the user which one to build first.
+
 ## Overview
 
-A YAAH pipeline is two JSONs: a **pipeline** (`nodes` + `graph` of stages) and a **root** (`providers`, `transport`, `state`, `pipeline:`, `input:`, `run:`). Most authoring failures come from inventing concepts that existing primitives compose. **Drive a short Q&A**, propose the smallest config that fits, then ship a canonical `.json` + a thin `_extends`-based `.fake.json` overlay so it's testable without LLM cost.
+A YAAH pipeline is two JSONs: a **pipeline** (`nodes` + `graph` of stages) and a **root** (`providers`, `transport`, `state`, `pipeline:`, `input:`, `run:`). Most authoring failures come from inventing concepts that existing primitives compose. **Pick the archetype (Step 0), drive a short Q&A** on the variation points the archetype calls out, propose the smallest config that fits, then ship a canonical `.json` + a thin `_extends`-based `.fake.json` overlay so it's testable without LLM cost.
 
 ## When to Use
 

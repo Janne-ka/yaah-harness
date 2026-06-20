@@ -8,6 +8,7 @@ This folder is the deeper reference.
 | | |
 |---|---|
 | [quickstart.md](quickstart.md) | run a pipeline in 5 minutes (fake backend, no API key) |
+| [archetypes.md](archetypes.md) | the five pipeline shapes YAAH supports — pick the nearest, copy, adapt. Almost every pipeline is one of `linear`, `branch-with-gate`, `fork-fanin`, `instrumented`, `meta-tool`. |
 | [tutorial.md](tutorial.md) | build your own — a 5-step recipe, then each concept in a runnable example |
 | [../examples/](../examples/) | `hello-yaah` (linear), `review-pipeline` (branch + human gate), `fork-join` (parallel), `arch-drift` (full multi-stage with attachers; A-only + A/B model comparison) |
 | [../AGENTS.md](../AGENTS.md) | point an AI assistant at this to author pipelines for you |
