@@ -452,7 +452,8 @@ _USAGE = """\
 yaah <command> [args]
 
 Commands:
-  init <dir>                    scaffold a starter pipeline (runs on fake providers, no API key)
+  init <dir>                    scaffold a linear starter pipeline (alias for `scaffold linear <dir>`)
+  scaffold <archetype> <dir>    scaffold from a named archetype (linear / branch-with-gate / fork-fanin); see docs/archetypes.md
   run <root>                    run the configured pipeline (the default)
   list <root> [--json]          show parked gates (the mailbox view; --json for a parseable shape)
   resume <root> ID [FILE]       deliver a decision (optionally from FILE) to a parked gate
@@ -546,8 +547,8 @@ def _parse_cli(argv: list) -> dict:
 # Git-style subcommands (usability-gaps #1): the surface users expect, on top of
 # the legacy `yaah <root> --flag` parser (kept working). Pipeline verbs translate
 # to the same action spec _parse_cli produces; `validate`/`trace` add two actions.
-_SUBCOMMANDS = ("init", "run", "list", "resume", "clear", "explain", "validate",
-                "trace", "baton-schema")
+_SUBCOMMANDS = ("init", "scaffold", "run", "list", "resume", "clear", "explain",
+                "validate", "trace", "baton-schema")
 _VERB_FLAG = {"list": "--list", "clear": "--clear", "explain": "--explain"}
 
 
@@ -558,7 +559,19 @@ def _parse_subcommand(argv: list) -> dict:
             _usage_exit("init needs a target directory")
         if len(rest) > 1:
             _usage_exit("init takes one argument (the target directory)")
-        return {"action": "init", "target_dir": rest[0]}
+        # `init` is a back-compat alias for `scaffold linear` — same dispatch path.
+        return {"action": "scaffold", "target_dir": rest[0], "archetype": "linear"}
+    if verb == "scaffold":
+        # `scaffold <archetype> <target-dir>` — pick the named archetype and
+        # write its template. See docs/archetypes.md for what each shape is for.
+        if len(rest) < 2:
+            from .init_template import ARCHETYPES
+            _usage_exit(
+                "scaffold needs an archetype and a target directory "
+                "(archetypes: {})".format(", ".join(sorted(ARCHETYPES))))
+        if len(rest) > 2:
+            _usage_exit("scaffold takes two arguments (archetype, target directory)")
+        return {"action": "scaffold", "archetype": rest[0], "target_dir": rest[1]}
     if verb == "run":
         return _parse_cli(rest) if rest else _usage_exit("run needs a root config")
     if verb in _VERB_FLAG:
@@ -636,16 +649,18 @@ def _dispatch(spec: Dict[str, Any]) -> None:
         price_map = _read_json(spec["price_map"]) if spec.get("price_map") else None
         print(json.dumps(aggregate(records, price_map=price_map), indent=2))
         return
-    if spec["action"] == "init":
-        # scaffold the embedded hello-yaah template into target_dir
+    if spec["action"] == "scaffold":
+        # Write the named archetype's template into target_dir.
+        # `yaah init <dir>` enters here with archetype="linear" (back-compat).
         from .init_template import scaffold
         target = spec["target_dir"]
+        archetype = spec.get("archetype", "linear")
         try:
-            n = scaffold(target)
-        except FileExistsError as e:
+            n = scaffold(target, archetype)
+        except (FileExistsError, ValueError) as e:
             print("error: " + str(e), file=sys.stderr)
             raise SystemExit(2)
-        print("Created {} files in {}/".format(n, target))
+        print("Created {} files in {}/  (archetype: {})".format(n, target, archetype))
         print("Next: yaah run {}/starter.local.json".format(target))
         return
     root = _read_json(spec["root"])
