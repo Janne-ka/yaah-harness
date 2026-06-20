@@ -26,6 +26,7 @@ This folder is the deeper reference.
 
 | | |
 |---|---|
+| [shape-grammar.md](shape-grammar.md) | the one-page reference card — every root key, every node type, every graph construct, every CLI verb. Print it. |
 | [node-reference.md](node-reference.md) | every node type and its config |
 | [root-config-reference.md](root-config-reference.md) | every root / deployment-config key |
 | [module-catalog.md](module-catalog.md) | every node / port / adapter / sink (auto-generated from the code) |
