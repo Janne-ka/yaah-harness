@@ -1,5 +1,5 @@
 {
-  "_doc": "A/B variant of arch-drift: fork the extract stage to two models (claude-sonnet-4-6 vs claude-haiku-4-5), each agent ATTACHES its own usage stats via the attacher port (ADR-0003 — UsageAttacher lives in transforms.py, not in the engine). Fanin merges the two candidates; the report shows both side-by-side with tokens-per-candidate; the human picks one (or revises — v1 exits with feedback, no loop). Demonstrates yaah's fork+fanin, the attacher port, and the json_schema decision form escape hatch.",
+  "_doc": "A/B variant of arch-drift: fork the extract stage to two models (claude-sonnet-4-6 vs claude-haiku-4-5), each agent ATTACHES its own usage stats via the attacher port (ADR-0003 — UsageAttacher lives in transforms.py, not in the engine). Each agent is parse=true (ADR-0004 default) so the model's JSON output is auto-merged onto the per-branch payload; render-svg finds `mermaid` directly. AttachingAgent passes through failed verdicts (parse failures) unchanged so the retry+feedback loop catches them the same way validators would. Fanin merges the two candidates; the report shows both side-by-side with tokens-per-candidate; the human picks one (or revises — v1 exits with feedback, no loop). Demonstrates yaah's fork+fanin, the attacher port composed with parse-by-default, and the json_schema decision form escape hatch.",
   "nodes": {
     "role:snapshot":     {"type": "transform", "target": "fn:transforms:snapshot", "call": "envelope"},
     "role:read-svg":     {"type": "transform", "target": "fn:transforms:read_committed_svg", "call": "envelope"},
@@ -13,8 +13,6 @@
                            "carry": ["repo_path", "arch_svg_path", "arch_svg_dir", "committed_svg", "committed_svg_path", "snapshot", "feedback"],
                            "attach": ["fn:transforms:UsageAttacher"]},
 
-    "role:check":        {"type": "json_object", "required": ["mermaid"]},
-    "role:parse":        {"type": "transform", "target": "fn:transforms:parse_extracted", "call": "envelope"},
     "role:render-svg":   {"type": "transform", "target": "fn:transforms:render_mermaid", "call": "envelope"},
 
     "role:prepare":      {"type": "transform", "target": "fn:transforms:prepare_ab_template", "call": "envelope",
@@ -47,12 +45,10 @@
 
       "fork-extract":   {"node": "", "fork": ["extract-a", "extract-b"], "then": "prepare"},
 
-      "extract-a":      {"node": "role:extract-a", "validators": ["role:check"], "max_attempts": 2, "feedback": true, "then": "parse-a"},
-      "parse-a":        {"node": "role:parse",     "then": "render-svg-a"},
+      "extract-a":      {"node": "role:extract-a", "max_attempts": 2, "feedback": true, "then": "render-svg-a"},
       "render-svg-a":   {"node": "role:render-svg", "then": "join"},
 
-      "extract-b":      {"node": "role:extract-b", "validators": ["role:check"], "max_attempts": 2, "feedback": true, "then": "parse-b"},
-      "parse-b":        {"node": "role:parse",     "then": "render-svg-b"},
+      "extract-b":      {"node": "role:extract-b", "max_attempts": 2, "feedback": true, "then": "render-svg-b"},
       "render-svg-b":   {"node": "role:render-svg", "then": "join"},
 
       "join":           {"node": "",

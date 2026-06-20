@@ -1,5 +1,5 @@
 {
-  "_doc": "A/B variant of config-flow: fork extract to two models (sonnet A vs haiku B). Each agent attaches its own usage via the attacher port (ADR-0003). Fanin merges; prepare computes per-candidate stats; write-both lands BOTH SVGs side-by-side in the same dir with `-a` and `-b` appended. Fully automated — the comparison itself IS the artifact, no gate-picking needed.",
+  "_doc": "A/B variant of config-flow: fork extract to two models (sonnet A vs haiku B). Each agent is parse=true (ADR-0004 default) so the model's JSON output is auto-merged onto the per-branch payload; render-svg finds `mermaid` directly. Each agent attaches its own usage via the attacher port (ADR-0003) — AttachingAgent passes through failed verdicts unchanged so parse failures still trigger the retry+feedback loop. Fanin merges; prepare computes per-candidate stats; write-both lands BOTH SVGs side-by-side in the same dir with `-a` and `-b` appended. Fully automated — the comparison itself IS the artifact, no gate-picking needed.",
   "nodes": {
     "role:snapshot":     {"type": "transform", "target": "fn:transforms:snapshot_config_flow", "call": "envelope"},
 
@@ -12,8 +12,6 @@
                            "carry": ["target_config_path", "repo_path", "arch_svg_path", "arch_svg_dir", "snapshot"],
                            "attach": ["fn:transforms:UsageAttacher"]},
 
-    "role:check":        {"type": "json_object", "required": ["mermaid"]},
-    "role:parse":        {"type": "transform", "target": "fn:transforms:parse_extracted", "call": "envelope"},
     "role:render-svg":   {"type": "transform", "target": "fn:transforms:render_mermaid",  "call": "envelope"},
 
     "role:prepare":      {"type": "transform", "target": "fn:transforms:prepare_ab_template", "call": "envelope",
@@ -30,12 +28,10 @@
 
       "fork-extract": {"node": "", "fork": ["extract-a", "extract-b"], "then": "prepare"},
 
-      "extract-a":    {"node": "role:extract-a", "validators": ["role:check"], "max_attempts": 2, "feedback": true, "then": "parse-a"},
-      "parse-a":      {"node": "role:parse",     "then": "render-svg-a"},
+      "extract-a":    {"node": "role:extract-a", "max_attempts": 2, "feedback": true, "then": "render-svg-a"},
       "render-svg-a": {"node": "role:render-svg", "then": "join"},
 
-      "extract-b":    {"node": "role:extract-b", "validators": ["role:check"], "max_attempts": 2, "feedback": true, "then": "parse-b"},
-      "parse-b":      {"node": "role:parse",     "then": "render-svg-b"},
+      "extract-b":    {"node": "role:extract-b", "max_attempts": 2, "feedback": true, "then": "render-svg-b"},
       "render-svg-b": {"node": "role:render-svg", "then": "join"},
 
       "join":         {"node": "",

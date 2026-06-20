@@ -182,7 +182,30 @@ def main() -> None:
         "S2 regression has reappeared.".format(out5.payload["saw_corr"]))
     assert out5.payload["saw_tokens_in"] == 10, out5.payload
 
-    print("PASS attacher port + wrapper: happy, empty, no-span, collision, S2 regression")
+    # ---- pass-through on failed verdict (ADR-0004 interaction) ------------
+    # With parse-by-default, an inner agent may emit a Kind.VERDICT envelope
+    # (parse failure). The wrapper must pass it through unchanged — merging
+    # attacher keys onto a verdict either gets ignored by the harness or
+    # collides with the verdict's own contract.
+    tracer6 = _tracer()
+
+    class _FailedVerdictAgent:
+        async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
+            return input.reply(Kind.VERDICT, status="fail", severity="hard",
+                               failures=[{"code": "not_json",
+                                          "message": "bad output",
+                                          "fix_hint": "return JSON"}])
+
+    a6 = _CapturingAttacher(returns={"usage": {"tokens": 999}})
+    wrapped6 = AttachingAgent(_FailedVerdictAgent(), [a6], tracer6)
+    inp6 = Envelope(Kind.TASK, {}, headers={"correlation_id": "corr-F"})
+    out6 = _drive(wrapped6.invoke(inp6, NodeConfig()))
+    assert out6.kind == Kind.VERDICT, out6.kind
+    assert out6.payload["status"] == "fail", out6.payload
+    assert "usage" not in out6.payload, "attacher must NOT merge onto failed verdict"
+    assert a6.calls == [], "attacher must NOT fire when inner returned a verdict"
+
+    print("PASS attacher port + wrapper: happy, empty, no-span, collision, S2, verdict pass-through")
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from ..core import Envelope, NodeConfig
+from ..core import Envelope, Kind, NodeConfig
 from .attacher import Attacher
 
 
@@ -36,6 +36,14 @@ class AttachingAgent:
 
     async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
         result = await self._inner.invoke(input, config)
+        # Pass-through on failed verdicts (kind=VERDICT). The inner agent may
+        # have emitted a failed verdict (e.g. parse-by-default extract_json
+        # failure, ADR-0004) — that envelope has its own contract the harness's
+        # retry loop reads. Merging attacher keys onto it would either be
+        # noise the verdict ignores or, worse, collide with a verdict key and
+        # corrupt the contract. Attachers fire only on the success path.
+        if result.kind == Kind.VERDICT:
+            return result
         # per-corr lookup: in concurrent runs (R12 broker, nested agents) the
         # tracer's flat span buffer holds spans from many correlations. A
         # parameter-less last_* would return whichever ran last globally.
