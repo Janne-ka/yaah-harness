@@ -410,24 +410,26 @@ def scenario_main_catches_import_error() -> None:
     one actionable line + exit 2, matching the existing config-error UX."""
     # Monkey-patch the dispatcher to raise the exact exception class — tests
     # main()'s except clause directly, independent of WHERE in the engine the
-    # eager import lives. (The lazy `fn:` path inside a stage gets wrapped as
-    # StageFailed instead, which is a different code path; this test pins the
-    # clean-exit contract for the eager build path.)
-    prev_dispatch = r._dispatch
+    # eager import lives. The CLI plumbing lives in yaah.cli since the B3.1b
+    # refactor; patch there. (The lazy `fn:` path inside a stage gets wrapped
+    # as StageFailed instead, which is a different code path; this test pins
+    # the clean-exit contract for the eager build path.)
+    from yaah import cli as yc
+    prev_dispatch = yc._dispatch
     prev_argv = sys.argv
     sys.argv = ["yaah", "irrelevant.json"]
-    r._dispatch = lambda _spec: (_ for _ in ()).throw(
+    yc._dispatch = lambda _spec: (_ for _ in ()).throw(
         ModuleNotFoundError("No module named 'yaah_app_demo'"))
     stderr = io.StringIO()
     try:
         with contextlib.redirect_stderr(stderr):
-            r.main()
+            yc.main()
     except SystemExit as e:
         assert e.code == 2, "expected clean exit 2 for ImportError, got {}".format(e.code)
     else:
         raise AssertionError("expected SystemExit; ImportError escaped")
     finally:
-        r._dispatch = prev_dispatch
+        yc._dispatch = prev_dispatch
         sys.argv = prev_argv
     # the operator sees ONE line, not a traceback; the module name is in it
     # so they know what to add to PYTHONPATH.
