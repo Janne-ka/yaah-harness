@@ -122,7 +122,10 @@ class Agent:
         if template is None and prompt_key is None:
             raise ValueError("Agent needs either template= or prompt_key= (+ prompt_source=)")
         if prompt_key is not None and prompt_source is None:
-            raise ValueError("Agent given prompt_key but no prompt_source")
+            raise ValueError(
+                "Agent given prompt_key={!r} but no prompt_source — pass "
+                "prompt_source= alongside prompt_key=, or switch to inline "
+                "template= instead".format(prompt_key))
         self._backend = backend
         self._template = template
         self._prompt_source = prompt_source

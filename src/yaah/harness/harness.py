@@ -233,9 +233,15 @@ class Harness:
                 "no resumable baton {!r} — run `yaah list`; each baton is "
                 "single-shot, and TTLs expire abandoned ones".format(baton_id))
         if baton.status != "suspended":
-            raise ValueError("baton {!r} is not suspended".format(baton_id))
+            raise ValueError(
+                "baton {!r} status is {!r}, not 'suspended' — only suspended "
+                "batons can be resumed; run `yaah list` to see what's "
+                "actually parked".format(baton_id, baton.status))
         if baton.stage is None:
-            raise ValueError("baton {!r} has no suspended stage".format(baton_id))
+            raise ValueError(
+                "baton {!r} has no suspended stage (engine invariant violation: "
+                "a suspended baton should always carry its stage); this is a "
+                "bug — report with the corresponding trace".format(baton_id))
         baton.status = "running"
         stage = self.graph.stages[baton.stage]
         resume_input = self._merge_decision(baton.pending, response)
