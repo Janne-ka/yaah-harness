@@ -17,7 +17,7 @@ If you know what you want to do, jump straight here.
 | do parallel work + reduce | [archetypes.md#fork-fanin](archetypes.md) + [`examples/fork-join`](../examples/fork-join/) |
 | retry on bad agent output | [decisions/0004-parse-by-default.md](decisions/0004-parse-by-default.md) (parse-by-default + validator feedback) |
 | give an agent tools (incl. MCP) | [agent-tools.md](agent-tools.md) |
-| run offline / in CI | the `.fake.json` overlay pattern — see any `examples/*/local.json` and the `--fake` flag |
+| run offline / in CI | [cookbook/offline-runs.md](cookbook/offline-runs.md) — three patterns: single-file fake, paired `*.local`+`*.real` via `_extends`, the `_fake` block + `--fake` flag |
 | make state survive a restart | [durable-state.md](durable-state.md) |
 | ship across processes / NATS | [root-config-reference.md](root-config-reference.md) — `transport:` |
 | debug what just ran | `yaah trace <run>.jsonl --pretty` — per-run tree of stages, calls, errors |

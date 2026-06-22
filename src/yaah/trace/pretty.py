@@ -13,7 +13,7 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .aggregate import cost_usd
 
@@ -154,6 +154,18 @@ def _render_errors(records: List[Dict[str, Any]]) -> List[str]:
         detail = e.get("error") or e.get("detail") or e.get("status") or ""
         lines.append('  - run {} stage "{}": {}'.format(corr, stage, detail))
     return lines
+
+
+def errors_only(records: Iterable[Dict[str, Any]]) -> Tuple[int, str]:
+    """The CI-shaped view: print just the error rollup, exit code matches the
+    presence (1) or absence (0) of errors. Composes as `yaah trace x.jsonl
+    --errors-only` in a pre-commit hook or release check; silent + exit 0 on a
+    clean run. PURE; the CLI wraps it with load_jsonl + print + SystemExit."""
+    rec_list = list(records)
+    lines = _render_errors(rec_list)
+    if not lines:
+        return 0, "no errors\n"
+    return 1, "\n".join(lines).lstrip() + "\n"
 
 
 def pretty(records: Iterable[Dict[str, Any]],

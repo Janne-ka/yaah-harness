@@ -4,7 +4,7 @@ Run: cd yaah && PYTHONPATH=src python3 tests/test_trace_pretty.py
 """
 from __future__ import annotations
 
-from yaah.trace.pretty import pretty
+from yaah.trace.pretty import errors_only, pretty
 
 
 def _records():
@@ -95,12 +95,40 @@ def scenario_suspended_status() -> None:
     assert "⏸" in out and "✗" not in out
 
 
+def scenario_errors_only_clean_exits_zero() -> None:
+    """A trace with no error spans -> exit 0, friendly 'no errors' message.
+    This is the CI happy-path; the operator runs `yaah trace x --errors-only`
+    in a pre-commit hook and gets exit 0 + silence-equivalent on a clean run."""
+    clean = [
+        {"id": "s1", "corr": "r1", "name": "stage", "parent": "p",
+         "duration_ms": 10.0, "status": "ok", "stage": "draft"},
+    ]
+    code, msg = errors_only(clean)
+    assert code == 0, (code, msg)
+    assert msg.strip() == "no errors", msg
+
+
+def scenario_errors_only_with_errors_exits_one() -> None:
+    """A trace with error-status spans -> exit 1, one line per error naming
+    run + stage + detail. The error rollup is the only thing printed — no
+    tree, no headers, just the bad news."""
+    dirty = _records()                            # reuses the smoke fixture (1 error)
+    code, msg = errors_only(dirty)
+    assert code == 1, (code, msg)
+    assert 'run def stage "verify"' in msg, msg   # names run + stage
+    assert "json_object validator failed" in msg, msg  # detail preserved
+    # No tree headers leak in
+    assert "├─" not in msg and "stages" not in msg, msg
+
+
 def main() -> None:
     scenario_smoke()
     scenario_empty()
     scenario_cost_via_price_map()
     scenario_tool_call_render()
     scenario_suspended_status()
+    scenario_errors_only_clean_exits_zero()
+    scenario_errors_only_with_errors_exits_one()
     print("ok")
 
 

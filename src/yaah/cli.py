@@ -26,7 +26,7 @@ import sys
 from typing import Any, Dict
 
 from .harness import StageFailed
-from .runtime_factories import _read_json
+from .runtime_factories import _read_json, _rel
 from .validate import validate_root
 
 
@@ -43,8 +43,10 @@ Commands:
   validate <root>               validate the config and exit (no run)
   explain <root>                print the EFFECTIVE config (post-_extends/_fake + defaults)
   trace <trace.jsonl> [PRICES]  summarize a run's trace (cost / latency / retries / model mix)
-                                add --pretty for a human-readable per-run tree (stages, calls, errors)
+                                add --pretty for a per-run tree (stages, calls, errors)
+                                add --errors-only for the CI-shaped check (exits non-zero on errors)
   baton-schema <root> <id>      print the JSON Schema of decision.json for one parked baton
+  doctor                        diagnose install: Python version, optional deps, packaged base configs
 
 Options (on run/list/resume/clear/validate/explain):
   --fake        merge the root's `_fake` block over the top level (sidecar fake providers/state)
@@ -132,7 +134,7 @@ def _parse_cli(argv: list) -> dict:
 # the legacy `yaah <root> --flag` parser (kept working). Pipeline verbs translate
 # to the same action spec _parse_cli produces; `validate`/`trace` add two actions.
 _SUBCOMMANDS = ("init", "scaffold", "run", "list", "resume", "clear", "explain",
-                "validate", "trace", "baton-schema")
+                "validate", "trace", "baton-schema", "doctor")
 _VERB_FLAG = {"list": "--list", "clear": "--clear", "explain": "--explain"}
 
 
@@ -173,14 +175,23 @@ def _parse_subcommand(argv: list) -> dict:
         spec["action"] = "validate"    # check-only (never runs the pipeline)
         return spec
     if verb == "trace":
-        flags = {"--debug", "--pretty"}    # everything else is positional
+        flags = {"--debug", "--pretty", "--errors-only"}   # everything else is positional
         files = [a for a in rest if a not in flags]
         if not files:
             _usage_exit("trace needs a trace.jsonl path")
+        if "--pretty" in rest and "--errors-only" in rest:
+            _usage_exit("--pretty and --errors-only are mutually exclusive")
         return {"action": "trace", "trace_path": files[0],
                 "price_map": files[1] if len(files) > 1 else None,
                 "pretty": "--pretty" in rest,
+                "errors_only": "--errors-only" in rest,
                 "debug": "--debug" in rest}
+    if verb == "doctor":
+        # Diagnostic verb: no root, no positional args, no flags. Anything
+        # extra is a typo — fail fast rather than silently dropping it.
+        if rest:
+            _usage_exit("doctor takes no arguments")
+        return {"action": "doctor"}
     if verb == "baton-schema":
         # surface the decision-form shape of one parked baton so a driver skill
         # can compose decision.json mechanically. Needs a durable state: to see
@@ -232,11 +243,23 @@ def _dispatch(spec: Dict[str, Any]) -> None:
             raise SystemExit(1)
         print("overlay ok — within the AI-mutable surface")
         return
+    if spec["action"] == "doctor":
+        from .doctor import diagnose
+        code, report = diagnose()
+        print(report, end="")
+        raise SystemExit(code)
     if spec["action"] == "trace":
         # summarize a run's trace JSONL — no root config involved
         from .trace.aggregate import aggregate, load_jsonl
         records = load_jsonl(spec["trace_path"])
         price_map = _read_json(spec["price_map"]) if spec.get("price_map") else None
+        if spec.get("errors_only"):
+            # CI-shaped: exit code mirrors error presence; the print is just
+            # informational — the meaningful signal is the exit code.
+            from .trace.pretty import errors_only
+            code, report = errors_only(records)
+            print(report, end="")
+            raise SystemExit(code)
         if spec.get("pretty"):
             from .trace.pretty import pretty
             print(pretty(records, price_map=price_map), end="")
@@ -255,7 +278,8 @@ def _dispatch(spec: Dict[str, Any]) -> None:
             print("error: " + str(e), file=sys.stderr)
             raise SystemExit(2)
         print("Created {} files in {}/  (archetype: {})".format(n, target, archetype))
-        print("Next: yaah run {}/starter.local.json".format(target))
+        print("Next:  yaah run {}/starter.local.json".format(target))
+        print("Then:  open the prompts/ dir and edit; see docs/tutorial.md and docs/archetypes.md")
         return
     from .runtime import (
         baton_schema, clear_state, explain_root, list_gates,
@@ -275,7 +299,26 @@ def _dispatch(spec: Dict[str, Any]) -> None:
         return
     validate_root(root)  # R15: one entry — unknown-key, shape, enum, cross-field
     if action == "validate":
-        print("ok: {} is a valid root config".format(spec["root"]))
+        # Closes a real audit gap: previously `yaah validate` only checked the
+        # root and pronounced "ok" even when the referenced pipeline file was
+        # malformed, had an unknown node type, or pointed at a nonexistent
+        # graph stage. Now both files are validated; the operator sees the
+        # actual problem here, not when they `yaah run`.
+        from .validate import validate_pipeline
+        pipeline_ref = root.get("pipeline")
+        if isinstance(pipeline_ref, str):
+            pipeline_cfg = _read_json(_rel(base, pipeline_ref))
+            validate_pipeline(pipeline_cfg)
+            print("ok: {} is valid (root + pipeline {})".format(
+                spec["root"], pipeline_ref))
+        elif isinstance(pipeline_ref, dict):
+            validate_pipeline(pipeline_ref)
+            print("ok: {} is valid (root + inline pipeline)".format(spec["root"]))
+        else:
+            # Root validation already caught the missing/bad-type case above.
+            # If we somehow got here without a `pipeline` field, fall back to
+            # the original message rather than guessing.
+            print("ok: {} is a valid root config".format(spec["root"]))
         return
     if action == "baton-schema":
         asyncio.run(baton_schema(root, base, spec["baton_id"]))

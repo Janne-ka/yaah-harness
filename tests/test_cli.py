@@ -37,6 +37,67 @@ def _run_cli(argv: list) -> tuple:
         sys.argv, sys.stdout = old_argv, old_stdout
 
 
+def _validate_pipeline_extension_smoke() -> None:
+    """Audit-derived regression: a root pointing at a pipeline file with an
+    unresolved graph target must now fail `yaah validate` (was: 'ok'). Also
+    verifies the new success message names BOTH files when validation passes,
+    so a future regression that silently skips pipeline-loading is caught."""
+    import json
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        # Bad: pipeline references a non-existent stage as `then`.
+        bad_pl = os.path.join(td, "bad.pipeline.json")
+        with open(bad_pl, "w") as f:
+            json.dump({"nodes": {"a": {"type": "agent", "model": "fake:m",
+                                        "template": "x"}},
+                       "graph": {"start": "s", "stages":
+                                 {"s": {"node": "a", "then": "no_such"}}}}, f)
+        bad_root = os.path.join(td, "bad.root.json")
+        with open(bad_root, "w") as f:
+            json.dump({"transport": {"type": "inproc"},
+                       "state": {"type": "memory"},
+                       "providers": {"fake": {"type": "fake_scripted"}},
+                       "default_provider": "fake",
+                       "pipeline": "bad.pipeline.json"}, f)
+        # stderr is what cli.main() prints errors to; we capture it like stdout.
+        old_argv, old_stderr = sys.argv, sys.stderr
+        sys.argv = ["yaah", "validate", bad_root]
+        sys.stderr = io.StringIO()
+        try:
+            try:
+                cli_main()
+                code = 0
+            except SystemExit as e:
+                code = 0 if e.code is None else int(e.code)
+            err = sys.stderr.getvalue()
+        finally:
+            sys.argv, sys.stderr = old_argv, old_stderr
+        assert code == 2, (code, err)
+        assert "invalid pipeline" in err, err
+        assert "no_such" in err, err
+
+        # Good: a minimal-but-valid pipeline. Validates clean and the success
+        # message names both files (the contract this scenario locks).
+        ok_pl = os.path.join(td, "ok.pipeline.json")
+        with open(ok_pl, "w") as f:
+            json.dump({"nodes": {"a": {"type": "agent", "model": "fake:m",
+                                        "template": "x"}},
+                       "graph": {"start": "s", "stages":
+                                 {"s": {"node": "a"}}}}, f)
+        ok_root = os.path.join(td, "ok.root.json")
+        with open(ok_root, "w") as f:
+            json.dump({"transport": {"type": "inproc"},
+                       "state": {"type": "memory"},
+                       "providers": {"fake": {"type": "fake_scripted"}},
+                       "default_provider": "fake",
+                       "pipeline": "ok.pipeline.json"}, f)
+        code, out = _run_cli(["validate", ok_root])
+        assert code == 0, (code, out)
+        assert "root + pipeline" in out and "ok.pipeline.json" in out, out
+
+
 def _expect(spec: dict, **want) -> None:
     for k, v in want.items():
         assert spec.get(k) == v, "{}: got {!r}, want {!r} (spec={})".format(k, spec.get(k), v, spec)
@@ -127,6 +188,11 @@ def main() -> None:
     # version or the source-checkout placeholder).
     v = _resolve_version()
     assert isinstance(v, str) and v, v
+
+    # `yaah validate` now validates root + pipeline (closes the gap where the
+    # old behavior pronounced "ok" while the referenced pipeline had unresolved
+    # graph targets / missing types / etc.).
+    _validate_pipeline_extension_smoke()
 
     print("PASS yaah subcommands map correctly; legacy form intact; bad input exits 2; --version / bare-yaah affordances")
 

@@ -54,3 +54,8 @@ Until those triggers fire, the cookbook stays read-only-by-design.
   [Attacher port](../decisions/0003-attacher-port.md). Currently:
   `UsageAttacher` (tokens + model from the tracer's last model_call
   span).
+- [offline-runs.md](offline-runs.md) — three idiomatic patterns for
+  running a pipeline without an API key (single-file fake provider,
+  paired `*.local.json` + `*.real.json` via `_extends`, the inline
+  `_fake` block + `--fake` CLI flag). Config-shape reference, not
+  Python code — but same audience as the rest of the cookbook.
