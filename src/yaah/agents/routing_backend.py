@@ -28,10 +28,13 @@ from typing import Any, AsyncIterator, List, Optional
 
 from ..prefix_router import PrefixRouter
 from . import api_provider as _ap
-from .model_backend import ModelBackend
 
 
-class RoutingBackend(PrefixRouter[ModelBackend]):
+# Generic parameter is Any post-B6: the legacy ModelBackend Protocol was
+# removed once every backend implemented ApiProvider natively. Structural
+# duck-typing on `complete` / `turn` / `stream` is what RoutingBackend
+# actually does at dispatch time; the Protocol was a type-only ornament.
+class RoutingBackend(PrefixRouter[Any]):
     label = "backend"
     prefix = "provider"
 

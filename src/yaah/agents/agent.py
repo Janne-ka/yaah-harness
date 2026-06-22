@@ -22,7 +22,11 @@ from ..core import Envelope, Failure, NodeConfig, Verdict
 from ..cwd import carry_cwd, resolve_cwd
 from ..jsonio import extract_json
 from ..trace import NullTracer, Span
-from .model_backend import ModelBackend
+# Backend is typed as Any post-B6: the legacy ModelBackend / ToolBackend
+# Protocols were removed once every backend implemented ApiProvider natively.
+# Structural duck-typing on `complete` / `turn` is what this Agent actually
+# does at runtime; the type system check duplicated the runtime check without
+# adding any guarantee.
 from .tool import Tool
 from .tool_loop import run_tool_loop
 
@@ -77,7 +81,7 @@ _RESERVED_REPLY_KWARGS = frozenset({"raw"})
 class Agent:
     def __init__(
         self,
-        backend: ModelBackend,
+        backend: Any,
         template: Optional[str] = None,
         *,
         prompt_source: Optional[Any] = None,   # a yaah.prompts.PromptSource
@@ -189,12 +193,14 @@ class Agent:
         R11 manifest fallback was unreachable, and a non-turn provider
         (claude_cli) with tools/expose/broker crashed mid-loop instead of
         getting the manifest. A router resolves the route first via its
-        `supports_turn`; a bare leaf answers structurally."""
+        `supports_turn`; a bare leaf answers structurally via `hasattr` (the
+        legacy isinstance(be, ToolBackend) check was deleted in B6 once every
+        backend implemented ApiProvider — the Protocol added no guarantee the
+        hasattr didn't already give)."""
         be = self._backend
         if hasattr(be, "supports_turn"):
             return bool(be.supports_turn(model))
-        from .model_backend import ToolBackend
-        return isinstance(be, ToolBackend)
+        return callable(getattr(be, "turn", None))
 
     async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
         template = self._template

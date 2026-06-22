@@ -110,23 +110,24 @@ async def scenario_claude_per_agent_tools() -> None:
 
 
 async def scenario_backend_protocol_conformance() -> None:
-    # Elegance #3 (assessment): ModelBackend + ToolBackend Protocols replace the
-    # bare hasattr(backend, "turn") duck-typing. Structural conformance:
-    # - every backend implements ModelBackend (has `complete`).
-    # - tool-capable backends ALSO implement ToolBackend (has `turn`).
-    from yaah.agents import (FakeBackend, ModelBackend, RoutingBackend,
-                             ScriptedBackend, ScriptedToolBackend, ToolBackend)
+    # Post-B6: ModelBackend + ToolBackend Protocols are gone. The canonical
+    # check is now ApiProvider (every backend implements stream()) plus a
+    # structural `hasattr(b, "turn")` for tool-capable ones. The shape this
+    # test enforces hasn't changed — only the type system it expresses it in.
+    from yaah.agents import (ApiProvider, FakeBackend, RoutingBackend,
+                             ScriptedBackend, ScriptedToolBackend)
     from yaah.adapters.backends import ClaudeCliBackend, LiteLLMBackend
 
     plain = [FakeBackend(), ScriptedBackend({}), ClaudeCliBackend(), RoutingBackend({})]
     tool_capable = [ScriptedToolBackend([]), LiteLLMBackend()]
     for b in plain + tool_capable:
-        assert isinstance(b, ModelBackend), type(b).__name__
+        assert isinstance(b, ApiProvider), type(b).__name__  # every backend streams
     for b in tool_capable:
-        assert isinstance(b, ToolBackend), type(b).__name__
-    # plain backends are NOT ToolBackends (no `turn`)
-    assert not isinstance(FakeBackend(), ToolBackend)
-    assert not isinstance(ClaudeCliBackend(), ToolBackend)
+        assert callable(getattr(b, "turn", None)), type(b).__name__   # tool-capable have turn()
+    # plain backends do NOT have turn() (claude handles its own tool loop natively;
+    # fake/scripted have no tool surface).
+    assert not callable(getattr(FakeBackend(), "turn", None))
+    assert not callable(getattr(ClaudeCliBackend(), "turn", None))
 
 
 async def scenario_carry_does_not_collide_with_reserved_reply_kwarg() -> None:

@@ -15,7 +15,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from ..agents import ModelBackend
+# `backend` is typed as Any post-B6 (legacy ModelBackend Protocol removed
+# once every backend implemented ApiProvider). The build layer only forwards
+# the backend handle; it doesn't introspect it, so a structural Any is the
+# honest annotation.
 from ..comms import Comms, InProcessComms
 from ..harness import Graph, Harness, Stage
 from ..runtime_factories import _read_json  # `_extends`-aware JSON loader
@@ -59,7 +62,7 @@ def build(
     config: Dict[str, Any],
     *,
     comms: Optional[Comms] = None,
-    backend: Optional[ModelBackend] = None,
+    backend: Optional[Any] = None,
     prompt_source: Optional[Any] = None,
     data_source: Optional[Any] = None,
     data_sink: Optional[Any] = None,
@@ -126,7 +129,7 @@ async def serve_from_config(
     config: Dict[str, Any],
     comms: Any,
     *,
-    backend: Optional[ModelBackend] = None,
+    backend: Optional[Any] = None,
     prompt_source: Optional[Any] = None,
     data_source: Optional[Any] = None,
     data_sink: Optional[Any] = None,
