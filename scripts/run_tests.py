@@ -6,15 +6,19 @@ the hand-rolled shell loop. Each test is a self-contained script with an
 PASS/FAIL, exiting nonzero if any failed. Sets PYTHONPATH=src so it works whether
 or not yaah is installed (editable in a pixi env, or raw source in CI).
 
-Coverage floor: when the `coverage` package is importable, each test runs under
-`coverage run -p` and the combined report enforces `[tool.coverage.report]
-fail_under` in pyproject.toml (75%) — the command exits nonzero if coverage dips
-below it. CI and the pixi env install coverage, so the floor gates every push.
-Pass `--no-coverage` for a fast local loop; pass `--coverage` to require it
-(errors if `coverage` is missing).
+Coverage floor (HARD GATE, 2026-06-22): each test runs under `coverage run -p`
+and the combined report enforces `[tool.coverage.report] fail_under` in
+pyproject.toml (75%) — the command exits nonzero if coverage dips below it
+OR if the `coverage` package isn't installed. The "silently pass when
+coverage isn't installed" loophole was closed because it let CI/commit gates
+slip below the floor unnoticed.
+
+Pass `--no-coverage` for a fast LOCAL DEV LOOP only — it bypasses the
+gate entirely and is not safe for CI or pre-commit. `--coverage` is the
+explicit opt-in (kept for symmetry / readability) but matches the default.
 
 Run: python scripts/run_tests.py               (from the yaah/ directory)
-     python scripts/run_tests.py --no-coverage
+     python scripts/run_tests.py --no-coverage  (dev loop, skips the gate)
 
 Targets Python 3.9+.
 """
@@ -48,6 +52,15 @@ def main(argv=None) -> int:
     if force_cov and not _coverage_available():
         print("ERROR: --coverage requested but the 'coverage' package is not "
               "installed (pip install 'coverage[toml]').", file=sys.stderr)
+        return 2
+    # HARD GATE (2026-06-22): the default mode REQUIRES coverage. If `coverage`
+    # isn't installed AND --no-coverage wasn't passed, fail loudly — silent
+    # bypass was letting the floor slip unnoticed.
+    if not no_cov and not _coverage_available():
+        print("ERROR: the 'coverage' package is not installed and --no-coverage "
+              "was not passed. Either install it (pip install 'coverage[toml]') "
+              "for the enforced gate, or pass --no-coverage for a dev-loop run "
+              "that skips the floor check.", file=sys.stderr)
         return 2
     use_cov = force_cov or (not no_cov and _coverage_available())
 
