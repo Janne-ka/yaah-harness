@@ -2,11 +2,10 @@
 
 Used by: yaah.build (the 'agent_loop' node type). Wraps a ToolBackend in a
 turn-by-turn loop where the agent emits tool calls and the harness dispatches
-them via the same `call_target` resolver transforms use — so a tool and a
-transform run through one code path.
+them via the same `call_target` resolver transforms use.
 Where: a stage that needs the harness shape (agent emits tool call → harness
 dispatches → agent observes → loop). Sibling to `agent` (the one-shot stage).
-Why: YAAH had the `ToolBackend.turn(messages, tools)` PROTOCOL but no node
+Why: YAAH had the `ToolBackend.turn(messages, tools)` protocol but no node
 that drove a loop against it. This is the missing primitive. Workers-not-
 citizens is preserved: the agent has agency only within the catalog the
 AUTHOR declared, not within whatever the backend or an MCP server might
@@ -24,23 +23,31 @@ Tool catalog shape (author-declared in the stage config):
 
 Dispatch goes through `call_target` (the same machinery transforms use): `fn:`
 is a direct in-process call (microseconds), `node:` is a Comms request,
-`http(s):` is an HTTP call. The author chooses per tool.
+`http(s):` is an HTTP call.
+
+B8 (2026-06-22): the inline tool-use loop was deleted. The dict catalog is
+converted to `Tool` instances at construction, and `invoke()` delegates the
+whole loop to `run_tool_loop(..., return_meta=True)`. All the hardening
+(OpenAI/litellm wire shape, tracer span emission, malformed-call filter,
+callable-impl branch, CancelledError re-raise) is now shared with the
+original `Agent` class — one canonical loop, two node shapes.
 
 Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from ..core import Envelope, Kind
-from ..external_call import call_target
+from ..agents.tool import Tool
+from ..agents.tool_loop import run_tool_loop
 
 
 class AgentLoopNode:
     def __init__(
         self,
         *,
-        backend: Any,                          # ToolBackend — has `.turn(messages, tools)`
+        backend: Any,                          # has `.turn(messages, tools)`
         tools: Dict[str, Dict[str, Any]],      # name -> {description, input_schema, dispatch}
         comms: Any = None,                     # required if any tool uses `node:` dispatch
         prompt_source: Any = None,             # required if system_prompt is a 'file:' ref
@@ -53,13 +60,27 @@ class AgentLoopNode:
                 "AgentLoopNode requires a ToolBackend (one with `.turn(messages, tools)`). "
                 "Got {!r}, which only has .complete(). Either swap the backend or use a "
                 "plain `agent` node for one-shot stages.".format(type(backend).__name__))
+        # Validate dispatch BEFORE the Tool-comprehension below, so a missing
+        # 'dispatch' surfaces as ValueError (the documented contract) instead
+        # of a KeyError on `spec["dispatch"]`.
         for name, spec in tools.items():
             if "dispatch" not in spec:
                 raise ValueError(
                     "tool {!r} in agent_loop catalog is missing 'dispatch' "
                     "(e.g. 'fn:mymodule:myfunc' or 'node:my_role')".format(name))
         self._backend = backend
-        self._tools = tools
+        # Convert the dict catalog to Tool instances once at construction.
+        # Tool.impl accepts a string (a call_target target) — run_tool_loop
+        # routes fn:/node:/http: through the same resolver transforms use.
+        # NOTE: Tool's field is `schema` (not `input_schema`) — the dict-key
+        # name is the author-facing label; the dataclass field is internal.
+        self._tools = [
+            Tool(name=name,
+                 description=spec.get("description", ""),
+                 schema=spec.get("input_schema", {"type": "object", "properties": {}}),
+                 impl=spec["dispatch"])
+            for name, spec in tools.items()
+        ]
         self._comms = comms
         self._prompt_source = prompt_source
         self._max_turns = max_turns
@@ -70,53 +91,27 @@ class AgentLoopNode:
     async def invoke(self, input_envelope: Envelope, config: Dict[str, Any]) -> Envelope:
         goal = input_envelope.payload.get("goal") or input_envelope.payload.get("input") or ""
         system = await self._system_text()
-        messages: List[Dict[str, Any]] = [{"role": "user", "content": goal}]
-        # Tool specs rendered ONCE per stage invocation, not per turn — cache-friendly.
-        tool_specs = [
-            {"name": name, "description": spec.get("description", ""),
-             "input_schema": spec.get("input_schema", {"type": "object", "properties": {}})}
-            for name, spec in self._tools.items()
-        ]
-
-        for turn_idx in range(self._max_turns):
-            response = await self._backend.turn(
-                messages, tool_specs,
-                model=self._model,
-                system=system,
-            )
-            if "text" in response and not response.get("calls"):
-                # Agent emitted a final answer — done.
-                return _result(input_envelope, response["text"], turn_idx + 1, "completed")
-            calls = response.get("calls") or []
-            if not calls:
-                # Neither text nor calls — malformed turn; treat as final-empty.
-                return _result(input_envelope, "", turn_idx + 1, "empty_response")
-            messages.append({"role": "assistant", "content": response.get("text", ""), "calls": calls})
-            tool_results: List[Dict[str, Any]] = []
-            for call in calls:
-                name = call.get("name") or ""
-                args = call.get("args", {}) or {}
-                call_id = call.get("id", "")
-                if name not in self._tools:
-                    tool_results.append({"id": call_id, "name": name,
-                                          "content": "unknown tool {!r} — not in declared catalog "
-                                                     "{}".format(name, sorted(self._tools)),
-                                          "is_error": True})
-                    continue
-                target = self._tools[name]["dispatch"]
-                try:
-                    # Tool errors flow back as observations, not loop crashes — agent learns + adapts.
-                    result = await call_target(target, args, comms=self._comms,
-                                                reply_to=input_envelope)
-                    tool_results.append({"id": call_id, "name": name,
-                                          "content": str(result), "is_error": False})
-                except Exception as exc:
-                    tool_results.append({"id": call_id, "name": name,
-                                          "content": "{}: {}".format(type(exc).__name__, exc),
-                                          "is_error": True})
-            messages.append({"role": "tool", "results": tool_results})
-
-        return _result(input_envelope, "", self._max_turns, "max_turns_exhausted")
+        # B8: delegate to the canonical loop. The system prompt becomes a
+        # system-role message (OpenAI/Anthropic convention); the goal becomes
+        # the initial user message; the cursor + tool dispatch + tracer wiring
+        # live in run_tool_loop.
+        answer, meta = await run_tool_loop(
+            self._backend,
+            tools=self._tools,
+            messages=[{"role": "user", "content": goal}],
+            system=system,
+            comms=self._comms,
+            model=self._model,
+            max_iters=self._max_turns,
+            return_meta=True,
+            corr=input_envelope.correlation_id or "",
+        )
+        return input_envelope.reply_with(Kind.RESULT, {
+            **input_envelope.payload,
+            "answer": answer,
+            "turns": meta["turns"],
+            "outcome": meta["outcome"],
+        })
 
     async def _system_text(self) -> Optional[str]:
         if self._resolved_system is not None:
@@ -130,8 +125,3 @@ class AgentLoopNode:
             s = await self._prompt_source.get(s[5:])
         self._resolved_system = s
         return s
-
-
-def _result(input_env: Envelope, answer: str, turns: int, outcome: str) -> Envelope:
-    return input_env.reply_with(Kind.RESULT, {**input_env.payload, "answer": answer,
-                                                "turns": turns, "outcome": outcome})

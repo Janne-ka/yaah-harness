@@ -130,6 +130,51 @@ def test_tool_spec_missing_dispatch_rejected_at_construction():
     raise AssertionError("expected ValueError for tool spec missing 'dispatch'")
 
 
+# ---- B8: AgentLoopNode delegates to run_tool_loop -------------------------
+
+def test_b8_dict_catalog_converts_to_tool_instances_at_construction():
+    # The B8 plan converts the dict catalog to a list of Tool instances at
+    # __init__. The historical typo trap was naming the field `input_schema`
+    # when Tool's field is `schema`. This test fails fast on that bug
+    # because AgentLoopNode construction itself would raise TypeError.
+    from yaah.agents import Tool
+    backend = FakeToolBackend(turns=[{"text": "done"}])
+    node = _make(backend, tools={
+        "tool_ok": {"description": "a real tool",
+                    "input_schema": {"type": "object", "properties": {"x": {"type": "integer"}}},
+                    "dispatch": "fn:tests.fixtures_agent_loop_tools:tool_ok"},
+    })
+    # Internal: the converted Tool list (post-B8). If still the inline-loop
+    # shape, the attribute name will differ; this test pins the post-B8
+    # contract.
+    assert hasattr(node, "_tools"), "AgentLoopNode should hold Tool instances post-B8"
+    tools = node._tools  # type: ignore[attr-defined]
+    assert isinstance(tools, list) and len(tools) == 1, tools
+    t = tools[0]
+    assert isinstance(t, Tool), type(t).__name__
+    assert t.name == "tool_ok"
+    assert t.description == "a real tool"
+    assert t.schema == {"type": "object", "properties": {"x": {"type": "integer"}}}
+    assert t.impl == "fn:tests.fixtures_agent_loop_tools:tool_ok"
+
+
+def test_b8_dispatch_validation_precedes_tool_conversion():
+    # Pre-B8 the validation order was: validate all dispatch keys, then
+    # build inline. Post-B8 the validation must STILL happen before the
+    # Tool() construction comprehension, or a missing dispatch becomes a
+    # KeyError on spec["dispatch"] instead of the documented ValueError.
+    backend = FakeToolBackend(turns=[])
+    try:
+        _make(backend, tools={"x": {"description": "", "input_schema": {}}})
+    except ValueError as e:
+        assert "dispatch" in str(e), e
+        return
+    except KeyError:
+        raise AssertionError("dispatch validation must precede tool conversion "
+                             "(got KeyError; should be ValueError)")
+    raise AssertionError("expected ValueError for tool spec missing 'dispatch'")
+
+
 if __name__ == "__main__":
     test_loop_completes_with_final_text()
     test_tool_error_flows_back_as_observation()
@@ -137,4 +182,6 @@ if __name__ == "__main__":
     test_max_turns_exhausted()
     test_backend_without_turn_method_rejected_at_construction()
     test_tool_spec_missing_dispatch_rejected_at_construction()
+    test_b8_dict_catalog_converts_to_tool_instances_at_construction()
+    test_b8_dispatch_validation_precedes_tool_conversion()
     print("OK")

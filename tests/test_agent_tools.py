@@ -248,6 +248,13 @@ async def main() -> None:
     await scenario_manifest_omits_uncallable_closure_tools()
     await scenario_tool_loop_skips_malformed_calls()
     await scenario_tool_loop_survives_raising_tool()
+    # B8 — new kwargs on run_tool_loop
+    await scenario_b8_return_meta_completed_returns_tuple()
+    await scenario_b8_return_meta_exhausted_does_not_raise()
+    await scenario_b8_return_meta_empty_response_outcome()
+    await scenario_b8_messages_kwarg_skips_prompt_arg()
+    await scenario_b8_system_prepends_as_role_message()
+    await scenario_b8_default_return_shape_unchanged()
     print("ok")
 
 
@@ -305,6 +312,139 @@ async def scenario_tool_loop_survives_raising_tool() -> None:
     # the error went back to the model as the tool-result message
     tool_msgs = [m for m in be.last_messages if m.get("role") == "tool"]
     assert tool_msgs and "tool exploded" in tool_msgs[-1]["content"], tool_msgs
+
+
+# ---- B8: new kwargs on run_tool_loop --------------------------------------
+
+class _RecordingBackend:
+    """A scripted ToolBackend that records every messages list it sees so the
+    B8 tests can assert on prompt construction. Each turn pops the next
+    scripted response; out-of-script returns {} (signals empty_response)."""
+
+    def __init__(self, scripted_responses):
+        self._responses = list(scripted_responses)
+        self._i = 0
+        self.seen_messages = []  # one list per turn
+
+    async def turn(self, messages, tools, *, model=None, **opts):
+        self.seen_messages.append([dict(m) for m in messages])
+        if self._i < len(self._responses):
+            out = self._responses[self._i]
+            self._i += 1
+            return out
+        return {}                                            # exhausted script
+
+
+async def scenario_b8_return_meta_completed_returns_tuple() -> None:
+    # return_meta=True: instead of returning bare str, return (text, meta)
+    # where meta describes turns + outcome. completion outcome on a 1-turn
+    # final-text response.
+    from yaah.agents.tool_loop import run_tool_loop
+    be = _RecordingBackend([{"text": "answer"}])
+    out = await run_tool_loop(be, "go", [], return_meta=True)
+    assert isinstance(out, tuple), "return_meta=True must return tuple"
+    text, meta = out
+    assert text == "answer"
+    assert meta["outcome"] == "completed", meta
+    assert meta["turns"] == 1, meta
+
+
+async def scenario_b8_return_meta_exhausted_does_not_raise() -> None:
+    # Pre-B8: max_iters exhaustion raised RuntimeError.
+    # Post-B8 with return_meta=True: returns ("", meta) with outcome
+    # "max_turns_exhausted". The raise stays for legacy callers (no
+    # return_meta) — verified separately in test_default_return_shape.
+    from yaah.agents.tool_loop import run_tool_loop
+
+    class _NeverFinishes:
+        async def turn(self, messages, tools, *, model=None, **opts):
+            return {"calls": [{"id": "c1", "name": "noop", "args": {}}]}
+
+    def noop(args):
+        return {}
+
+    out = await run_tool_loop(
+        _NeverFinishes(), "go", [Tool(name="noop", impl=noop)],
+        max_iters=2, return_meta=True,
+    )
+    text, meta = out
+    assert text == "", text
+    assert meta["outcome"] == "max_turns_exhausted", meta
+    assert meta["turns"] == 2, meta
+
+
+async def scenario_b8_return_meta_empty_response_outcome() -> None:
+    # A turn that returns neither text nor calls: pre-B8 inline loop in
+    # AgentLoopNode surfaced this as outcome="empty_response". Post-B8 the
+    # canonical loop emits the same.
+    from yaah.agents.tool_loop import run_tool_loop
+    be = _RecordingBackend([{}])  # explicit empty turn
+    out = await run_tool_loop(be, "go", [], return_meta=True)
+    text, meta = out
+    assert text == "", text
+    assert meta["outcome"] == "empty_response", meta
+    assert meta["turns"] == 1, meta
+
+
+async def scenario_b8_messages_kwarg_skips_prompt_arg() -> None:
+    # When messages=[...] is passed, run_tool_loop must use it directly and
+    # ignore the prompt arg. AgentLoopNode relies on this to construct its
+    # own user message from the input envelope's goal.
+    from yaah.agents.tool_loop import run_tool_loop
+    be = _RecordingBackend([{"text": "ok"}])
+    custom = [{"role": "user", "content": "USE_THIS_NOT_THE_PROMPT"}]
+    await run_tool_loop(be, "IGNORED_PROMPT", [], messages=custom)
+    assert be.seen_messages[0] == custom, be.seen_messages
+    # the prompt arg was NOT injected as a separate user message
+    assert all("IGNORED_PROMPT" not in m.get("content", "")
+               for m in be.seen_messages[0]), be.seen_messages
+
+
+async def scenario_b8_system_prepends_as_role_message() -> None:
+    # The B8 plan moves system from `backend.turn(system=...)` kwarg into
+    # the messages list as a system-role message — the OpenAI/Anthropic
+    # convention. Verify the system message lands at index 0 with the
+    # provided content.
+    from yaah.agents.tool_loop import run_tool_loop
+    be = _RecordingBackend([{"text": "ok"}])
+    await run_tool_loop(be, "user prompt", [], system="be terse")
+    first_turn = be.seen_messages[0]
+    assert first_turn[0] == {"role": "system", "content": "be terse"}, first_turn
+    # user message follows the system message
+    user_msgs = [m for m in first_turn if m.get("role") == "user"]
+    assert user_msgs and user_msgs[0]["content"] == "user prompt", first_turn
+
+
+async def scenario_b8_default_return_shape_unchanged() -> None:
+    # Legacy callers (no return_meta kwarg) MUST still see:
+    #   - bare str return on completion
+    #   - RuntimeError on max_iters exhaustion
+    # Otherwise B8 breaks Agent.invoke (which calls run_tool_loop without
+    # the new kwargs and unpacks the result as a plain string).
+    from yaah.agents.tool_loop import run_tool_loop
+
+    # completion path
+    be1 = _RecordingBackend([{"text": "plain string"}])
+    out = await run_tool_loop(be1, "go", [])
+    assert isinstance(out, str), type(out).__name__
+    assert out == "plain string"
+
+    # exhaustion path
+    class _NeverFinishes:
+        async def turn(self, messages, tools, *, model=None, **opts):
+            return {"calls": [{"id": "c1", "name": "noop", "args": {}}]}
+
+    def noop(args):
+        return {}
+
+    try:
+        await run_tool_loop(_NeverFinishes(), "go", [Tool(name="noop", impl=noop)],
+                            max_iters=2)
+    except RuntimeError as e:
+        assert "max_iters" in str(e), e
+        return
+    raise AssertionError("legacy callers must still see RuntimeError on exhaustion "
+                         "(only return_meta=True suppresses the raise)")
 
 
 if __name__ == "__main__":
