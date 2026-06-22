@@ -33,19 +33,27 @@ from .validate import validate_root
 _USAGE = """\
 yaah <command> [args]
 
-Commands:
+Author:
   init <dir>                    scaffold a linear starter pipeline (alias for `scaffold linear <dir>`)
   scaffold <archetype> <dir>    scaffold from a named archetype (linear / branch-with-gate / fork-fanin); see docs/archetypes.md
+
+Run & inspect:
   run <root>                    run the configured pipeline (the default)
   list <root> [--json]          show parked gates (the mailbox view; --json for a parseable shape)
   resume <root> ID [FILE]       deliver a decision (optionally from FILE) to a parked gate
+  baton-schema <root> <id>      print the JSON Schema of decision.json for one parked baton
   clear <root>                  graceful reset: broadcast clear + flush parked + drop batons
-  validate <root>               validate the config and exit (no run)
   explain <root>                print the EFFECTIVE config (post-_extends/_fake + defaults)
+
+Debug:
   trace <trace.jsonl> [PRICES]  summarize a run's trace (cost / latency / retries / model mix)
                                 add --pretty for a per-run tree (stages, calls, errors)
                                 add --errors-only for the CI-shaped check (exits non-zero on errors)
-  baton-schema <root> <id>      print the JSON Schema of decision.json for one parked baton
+                                add --cost for a compact human cost rollup (with PRICES for $)
+                                add --last N to filter to the most recent N runs
+
+Diagnose:
+  validate <root>               validate root + referenced pipeline file (no run)
   doctor                        diagnose install: Python version, optional deps, packaged base configs
 
 Options (on run/list/resume/clear/validate/explain):
@@ -175,17 +183,34 @@ def _parse_subcommand(argv: list) -> dict:
         spec["action"] = "validate"    # check-only (never runs the pipeline)
         return spec
     if verb == "trace":
-        flags = {"--debug", "--pretty", "--errors-only"}   # everything else is positional
-        files = [a for a in rest if a not in flags]
+        # --last takes a value: parse it out of rest before counting positionals.
+        last_n = 0
+        rest_clean = list(rest)
+        if "--last" in rest_clean:
+            i = rest_clean.index("--last")
+            if i + 1 >= len(rest_clean):
+                _usage_exit("--last needs a positive integer (N)")
+            try:
+                last_n = int(rest_clean[i + 1])
+            except ValueError:
+                _usage_exit("--last N: N must be an integer (got {!r})".format(rest_clean[i + 1]))
+            if last_n <= 0:
+                _usage_exit("--last N: N must be positive (got {})".format(last_n))
+            del rest_clean[i:i + 2]
+        flags = {"--debug", "--pretty", "--errors-only", "--cost"}   # everything else is positional
+        files = [a for a in rest_clean if a not in flags]
         if not files:
             _usage_exit("trace needs a trace.jsonl path")
-        if "--pretty" in rest and "--errors-only" in rest:
-            _usage_exit("--pretty and --errors-only are mutually exclusive")
+        view_flags = [f for f in ("--pretty", "--errors-only", "--cost") if f in rest_clean]
+        if len(view_flags) > 1:
+            _usage_exit("{} are mutually exclusive".format(" and ".join(view_flags)))
         return {"action": "trace", "trace_path": files[0],
                 "price_map": files[1] if len(files) > 1 else None,
-                "pretty": "--pretty" in rest,
-                "errors_only": "--errors-only" in rest,
-                "debug": "--debug" in rest}
+                "pretty": "--pretty" in rest_clean,
+                "errors_only": "--errors-only" in rest_clean,
+                "cost": "--cost" in rest_clean,
+                "last_n": last_n,
+                "debug": "--debug" in rest_clean}
     if verb == "doctor":
         # Diagnostic verb: no root, no positional args, no flags. Anything
         # extra is a typo — fail fast rather than silently dropping it.
@@ -252,6 +277,9 @@ def _dispatch(spec: Dict[str, Any]) -> None:
         # summarize a run's trace JSONL — no root config involved
         from .trace.aggregate import aggregate, load_jsonl
         records = load_jsonl(spec["trace_path"])
+        if spec.get("last_n"):
+            from .trace.pretty import keep_last_runs
+            records = keep_last_runs(records, spec["last_n"])
         price_map = _read_json(spec["price_map"]) if spec.get("price_map") else None
         if spec.get("errors_only"):
             # CI-shaped: exit code mirrors error presence; the print is just
@@ -260,6 +288,10 @@ def _dispatch(spec: Dict[str, Any]) -> None:
             code, report = errors_only(records)
             print(report, end="")
             raise SystemExit(code)
+        if spec.get("cost"):
+            from .trace.pretty import cost_summary
+            print(cost_summary(records, price_map=price_map), end="")
+            return
         if spec.get("pretty"):
             from .trace.pretty import pretty
             print(pretty(records, price_map=price_map), end="")

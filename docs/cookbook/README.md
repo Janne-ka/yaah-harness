@@ -59,3 +59,8 @@ Until those triggers fire, the cookbook stays read-only-by-design.
   paired `*.local.json` + `*.real.json` via `_extends`, the inline
   `_fake` block + `--fake` CLI flag). Config-shape reference, not
   Python code — but same audience as the rest of the cookbook.
+- [deploy.md](deploy.md) — production-path conventions: single-binary
+  Docker, distributed NATS fleet, state-store choices, env-var secrets,
+  trace sinks, `yaah doctor` as a HEALTHCHECK. Pairs with
+  [offline-runs.md](offline-runs.md) — that's CI / dev mode; deploy.md
+  is the real-mode complement.

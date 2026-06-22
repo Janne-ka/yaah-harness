@@ -4,7 +4,7 @@ Run: cd yaah && PYTHONPATH=src python3 tests/test_trace_pretty.py
 """
 from __future__ import annotations
 
-from yaah.trace.pretty import errors_only, pretty
+from yaah.trace.pretty import cost_summary, errors_only, keep_last_runs, pretty
 
 
 def _records():
@@ -121,6 +121,71 @@ def scenario_errors_only_with_errors_exits_one() -> None:
     assert "├─" not in msg and "stages" not in msg, msg
 
 
+def scenario_keep_last_runs_filters_by_corr() -> None:
+    """Keep the last N corr ids in first-appearance order; drop the rest. The
+    filter preserves intra-run ordering — a model_call under stage s1 still
+    follows s1 even after the slice — because it returns records in original
+    sequence, just with non-kept corrs filtered out."""
+    records = [
+        {"id": "s1", "corr": "a", "name": "stage", "parent": "p", "status": "ok"},
+        {"id": "s2", "corr": "b", "name": "stage", "parent": "p", "status": "ok"},
+        {"id": "s3", "corr": "c", "name": "stage", "parent": "p", "status": "ok"},
+        {"id": "s4", "corr": "c", "name": "stage", "parent": "p", "status": "ok"},
+    ]
+    # last 2 -> keep b and c, drop a
+    kept = keep_last_runs(records, 2)
+    corrs = sorted({r["corr"] for r in kept})
+    assert corrs == ["b", "c"], corrs
+    # n <= 0 -> passthrough
+    assert keep_last_runs(records, 0) == records
+    # n larger than run count -> passthrough
+    assert len(keep_last_runs(records, 99)) == len(records)
+
+
+def scenario_cost_summary_with_prices() -> None:
+    """Cost view aggregates per-model with totals and sorts by spend
+    descending when priced. The line shape (model · calls · tokens · cost)
+    is what users read at the terminal; assert each dimension is present."""
+    records = [
+        {"id": "m1", "corr": "r1", "name": "model_call", "parent": "p",
+         "tokens_in": 1000, "tokens_out": 500, "model": "claude:sonnet"},
+        {"id": "m2", "corr": "r1", "name": "model_call", "parent": "p",
+         "tokens_in": 100, "tokens_out": 50, "model": "claude:haiku"},
+        {"id": "m3", "corr": "r1", "name": "model_call", "parent": "p",
+         "tokens_in": 200, "tokens_out": 80, "model": "claude:sonnet"},
+    ]
+    prices = {"claude:sonnet": {"input": 3.0, "output": 15.0},
+              "claude:haiku":  {"input": 0.25, "output": 1.25}}
+    out = cost_summary(records, price_map=prices)
+    # totals: 3 calls; (1000+100+200)→(500+50+80) = 1300→630
+    assert "3 model calls" in out, out
+    assert "1.3k→630 tokens" in out, out
+    assert "by model:" in out, out
+    # sonnet dominates spend; should appear before haiku
+    assert out.index("claude:sonnet") < out.index("claude:haiku"), out
+    # $ shown for both rows when priced
+    assert "$" in out, out
+
+
+def scenario_cost_summary_unpriced() -> None:
+    """Without a price-map the rollup shows tokens only — no $ hallucination."""
+    records = [
+        {"id": "m1", "corr": "r1", "name": "model_call", "parent": "p",
+         "tokens_in": 100, "tokens_out": 50, "model": "x"},
+    ]
+    out = cost_summary(records)
+    assert "1 model call" in out and "$" not in out, out
+
+
+def scenario_cost_summary_no_calls() -> None:
+    """No model_call records -> a clear placeholder, exit-friendly."""
+    records = [
+        {"id": "s1", "corr": "r1", "name": "stage", "parent": "p",
+         "status": "ok", "duration_ms": 5.0, "stage": "noop"},
+    ]
+    assert cost_summary(records).strip() == "no model calls"
+
+
 def main() -> None:
     scenario_smoke()
     scenario_empty()
@@ -129,6 +194,10 @@ def main() -> None:
     scenario_suspended_status()
     scenario_errors_only_clean_exits_zero()
     scenario_errors_only_with_errors_exits_one()
+    scenario_keep_last_runs_filters_by_corr()
+    scenario_cost_summary_with_prices()
+    scenario_cost_summary_unpriced()
+    scenario_cost_summary_no_calls()
     print("ok")
 
 

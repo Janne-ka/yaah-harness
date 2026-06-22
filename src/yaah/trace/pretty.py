@@ -48,6 +48,26 @@ def _status_glyph(status: Optional[str]) -> str:
     return "✗"
 
 
+def keep_last_runs(records: Iterable[Dict[str, Any]], n: int) -> List[Dict[str, Any]]:
+    """Filter records to keep only the last N runs (by correlation id, in
+    first-appearance order). When a long-lived trace.jsonl accumulates, the
+    operator usually cares about the most recent runs; without this they pipe
+    through `tail -<huge>` and guess at the boundary. n <= 0 returns records
+    unchanged (the "no limit" sentinel)."""
+    if n <= 0:
+        return list(records)
+    rec_list = list(records)
+    seen_order: List[str] = []
+    seen: set = set()
+    for r in rec_list:
+        c = r.get("corr", "?")
+        if c not in seen:
+            seen.add(c)
+            seen_order.append(c)
+    keep = set(seen_order[-n:])
+    return [r for r in rec_list if r.get("corr", "?") in keep]
+
+
 def _group_by_corr(records: Iterable[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
     """Group records by correlation id (one run = one corr), preserving order."""
     runs: Dict[str, List[Dict[str, Any]]] = {}
@@ -154,6 +174,64 @@ def _render_errors(records: List[Dict[str, Any]]) -> List[str]:
         detail = e.get("error") or e.get("detail") or e.get("status") or ""
         lines.append('  - run {} stage "{}": {}'.format(corr, stage, detail))
     return lines
+
+
+def cost_summary(records: Iterable[Dict[str, Any]],
+                 *, price_map: Optional[Dict[str, Any]] = None) -> str:
+    """Compact human cost rollup: totals + per-model breakdown. Aggregate.py
+    computes the same numbers in JSON; this is the view operators read at the
+    terminal when they want "how much did this cost". $ shown only when a
+    price-map is provided — tokens-only otherwise (cost is opt-in, never
+    guessed). PURE."""
+    rec_list = list(records)
+    calls = [r for r in rec_list if r.get("name") == "model_call"]
+    if not calls:
+        return "no model calls\n"
+
+    total_in = sum(r.get("tokens_in", 0) for r in calls)
+    total_out = sum(r.get("tokens_out", 0) for r in calls)
+    total_cost = sum(cost_usd(r.get("model"), r.get("tokens_in", 0),
+                              r.get("tokens_out", 0), price_map)
+                     for r in calls)
+
+    head_bits = ["{} model call{}".format(len(calls),
+                                           "" if len(calls) == 1 else "s"),
+                 "{}→{} tokens".format(_fmt_tokens(total_in), _fmt_tokens(total_out))]
+    cost_str = _fmt_cost(total_cost)
+    if cost_str:
+        head_bits.append(cost_str)
+    elif price_map:
+        head_bits.append("(no priced models)")    # the operator provided a price-map
+                                                   # but no model in it matched — honest signal
+    lines = [" · ".join(head_bits), ""]
+
+    # Per-model: calls, tokens_in→out, optional $. Sort by cost descending when
+    # priced, by call count otherwise — most expensive / busiest first reads
+    # naturally as a "where did it go" view.
+    per_model: Dict[str, Dict[str, Any]] = {}
+    for r in calls:
+        m = r.get("model") or "?"
+        d = per_model.setdefault(m, {"calls": 0, "tokens_in": 0, "tokens_out": 0,
+                                     "cost_usd": 0.0})
+        d["calls"] += 1
+        d["tokens_in"] += r.get("tokens_in", 0)
+        d["tokens_out"] += r.get("tokens_out", 0)
+        d["cost_usd"] += cost_usd(r.get("model"), r.get("tokens_in", 0),
+                                   r.get("tokens_out", 0), price_map)
+    sort_key = "cost_usd" if total_cost > 0 else "calls"
+    rows = sorted(per_model.items(), key=lambda kv: kv[1][sort_key], reverse=True)
+
+    lines.append("by model:")
+    for model, d in rows:
+        row_bits = [model,
+                    "{} call{}".format(d["calls"], "" if d["calls"] == 1 else "s"),
+                    "{}→{} tokens".format(_fmt_tokens(d["tokens_in"]),
+                                          _fmt_tokens(d["tokens_out"]))]
+        c = _fmt_cost(d["cost_usd"])
+        if c:
+            row_bits.append(c)
+        lines.append("  " + " · ".join(row_bits))
+    return "\n".join(lines) + "\n"
 
 
 def errors_only(records: Iterable[Dict[str, Any]]) -> Tuple[int, str]:

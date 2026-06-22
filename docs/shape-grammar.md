@@ -119,6 +119,7 @@ Common keys on EVERY node spec: `model`, `effort`, `temperature`,
 
 ```bash
 yaah init <dir>                            # scaffold a hello-yaah starter
+yaah scaffold <archetype> <dir>            # scaffold a specific archetype
 yaah run <root>                            # the default; `yaah <root>` also works
 yaah validate <root>                       # validate_root + validate_pipeline; no run
 yaah list <root> [--json]                  # mailbox view: every suspended baton
@@ -127,6 +128,12 @@ yaah baton-schema <root> <baton-id>        # surface the parked gate's decision 
 yaah clear <root>                          # drop all suspended batons (engine reset)
 yaah explain <root>                        # render the effective config + blast radius
 yaah trace <jsonl> [<price-map>]           # post-hoc aggregate over a JSONL trace
+  --pretty          per-run tree of stages, model calls, tool calls, errors
+  --errors-only     CI-shaped check; exits non-zero if any error spans present
+  --cost            compact per-model cost rollup (with PRICES for $)
+  --last N          filter to the most recent N runs
+yaah doctor                                # diagnose install: Python, optional deps, packaged bases
+yaah --version                             # print the installed yaah version
 ```
 
 All verbs also accept the legacy flag form: `yaah <root> --list`,

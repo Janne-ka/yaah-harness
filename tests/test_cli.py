@@ -37,6 +37,94 @@ def _run_cli(argv: list) -> tuple:
         sys.argv, sys.stdout = old_argv, old_stdout
 
 
+def _cli_dispatch_path_coverage() -> None:
+    """Integration tests for the dispatch arms this batch added or modified.
+    Not coverage padding — each scenario locks in user-visible CLI behavior
+    that the unit tests in test_doctor.py / test_trace_pretty.py don't reach
+    (they exercise the pure functions; this exercises the cli.main() wiring,
+    the new flag parsers, and the new operator-visible output). Trims any
+    "test exists because the line exists" cases."""
+    import json
+    import os
+    import tempfile
+
+    # 1. doctor dispatch — verifies the main()→_dispatch wiring for the new
+    # verb. diagnose() itself is unit-tested in test_doctor.py; this catches
+    # a missing/misnamed dispatch arm or a dropped SystemExit code.
+    code, out = _run_cli(["doctor"])
+    assert code == 0, (code, out)
+    assert "DOCTOR: ok" in out, out
+
+    # 2. trace dispatch — aggregate (default), --cost, --pretty, --errors-only,
+    # --last. All four flags are new across batches 1-3; the unit logic is
+    # tested in test_trace_pretty.py — this asserts the CLI wires each flag
+    # to the right function.
+    with tempfile.TemporaryDirectory() as td:
+        jsonl = os.path.join(td, "t.jsonl")
+        with open(jsonl, "w") as f:
+            for rec in [
+                {"id": "s1", "corr": "a", "name": "stage", "parent": "p",
+                 "duration_ms": 100.0, "status": "ok", "stage": "draft"},
+                {"id": "m1", "corr": "a", "name": "model_call", "parent": "s1",
+                 "duration_ms": 95.0, "tokens_in": 100, "tokens_out": 50,
+                 "model": "fake:x"},
+                {"id": "s2", "corr": "b", "name": "stage", "parent": "p",
+                 "duration_ms": 50.0, "status": "error", "stage": "verify",
+                 "error": "oops"},
+            ]:
+                f.write(json.dumps(rec) + "\n")
+        # aggregate default — exits 0, JSON output
+        code, out = _run_cli(["trace", jsonl])
+        assert code == 0 and "totals" in out, (code, out)
+        # --pretty
+        code, out = _run_cli(["trace", jsonl, "--pretty"])
+        assert code == 0 and "run a" in out and "errors:" in out, (code, out)
+        # --cost
+        code, out = _run_cli(["trace", jsonl, "--cost"])
+        assert code == 0 and "1 model call" in out, (code, out)
+        # --errors-only on a trace with errors -> exit 1
+        code, out = _run_cli(["trace", jsonl, "--errors-only"])
+        assert code == 1 and "oops" in out, (code, out)
+        # --last 1 keeps only run b (which has the error)
+        code, out = _run_cli(["trace", jsonl, "--pretty", "--last", "1"])
+        assert code == 0 and "run b" in out and "run a" not in out, (code, out)
+
+    # 3. trace flag validation — the error branches my new --last parser owns
+    # plus the new view-flag mutex. Each one is a branch I authored this batch;
+    # a regression would mean a malformed CLI silently does the wrong thing.
+    bad_combos = [
+        (["trace", "/nonexistent", "--last"],   "--last needs"),       # no N value
+        (["trace", "/nonexistent", "--last", "abc"], "must be an integer"),
+        (["trace", "/nonexistent", "--last", "-3"],  "must be positive"),
+        (["trace", "/nonexistent", "--pretty", "--cost"], "mutually exclusive"),
+        (["trace", "/nonexistent", "--pretty", "--errors-only", "--cost"], "mutually exclusive"),
+    ]
+    for argv, needle in bad_combos:
+        old_argv, old_stderr = sys.argv, sys.stderr
+        sys.argv = ["yaah"] + argv
+        sys.stderr = io.StringIO()
+        try:
+            try:
+                cli_main()
+                code = 0
+            except SystemExit as e:
+                code = 0 if e.code is None else int(e.code)
+            err = sys.stderr.getvalue()
+        finally:
+            sys.argv, sys.stderr = old_argv, old_stderr
+        assert code == 2, (argv, code, err)
+        assert needle in err, (argv, err)
+
+    # 4. scaffold happy path — locks in the new two-line `Next:` / `Then:`
+    # hint added this batch. The scaffold function itself has its own tests;
+    # this asserts cli wiring + the post-create message the operator sees.
+    with tempfile.TemporaryDirectory() as td:
+        target = os.path.join(td, "newpipeline")
+        code, out = _run_cli(["scaffold", "linear", target])
+        assert code == 0, (code, out)
+        assert "Next:" in out and "Then:" in out, out
+
+
 def _validate_pipeline_extension_smoke() -> None:
     """Audit-derived regression: a root pointing at a pipeline file with an
     unresolved graph target must now fail `yaah validate` (was: 'ok'). Also
@@ -193,6 +281,9 @@ def main() -> None:
     # old behavior pronounced "ok" while the referenced pipeline had unresolved
     # graph targets / missing types / etc.).
     _validate_pipeline_extension_smoke()
+
+    # Coverage for dispatch arms cli.py owns (doctor, scaffold, trace flag matrix).
+    _cli_dispatch_path_coverage()
 
     print("PASS yaah subcommands map correctly; legacy form intact; bad input exits 2; --version / bare-yaah affordances")
 
