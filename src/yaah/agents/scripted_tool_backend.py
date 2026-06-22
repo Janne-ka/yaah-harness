@@ -1,22 +1,32 @@
-"""ScriptedToolBackend — a deterministic tool-capable backend for tests.
+"""ScriptedToolBackend — a deterministic tool-capable ApiProvider for tests.
 
-Used by: tests of the agent tool-loop (and demos). Implements `turn` by replaying
-a canned sequence of turn results (tool calls, then a final answer), so the loop
-runs offline with no model and no network.
+Used by: tests of the agent tool-loop (and demos). `stream()` walks a canned
+sequence of turn results (tool calls, then a final answer), so the loop runs
+offline with no model and no network.
 Where: anywhere a real function-calling model isn't wanted.
-Why: prove run_tool_loop end to end — the model "decides" to call a tool, the
-loop executes the tool's impl, feeds the result back, and the model "answers".
+Why: prove the tool loop end to end — the model "decides" to call a tool,
+the loop executes the tool's impl, feeds the result back, and the model
+"answers".
 
-Exhaustion behavior is unified across the offline backends (assessment cluster
-3 B2): same `on_exhaustion` knob as ScriptedBackend — `"default"` (return
-{"text": self._default}, matching FakeBackend's "default" shape), `"raise"`
-(IndexError), or `"repeat_last"` (legacy). Default is `"default"`.
+Exhaustion behavior is unified across the offline backends (assessment
+cluster 3 B2): same `on_exhaustion` knob as ScriptedBackend — `"default"`
+(yield a synthetic final text equal to self._default, matching FakeBackend's
+"default" shape), `"raise"` (IndexError — raises through naturally; error
+events are for soft errors, exhaustion is exceptional), or `"repeat_last"`
+(legacy). Default is `"default"`.
+
+After B2.4 (provider unification): native ApiProvider. `stream()` is the
+canonical method; `complete()` / `turn()` are thin wrappers (the legacy
+`complete()` always returned `self._default` regardless of script — that
+behavior is preserved since the script is loop-shaped).
 
 Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from typing import Any, List, Optional, Sequence
+from typing import Any, AsyncIterator, List, Optional, Sequence
+
+from . import api_provider as _ap
 
 
 class ScriptedToolBackend:
@@ -32,11 +42,28 @@ class ScriptedToolBackend:
         self._default = default
         self._on_exhaustion = on_exhaustion
 
-    async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
-        return self._default  # also a plain ModelBackend, for tool-less use
+    def stream(self, context: _ap.Context, **opts: Any) -> AsyncIterator[_ap.StreamEvent]:
+        return self._iter()
 
-    async def turn(self, messages: List[dict], tools: List[dict], *,
-                   model: Optional[str] = None, **opts: Any) -> dict:
+    async def _iter(self) -> AsyncIterator[_ap.StreamEvent]:
+        yield {"type": "start"}
+        spec = self._next_turn()  # may raise IndexError on exhaustion='raise'
+        text = spec.get("text")
+        calls = spec.get("calls") or []
+        if text:
+            yield {"type": "text_delta", "delta": str(text)}
+        for call in calls:
+            if not isinstance(call, dict) or not call.get("name"):
+                continue
+            yield {"type": "toolcall_end",
+                   "id": call.get("id", call.get("name", "")),
+                   "name": call.get("name", ""),
+                   "args": call.get("args", {}) or {}}
+        yield {"type": "done", "stop_reason": "tool_use" if calls else "end_turn"}
+
+    def _next_turn(self) -> dict:
+        """Shared cursor logic — same algorithm legacy turn() used so
+        on_exhaustion semantics are identical through both stream() and turn()."""
         if self._i < len(self._turns):
             out = self._turns[self._i]
             self._i += 1
@@ -47,3 +74,14 @@ class ScriptedToolBackend:
         if self._on_exhaustion == "repeat_last":
             return self._turns[-1] if self._turns else {"text": self._default}
         return {"text": self._default}
+
+    async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
+        # Legacy: a plain ModelBackend for tool-less use returned self._default.
+        # The new stream-path consumes a script turn (which is loop-shaped) —
+        # preserve the "complete() returns default, doesn't touch the script"
+        # contract so non-loop callers don't accidentally consume tool turns.
+        return self._default
+
+    async def turn(self, messages: List[dict], tools: List[dict], *,
+                   model: Optional[str] = None, **opts: Any) -> dict:
+        return await _ap.turn(self, messages, tools, model=model, **opts)
