@@ -1,4 +1,4 @@
-"""ClaudeCliBackend — a ModelBackend that shells out to the local `claude -p`.
+"""ClaudeCliBackend — an ApiProvider that shells out to the local `claude -p`.
 
 Used by: the runtime's `claude` provider (and apps) when running real local
 Claude (e.g. an app's code-editing stages).
@@ -13,6 +13,24 @@ permission mode, and is handed a per-call `cwd` (the task's worktree) so its
 file edits land in isolation. The cwd is a call opt, not constructor state,
 because it is per-run payload data.
 
+After B2.6 (provider unification): native ApiProvider — `stream()` exists,
+satisfying the new protocol shape, but unlike LiteLLM/Fake migrations
+`complete()` remains the source of truth. `stream()` calls complete() and
+yields one text_delta + done. The reason: complete()'s subprocess handling
+(timeout, kill-on-timeout, exit-code, JSON usage extraction) is well-tested;
+flipping which method is canonical would require refactoring all of that
+into stream() with no test coverage of the new path.
+
+Tools are NOT exposed through the YAAH tool-loop — claude handles its own
+tool execution internally via --allowedTools / --permission-mode. So
+tool-call events do not flow through stream(); a context with tools would
+be passed to claude as configuration, not surfaced as agent-emitted calls.
+
+WIRE-LEVEL STREAMING IS DEFERRED: real `claude --output-format stream-json`
+parsing (line-by-line stdout, partial tool_use deltas, usage reconciliation)
+is the eval-flagged hard work. Not in this commit. When a consumer demands
+token-level deltas from claude, that's the upgrade.
+
 Targets Python 3.9+.
 """
 from __future__ import annotations
@@ -21,7 +39,9 @@ import asyncio
 import json
 import os
 import re
-from typing import Any, Awaitable, Callable, List, Optional, Sequence
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Sequence
+
+from ...agents import api_provider as _ap
 
 # Config-named-executable trust (BUG-629: an env-var-named binary was executed
 # with --allow-dangerously-skip-permissions). The binary is config — and config
@@ -149,6 +169,49 @@ class ClaudeCliBackend:
         if on_usage is not None:  # --output-format json: extract result + feed usage
             return _extract_result_and_usage(text, on_usage, model)
         return text
+
+    def stream(self, context: _ap.Context, **opts: Any) -> AsyncIterator[_ap.StreamEvent]:
+        return self._iter(context, opts)
+
+    async def _iter(self, context: _ap.Context, opts: Dict[str, Any]) -> AsyncIterator[_ap.StreamEvent]:
+        yield {"type": "start"}
+        # claude -p is single-prompt-shaped (no conversation history through
+        # stdin format). Extract the last user message + optional system
+        # preamble; matches what LegacyBackendAdapter does for complete-only
+        # backends. Tool definitions in context.tools are not surfaced — claude
+        # handles its own tool loop natively via --allowedTools.
+        prompt = _prompt_from_messages(context.get("messages") or [],
+                                       context.get("system"))
+        model = context.get("model")
+        # Exceptions from complete() (TimeoutError, RuntimeError on exit) propagate
+        # naturally — preserves legacy behavior; tests catch them on the .complete()
+        # path. Consumers that want in-stream error events can wrap.
+        text = await self.complete(prompt, model=model, **opts)
+        if text:
+            yield {"type": "text_delta", "delta": text}
+        yield {"type": "done", "stop_reason": "end_turn"}
+
+
+def _prompt_from_messages(messages: List[Dict[str, Any]], system: Optional[str]) -> str:
+    """Stitch a context.messages list into a single prompt string for claude -p.
+    Picks the most recent user-role string content (matching the LegacyBackendAdapter
+    convention) and prepends a system preamble if present. Multi-turn conversation
+    history isn't passed through — claude -p has no stdin format for it; the
+    --output-format stream-json upgrade is where real conversations become possible."""
+    user_text = ""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            c = msg.get("content")
+            if isinstance(c, str):
+                user_text = c
+                break
+            if isinstance(c, list):
+                user_text = "".join(b.get("text", "") for b in c
+                                    if isinstance(b, dict) and b.get("type") == "text")
+                break
+    if system:
+        return system + "\n\n" + user_text if user_text else system
+    return user_text
 
 
 def _extract_result_and_usage(raw: str, on_usage: Callable[..., Any], model: Optional[str]) -> str:

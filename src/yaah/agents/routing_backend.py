@@ -1,27 +1,52 @@
-"""RoutingBackend — a ModelBackend that dispatches by the model's provider prefix.
+"""RoutingBackend — an ApiProvider that dispatches by the model's provider prefix.
 
 Used by: the runtime (built from the root config's `providers`) and apps; given
-to every Agent as its single backend.
+to every Agent / AgentLoopNode as its single backend.
 Where: the seam where `NodeConfig.model` selects a provider.
 Why: a model string 'provider:rest' routes to the backend registered for
 'provider' (called with model='rest'), so choosing fake/claude/litellm for a
 node is pure config. The prefix-dispatch lives in PrefixRouter (shared with the
-prompt/data/mcp routers); this class forwards two verbs — `complete` and the
-tool-loop `turn` — and maps an empty rest back to None (provider default model).
+prompt/data/mcp routers); this class forwards three verbs — `stream`,
+`complete`, and the tool-loop `turn` — and maps an empty rest back to None
+(provider default model).
+
+After B2.7 (provider unification): `stream()` is the new routing verb, added
+alongside the legacy two. Every leaf backend implements stream() natively
+post-B2.1–B2.6, so stream-based consumers (the future operator UI, trace
+recorders, hedge logic) no longer need a capability check. `supports_turn()`
+remains a real signal because claude_cli still has no native turn() — that
+capability gap is preserved by design (claude handles its own tool loop) and
+isn't fixed by the migration. The "supports_turn goes away" outcome
+documented in docs/architecture/api-provider/use-cases.md lights up only if a
+future B-step adds a turn() shim for claude_cli; until then, the check stays.
 
 Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any, AsyncIterator, List, Optional
 
 from ..prefix_router import PrefixRouter
+from . import api_provider as _ap
 from .model_backend import ModelBackend
 
 
 class RoutingBackend(PrefixRouter[ModelBackend]):
     label = "backend"
     prefix = "provider"
+
+    def stream(self, context: _ap.Context, **opts: Any) -> AsyncIterator[_ap.StreamEvent]:
+        """Forward an ApiProvider.stream call to the selected provider. Every leaf
+        backend implements stream() post-B2; no capability check needed. The
+        context's `model` is rewritten to the post-prefix rest so the leaf sees
+        the canonical model name, not 'provider:model'."""
+        model = context.get("model")
+        backend, rest = self._select(model)
+        # Rebuild the context with the resolved leaf-side model. Use dict() so
+        # we don't mutate the caller's context.
+        new_ctx: _ap.Context = dict(context)  # type: ignore[assignment]
+        new_ctx["model"] = (rest or None)
+        return backend.stream(new_ctx, **opts)
 
     async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
         backend, rest = self._select(model)
@@ -30,7 +55,7 @@ class RoutingBackend(PrefixRouter[ModelBackend]):
     async def turn(self, messages: List[dict], tools: List[dict], *,
                    model: Optional[str] = None, **opts: Any) -> dict:
         """Forward the tool-loop `turn` to the selected provider. Only providers
-        that implement turn (litellm, scripted-tool) support tools."""
+        that implement turn (litellm, scripted-tool, fake-tool) support tools."""
         backend, rest = self._select(model)
         if not hasattr(backend, "turn"):
             raise TypeError(
