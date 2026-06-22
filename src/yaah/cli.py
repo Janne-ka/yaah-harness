@@ -36,6 +36,7 @@ yaah <command> [args]
 Author:
   init <dir>                    scaffold a linear starter pipeline (alias for `scaffold linear <dir>`)
   scaffold <archetype> <dir>    scaffold from a named archetype (linear / branch-with-gate / fork-fanin); see docs/archetypes.md
+  scaffold --list               print the archetype catalog with one-line descriptions
 
 Run & inspect:
   run <root>                    run the configured pipeline (the default)
@@ -51,10 +52,12 @@ Debug:
                                 add --errors-only for the CI-shaped check (exits non-zero on errors)
                                 add --cost for a compact human cost rollup (with PRICES for $)
                                 add --last N to filter to the most recent N runs
+                                add --corr ID to zoom in on one specific run
 
 Diagnose:
   validate <root>               validate root + referenced pipeline file (no run)
   doctor                        diagnose install: Python version, optional deps, packaged base configs
+  completion <bash|zsh>         emit a shell completion script (`source <(yaah completion bash)`)
 
 Options (on run/list/resume/clear/validate/explain):
   --fake        merge the root's `_fake` block over the top level (sidecar fake providers/state)
@@ -142,15 +145,19 @@ def _parse_cli(argv: list) -> dict:
 # the legacy `yaah <root> --flag` parser (kept working). Pipeline verbs translate
 # to the same action spec _parse_cli produces; `validate`/`trace` add two actions.
 _SUBCOMMANDS = ("init", "scaffold", "run", "list", "resume", "clear", "explain",
-                "validate", "trace", "baton-schema", "doctor")
+                "validate", "trace", "baton-schema", "doctor", "completion")
 _VERB_FLAG = {"list": "--list", "clear": "--clear", "explain": "--explain"}
 
 
 def _parse_subcommand(argv: list) -> dict:
     verb, rest = argv[0], list(argv[1:])
     if verb == "init":
+        # `--list` is an alias for `scaffold --list` so first-time users
+        # discover archetypes via the verb they typed.
+        if rest == ["--list"]:
+            return {"action": "scaffold-list"}
         if not rest:
-            _usage_exit("init needs a target directory")
+            _usage_exit("init needs a target directory (or --list to see archetypes)")
         if len(rest) > 1:
             _usage_exit("init takes one argument (the target directory)")
         # `init` is a back-compat alias for `scaffold linear` — same dispatch path.
@@ -158,11 +165,14 @@ def _parse_subcommand(argv: list) -> dict:
     if verb == "scaffold":
         # `scaffold <archetype> <target-dir>` — pick the named archetype and
         # write its template. See docs/archetypes.md for what each shape is for.
+        if rest == ["--list"]:
+            return {"action": "scaffold-list"}
         if len(rest) < 2:
             from .init_template import ARCHETYPES
             _usage_exit(
                 "scaffold needs an archetype and a target directory "
-                "(archetypes: {})".format(", ".join(sorted(ARCHETYPES))))
+                "(archetypes: {}; or --list for descriptions)".format(
+                    ", ".join(sorted(ARCHETYPES))))
         if len(rest) > 2:
             _usage_exit("scaffold takes two arguments (archetype, target directory)")
         return {"action": "scaffold", "archetype": rest[0], "target_dir": rest[1]}
@@ -183,8 +193,10 @@ def _parse_subcommand(argv: list) -> dict:
         spec["action"] = "validate"    # check-only (never runs the pipeline)
         return spec
     if verb == "trace":
-        # --last takes a value: parse it out of rest before counting positionals.
+        # --last and --corr each take a value: parse them out of rest before
+        # counting positionals.
         last_n = 0
+        corr = None
         rest_clean = list(rest)
         if "--last" in rest_clean:
             i = rest_clean.index("--last")
@@ -196,6 +208,12 @@ def _parse_subcommand(argv: list) -> dict:
                 _usage_exit("--last N: N must be an integer (got {!r})".format(rest_clean[i + 1]))
             if last_n <= 0:
                 _usage_exit("--last N: N must be positive (got {})".format(last_n))
+            del rest_clean[i:i + 2]
+        if "--corr" in rest_clean:
+            i = rest_clean.index("--corr")
+            if i + 1 >= len(rest_clean):
+                _usage_exit("--corr needs a correlation id")
+            corr = rest_clean[i + 1]
             del rest_clean[i:i + 2]
         flags = {"--debug", "--pretty", "--errors-only", "--cost"}   # everything else is positional
         files = [a for a in rest_clean if a not in flags]
@@ -210,6 +228,7 @@ def _parse_subcommand(argv: list) -> dict:
                 "errors_only": "--errors-only" in rest_clean,
                 "cost": "--cost" in rest_clean,
                 "last_n": last_n,
+                "corr": corr,
                 "debug": "--debug" in rest_clean}
     if verb == "doctor":
         # Diagnostic verb: no root, no positional args, no flags. Anything
@@ -217,6 +236,10 @@ def _parse_subcommand(argv: list) -> dict:
         if rest:
             _usage_exit("doctor takes no arguments")
         return {"action": "doctor"}
+    if verb == "completion":
+        if len(rest) != 1:
+            _usage_exit("completion needs one shell name (bash or zsh)")
+        return {"action": "completion", "shell": rest[0]}
     if verb == "baton-schema":
         # surface the decision-form shape of one parked baton so a driver skill
         # can compose decision.json mechanically. Needs a durable state: to see
@@ -273,10 +296,17 @@ def _dispatch(spec: Dict[str, Any]) -> None:
         code, report = diagnose()
         print(report, end="")
         raise SystemExit(code)
+    if spec["action"] == "completion":
+        from .completion import render
+        print(render(spec["shell"]))
+        return
     if spec["action"] == "trace":
         # summarize a run's trace JSONL — no root config involved
         from .trace.aggregate import aggregate, load_jsonl
         records = load_jsonl(spec["trace_path"])
+        if spec.get("corr"):
+            from .trace.pretty import keep_corr
+            records = keep_corr(records, spec["corr"])
         if spec.get("last_n"):
             from .trace.pretty import keep_last_runs
             records = keep_last_runs(records, spec["last_n"])
@@ -297,6 +327,16 @@ def _dispatch(spec: Dict[str, Any]) -> None:
             print(pretty(records, price_map=price_map), end="")
             return
         print(json.dumps(aggregate(records, price_map=price_map), indent=2))
+        return
+    if spec["action"] == "scaffold-list":
+        # Discovery affordance: print the archetype catalog. Names + one-liners
+        # come from init_template.ARCHETYPE_DESCRIPTIONS (single source of truth).
+        from .init_template import ARCHETYPE_DESCRIPTIONS, ARCHETYPES
+        width = max(len(k) for k in ARCHETYPES)
+        for name in sorted(ARCHETYPES):
+            desc = ARCHETYPE_DESCRIPTIONS.get(name, "(no description)")
+            print("  {}  {}".format(name.ljust(width), desc))
+        print("\nUse: yaah scaffold <archetype> <dir>")
         return
     if spec["action"] == "scaffold":
         # Write the named archetype's template into target_dir.

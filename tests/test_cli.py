@@ -124,6 +124,49 @@ def _cli_dispatch_path_coverage() -> None:
         assert code == 0, (code, out)
         assert "Next:" in out and "Then:" in out, out
 
+    # 5. scaffold --list and init --list — new discovery affordance. The
+    # output must name each archetype + its one-line description (otherwise
+    # users see an empty list, defeating the point of the verb).
+    code, out = _run_cli(["scaffold", "--list"])
+    assert code == 0, (code, out)
+    assert "linear" in out and "fork-fanin" in out, out
+    assert "Use: yaah scaffold" in out, out
+    # init --list is an alias for scaffold --list (so first-timers discover
+    # via the verb they typed). Same dispatch -> same output.
+    code, out2 = _run_cli(["init", "--list"])
+    assert code == 0, (code, out2)
+    assert out == out2, "init --list should mirror scaffold --list"
+
+    # 6. completion dispatch via main() — verifies the new verb wires through
+    # to the render() function and prints the expected shell-specific marker.
+    code, out = _run_cli(["completion", "bash"])
+    assert code == 0, (code, out)
+    assert "complete -F _yaah_completion yaah" in out, out
+    code, out = _run_cli(["completion", "zsh"])
+    assert code == 0, (code, out)
+    assert "#compdef yaah" in out, out
+    # Bad shell name -> exit 2 via the ValueError boundary in main().
+    code, out = _run_cli(["completion", "fish"])
+    assert code == 2, (code, out)
+
+    # 7. trace --corr through main() — new filter added this batch. A
+    # matching corr keeps the run; a non-matching corr produces the
+    # "(no records)" placeholder, exit 0 (it's not an error to ask for
+    # a run that isn't in the trace).
+    with tempfile.TemporaryDirectory() as td:
+        jsonl = os.path.join(td, "t.jsonl")
+        with open(jsonl, "w") as f:
+            f.write(json.dumps({"id": "s1", "corr": "abc", "name": "stage",
+                                 "parent": "p", "status": "ok",
+                                 "duration_ms": 1.0, "stage": "x"}) + "\n")
+            f.write(json.dumps({"id": "s2", "corr": "def", "name": "stage",
+                                 "parent": "p", "status": "ok",
+                                 "duration_ms": 1.0, "stage": "y"}) + "\n")
+        code, out = _run_cli(["trace", jsonl, "--pretty", "--corr", "abc"])
+        assert code == 0 and "run abc" in out and "run def" not in out, (code, out)
+        code, out = _run_cli(["trace", jsonl, "--pretty", "--corr", "no-such"])
+        assert code == 0 and "(no records)" in out, (code, out)
+
 
 def _validate_pipeline_extension_smoke() -> None:
     """Audit-derived regression: a root pointing at a pipeline file with an

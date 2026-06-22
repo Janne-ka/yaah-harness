@@ -48,6 +48,15 @@ def _status_glyph(status: Optional[str]) -> str:
     return "✗"
 
 
+def keep_corr(records: Iterable[Dict[str, Any]], corr: str) -> List[Dict[str, Any]]:
+    """Filter records to one correlation id (one run). Operator workflow:
+    `yaah list` shows parked batons + their corr ids; `yaah trace x.jsonl
+    --pretty --corr abc...` zooms in on that one run. Empty list if no match
+    — the caller emits a clear "no records" placeholder via pretty()."""
+    target = corr
+    return [r for r in records if r.get("corr") == target]
+
+
 def keep_last_runs(records: Iterable[Dict[str, Any]], n: int) -> List[Dict[str, Any]]:
     """Filter records to keep only the last N runs (by correlation id, in
     first-appearance order). When a long-lived trace.jsonl accumulates, the

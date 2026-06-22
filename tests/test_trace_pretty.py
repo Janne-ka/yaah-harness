@@ -4,7 +4,7 @@ Run: cd yaah && PYTHONPATH=src python3 tests/test_trace_pretty.py
 """
 from __future__ import annotations
 
-from yaah.trace.pretty import cost_summary, errors_only, keep_last_runs, pretty
+from yaah.trace.pretty import cost_summary, errors_only, keep_corr, keep_last_runs, pretty
 
 
 def _records():
@@ -186,6 +186,20 @@ def scenario_cost_summary_no_calls() -> None:
     assert cost_summary(records).strip() == "no model calls"
 
 
+def scenario_keep_corr_zooms_to_one_run() -> None:
+    """`--corr <id>` filter: keep only records whose corr matches; unmatched
+    -> empty list (the pretty() / errors_only() callers handle the empty
+    case with their own placeholder)."""
+    records = [
+        {"id": "s1", "corr": "abc", "name": "stage", "parent": "p", "status": "ok"},
+        {"id": "s2", "corr": "def", "name": "stage", "parent": "p", "status": "ok"},
+        {"id": "m1", "corr": "abc", "name": "model_call", "parent": "s1"},
+    ]
+    abc = keep_corr(records, "abc")
+    assert len(abc) == 2 and all(r["corr"] == "abc" for r in abc), abc
+    assert keep_corr(records, "no-such") == []
+
+
 def main() -> None:
     scenario_smoke()
     scenario_empty()
@@ -198,6 +212,7 @@ def main() -> None:
     scenario_cost_summary_with_prices()
     scenario_cost_summary_unpriced()
     scenario_cost_summary_no_calls()
+    scenario_keep_corr_zooms_to_one_run()
     print("ok")
 
 

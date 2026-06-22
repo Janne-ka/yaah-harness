@@ -138,7 +138,24 @@ def scenario_scaffold_unknown_archetype() -> None:
     print("PASS scaffold rejects unknown archetypes with an actionable message")
 
 
+def scenario_archetypes_and_descriptions_in_sync() -> None:
+    """ARCHETYPES (the templates) and ARCHETYPE_DESCRIPTIONS (the catalog
+    `yaah scaffold --list` prints) must declare the same keys. Without this
+    check, adding a new template means `scaffold --list` shows "(no
+    description)" — invisible drift the first user notices."""
+    from yaah.init_template import ARCHETYPE_DESCRIPTIONS, ARCHETYPES
+    missing = set(ARCHETYPES) - set(ARCHETYPE_DESCRIPTIONS)
+    extra = set(ARCHETYPE_DESCRIPTIONS) - set(ARCHETYPES)
+    assert not missing, "archetype(s) without a --list description: {}".format(missing)
+    assert not extra, "description(s) for non-existent archetype(s): {}".format(extra)
+    # The description text isn't empty / placeholder-only.
+    for name, desc in ARCHETYPE_DESCRIPTIONS.items():
+        assert len(desc) >= 30, "{}: description too short: {!r}".format(name, desc)
+    print("PASS archetypes and --list descriptions are in sync")
+
+
 if __name__ == "__main__":
     main()
     scenario_scaffold_every_archetype()
     scenario_scaffold_unknown_archetype()
+    scenario_archetypes_and_descriptions_in_sync()

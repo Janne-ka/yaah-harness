@@ -300,6 +300,16 @@ ARCHETYPES: Dict[str, Dict[str, str]] = {
 }
 
 
+# One-line descriptions surfaced by `yaah scaffold --list`. Kept here next to
+# ARCHETYPES so a new entry is visibly incomplete until both dicts get the
+# new key (the test in test_init_template asserts the two stay in sync).
+ARCHETYPE_DESCRIPTIONS: Dict[str, str] = {
+    "linear":           "one stage after another (agent → render). Use for: smoke tests, demos, single-shot transforms.",
+    "branch-with-gate": "a stage that branches on a verdict, with a human-decision gate parking the run mid-way. Use for: review/approve flows.",
+    "fork-fanin":       "fan out to N parallel branches, fan in to one reducer. Use for: candidates × verdict, scout/prefetch/act.",
+}
+
+
 def scaffold(target_dir: str, archetype: str = "linear") -> int:
     """Write the named archetype's template into `target_dir`. Returns file count.
 
