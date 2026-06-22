@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 360" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ar" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#444"/>
+    </marker>
+  </defs>
+  <rect width="820" height="360" fill="#ffffff"/>
+  <text x="40" y="32" font-size="18" font-weight="700" fill="#1a1a1a">agent_loop in a pipeline DAG</text>
+  <text x="40" y="52" font-size="12" fill="#666">One node type among many. The harness routes envelopes between stages; agent_loop does iterative tool-use within ONE stage.</text>
+
+  <!-- DAG band -->
+  <rect x="40" y="90" width="740" height="170" fill="#f7f9fb" stroke="#2c3e50" stroke-width="1.5" rx="4"/>
+  <text x="56" y="112" font-size="12" font-weight="700" fill="#1a1a1a">PIPELINE  (DAG of stages)</text>
+
+  <!-- Stages -->
+  <rect x="68" y="138" width="96" height="46" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="116" y="158" font-size="11" font-family="monospace" fill="#1a1a1a" text-anchor="middle">scout</text>
+  <text x="116" y="174" font-size="9" fill="#666" text-anchor="middle">(optional)</text>
+
+  <line x1="164" y1="161" x2="200" y2="161" stroke="#444" stroke-width="1.4" marker-end="url(#ar)"/>
+
+  <rect x="200" y="138" width="140" height="46" fill="#eef3f8" stroke="#2c3e50" stroke-width="1.5" rx="3"/>
+  <text x="270" y="158" font-size="11" font-family="monospace" font-weight="700" fill="#1a1a1a" text-anchor="middle">agent_loop</text>
+  <text x="270" y="174" font-size="9" fill="#666" text-anchor="middle">iterative tool use</text>
+
+  <line x1="340" y1="161" x2="376" y2="161" stroke="#444" stroke-width="1.4" marker-end="url(#ar)"/>
+
+  <rect x="376" y="138" width="96" height="46" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="424" y="158" font-size="11" font-family="monospace" fill="#1a1a1a" text-anchor="middle">json_object</text>
+  <text x="424" y="174" font-size="9" fill="#666" text-anchor="middle">validate shape</text>
+
+  <line x1="472" y1="161" x2="508" y2="161" stroke="#444" stroke-width="1.4" marker-end="url(#ar)"/>
+
+  <rect x="508" y="138" width="96" height="46" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="556" y="158" font-size="11" font-family="monospace" fill="#1a1a1a" text-anchor="middle">human_gate</text>
+  <text x="556" y="174" font-size="9" fill="#666" text-anchor="middle">approve / revise</text>
+
+  <line x1="604" y1="161" x2="640" y2="161" stroke="#444" stroke-width="1.4" marker-end="url(#ar)"/>
+
+  <rect x="640" y="138" width="96" height="46" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="688" y="158" font-size="11" font-family="monospace" fill="#1a1a1a" text-anchor="middle">render</text>
+  <text x="688" y="174" font-size="9" fill="#666" text-anchor="middle">artifact</text>
+
+  <!-- envelope arrow -->
+  <text x="56" y="220" font-size="10" font-style="italic" fill="#666">Envelope flows stage → stage. Each stage chosen by the author. Per-stage worker + model selection.</text>
+  <text x="56" y="240" font-size="10" font-style="italic" fill="#666">Branches (then / branch / fork+fanin) make the path conditional. Validators retry within a stage.</text>
+
+  <!-- Zoom callout -->
+  <rect x="40" y="280" width="380" height="64" fill="#fafafa" stroke="#bbbbbb" stroke-width="1" rx="3"/>
+  <text x="56" y="300" font-size="11" font-weight="700" fill="#1a1a1a">Inside agent_loop:</text>
+  <text x="56" y="318" font-size="10" font-family="monospace" fill="#1a1a1a">while not done: backend.turn(msgs, tools) → dispatch calls → loop</text>
+  <text x="56" y="333" font-size="10" fill="#666">see invoke-flow.svg for the per-stage lifecycle</text>
+
+  <line x1="270" y1="184" x2="230" y2="280" stroke="#888" stroke-width="1" stroke-dasharray="3,3"/>
+
+  <text x="438" y="296" font-size="11" font-weight="700" fill="#1a1a1a">The unique-value angle:</text>
+  <text x="438" y="312" font-size="10" fill="#1a1a1a">Cline / Kon / Pi: agent loop IS the runtime.</text>
+  <text x="438" y="326" font-size="10" fill="#1a1a1a">YAAH: agent loop is ONE STAGE in a DAG.</text>
+  <text x="438" y="340" font-size="10" fill="#666">The DAG + validators + gates + fanin compose with it.</text>
+
+</svg>

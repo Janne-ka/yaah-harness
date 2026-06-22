@@ -157,6 +157,7 @@
               "claude_cli",
               "fake",
               "fake_scripted",
+              "fake_tool",
               "litellm"
             ],
             "type": "string"

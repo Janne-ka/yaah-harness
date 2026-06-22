@@ -30,6 +30,7 @@ from .trace import BusTracer, NullTracer
 from .trace.contributors import BUILTIN_CONTRIBUTORS
 # ... and the swap-in adapters (the only place the assembly layer reaches into adapters/).
 from .adapters.backends import ClaudeCliBackend, LiteLLMBackend
+from .adapters.backends.fake_tool_backend import FakeToolBackend
 from .adapters.data import FileDataSource, FileSink, GitDiffSource
 from .adapters.mcp import FileMcpSource
 from .adapters.prompts import FilePromptSource, HttpPromptSource, LangfusePromptSource
@@ -97,7 +98,10 @@ def _resolve_pkg_ref(ref: str) -> Any:
         raise ValueError(
             "_extends {!r}: no such packaged seed under yaah.configs "
             "(have you shipped configs/bases/*.json as package-data?)".format(ref)) from e
-    cfg = json.loads(text)
+    try:
+        cfg = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise ValueError("packaged seed {!r}: invalid JSON — {}".format(ref, e.msg)) from None
     if isinstance(cfg, dict) and "_extends" in cfg:
         parent = cfg.pop("_extends")
         if not (parent.startswith(_PKG_REF) or os.path.isabs(parent)):
@@ -115,7 +119,13 @@ def _load_with_extends(path: str, *, _seen: tuple) -> Any:
         raise ValueError("_extends cycle: {!r} via {}".format(
             path, " -> ".join(_seen + (path,))))
     with open(path, "r", encoding="utf-8") as f:
-        cfg = json.load(f)
+        try:
+            cfg = json.load(f)
+        except json.JSONDecodeError as e:
+            # Name the file the decoder choked on. Without this the operator
+            # gets a bare "Expecting value: line 1 column 1" with no hint which
+            # of root / pipeline / decision / fixture file is malformed.
+            raise ValueError("{}: invalid JSON — {}".format(path, e.msg)) from None
     if not isinstance(cfg, dict) or "_extends" not in cfg:
         return cfg
     base_path = cfg.pop("_extends")
@@ -156,8 +166,12 @@ def _load_price_map(pm: Any, base: str) -> Any:
     (config-dir relative) — so an app keeps ONE rate card shared by every root
     instead of pasting the rates into each."""
     if isinstance(pm, str):
-        with open(_rel(base, pm), "r", encoding="utf-8") as f:
-            return json.load(f)
+        pm_path = _rel(base, pm)
+        with open(pm_path, "r", encoding="utf-8") as f:
+            try:
+                return json.load(f)
+            except json.JSONDecodeError as e:
+                raise ValueError("{}: invalid JSON — {}".format(pm_path, e.msg)) from None
     return pm
 
 
@@ -193,6 +207,11 @@ _BACKEND_TYPES = {
     "fake_scripted": (lambda spec, base: ScriptedBackend(_scripted_by_model(spec, base),
                                                          default=spec.get("default", "")),
                       frozenset({"fixtures", "by_model", "default"})),
+    # Scripted tool-loop backend — drives an `agent_loop` node from a list of
+    # canned turn responses ({"text": "..."} or {"calls": [{name,args,id}, ...]}).
+    # For tests + spike examples; proves the ApiProvider seam is replaceable.
+    "fake_tool": (lambda spec, base: FakeToolBackend(turns=spec.get("turns", [])),
+                  frozenset({"turns"})),
 }
 _PROMPT_TYPES = {
     "file": (lambda spec, base: FilePromptSource(_rel(base, spec.get("dir", "prompts")),

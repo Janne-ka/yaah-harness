@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 480" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ar3" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#444"/>
+    </marker>
+  </defs>
+  <rect width="820" height="480" fill="#ffffff"/>
+  <text x="40" y="32" font-size="18" font-weight="700" fill="#1a1a1a">tool dispatch — per-call resolver</text>
+  <text x="40" y="52" font-size="12" fill="#666">Each tool_use block from the agent flows through call_target — the same resolver transforms use. Scheme picks the path.</text>
+
+  <!-- Input call -->
+  <rect x="260" y="80" width="300" height="44" fill="#eef3f8" stroke="#2c3e50" stroke-width="1.5" rx="3"/>
+  <text x="410" y="100" font-size="11" font-weight="700" fill="#1a1a1a" text-anchor="middle">tool_use block from backend.turn()</text>
+  <text x="410" y="115" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">{id, name, args}</text>
+
+  <line x1="410" y1="124" x2="410" y2="148" stroke="#444" stroke-width="1.4" marker-end="url(#ar3)"/>
+
+  <!-- Catalog lookup -->
+  <rect x="270" y="148" width="280" height="50" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="410" y="168" font-size="11" font-family="monospace" font-weight="700" fill="#1a1a1a" text-anchor="middle">tools.get(name)</text>
+  <text x="410" y="184" font-size="9" fill="#666" text-anchor="middle">author-declared catalog: name → spec</text>
+
+  <line x1="350" y1="198" x2="180" y2="220" stroke="#444" stroke-width="1.2" marker-end="url(#ar3)"/>
+  <line x1="470" y1="198" x2="640" y2="220" stroke="#444" stroke-width="1.2" marker-end="url(#ar3)"/>
+  <text x="245" y="218" font-size="10" font-style="italic" fill="#666">missing</text>
+  <text x="540" y="218" font-size="10" font-style="italic" fill="#666">found</text>
+
+  <!-- Missing branch -->
+  <rect x="60" y="222" width="240" height="44" fill="#fafafa" stroke="#bbbbbb" stroke-width="1" rx="3"/>
+  <text x="180" y="242" font-size="11" font-weight="700" fill="#1a1a1a" text-anchor="middle">error observation</text>
+  <text x="180" y="256" font-size="9" font-family="monospace" fill="#1a1a1a" text-anchor="middle">is_error: True, "unknown tool '...'"</text>
+
+  <!-- Found branch -->
+  <rect x="520" y="222" width="240" height="44" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="640" y="242" font-size="11" font-family="monospace" font-weight="700" fill="#1a1a1a" text-anchor="middle">call_target(target, args, ...)</text>
+  <text x="640" y="256" font-size="9" fill="#666" text-anchor="middle">in src/yaah/external_call.py</text>
+
+  <line x1="640" y1="266" x2="640" y2="290" stroke="#444" stroke-width="1.2"/>
+  <text x="650" y="285" font-size="10" font-style="italic" fill="#666">scheme?</text>
+
+  <!-- Three dispatch paths -->
+  <line x1="640" y1="290" x2="160" y2="316" stroke="#444" stroke-width="1.2" marker-end="url(#ar3)"/>
+  <line x1="640" y1="290" x2="410" y2="316" stroke="#444" stroke-width="1.2" marker-end="url(#ar3)"/>
+  <line x1="640" y1="290" x2="660" y2="316" stroke="#444" stroke-width="1.2" marker-end="url(#ar3)"/>
+
+  <!-- fn: -->
+  <rect x="40" y="320" width="240" height="92" fill="#f7f9fb" stroke="#2c3e50" stroke-width="1.5" rx="3"/>
+  <text x="160" y="340" font-size="11" font-family="monospace" font-weight="700" fill="#1a1a1a" text-anchor="middle">fn:module:func</text>
+  <text x="160" y="358" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">importlib (cached)</text>
+  <text x="160" y="372" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">func(args)</text>
+  <text x="160" y="386" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">→ return value</text>
+  <text x="160" y="404" font-size="10" font-weight="700" fill="#1a1a1a" text-anchor="middle">microseconds</text>
+
+  <!-- node: -->
+  <rect x="290" y="320" width="240" height="92" fill="#f7f9fb" stroke="#2c3e50" stroke-width="1.5" rx="3"/>
+  <text x="410" y="340" font-size="11" font-family="monospace" font-weight="700" fill="#1a1a1a" text-anchor="middle">node:role</text>
+  <text x="410" y="358" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">Envelope(Kind.TASK, args)</text>
+  <text x="410" y="372" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">comms.request(role, env)</text>
+  <text x="410" y="386" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">→ resp.payload</text>
+  <text x="410" y="404" font-size="10" font-weight="700" fill="#1a1a1a" text-anchor="middle">low ms</text>
+
+  <!-- http: -->
+  <rect x="540" y="320" width="240" height="92" fill="#f7f9fb" stroke="#2c3e50" stroke-width="1.5" rx="3"/>
+  <text x="660" y="340" font-size="11" font-family="monospace" font-weight="700" fill="#1a1a1a" text-anchor="middle">http(s)://URL</text>
+  <text x="660" y="358" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">POST JSON args</text>
+  <text x="660" y="372" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">urllib (30s default timeout)</text>
+  <text x="660" y="386" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">→ parsed JSON reply</text>
+  <text x="660" y="404" font-size="10" font-weight="700" fill="#1a1a1a" text-anchor="middle">network-bound</text>
+
+  <!-- Outcome -->
+  <text x="40" y="445" font-size="11" font-weight="700" fill="#1a1a1a">All three return paths converge:</text>
+  <text x="40" y="462" font-size="10" font-family="monospace" fill="#1a1a1a">success → observation {is_error: False, content: str(result)}</text>
+  <text x="450" y="462" font-size="10" font-family="monospace" fill="#1a1a1a">exception → observation {is_error: True, content: "Type: msg"}</text>
+
+</svg>

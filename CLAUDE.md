@@ -19,6 +19,16 @@ Two rules that bite hardest (full set in AGENTS.md):
   edge needs a parse, or `render` fails with `render_unfilled_placeholders`.
 - **Domain-free engine:** nothing in `src/yaah/` may name anything app-specific.
 
+## Working methodology — eval before commit
+
+For any non-trivial proposal (multi-step plan, architectural change, new
+abstraction, recommendation the user might act on, anything that would
+land in a file), dispatch an independent reviewer with the priming
+template in `.notes/eval-agent-priming.md` and apply findings BEFORE
+commit. Trivial work (reads, greps, one-line fixes, formatting) doesn't
+trigger. Methodology proved 4-for-4 in the conversation that established
+it; treat as standing rule, not discretionary.
+
 Commands (script-style, Python 3.9 compatible; **don't commit unless explicitly asked**):
 
 ```bash

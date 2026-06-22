@@ -19,6 +19,7 @@ from typing import Any, Dict
 from ..agents import Agent, Tool
 from ..core import Node, NodeConfig
 from ..nodes import (
+    AgentLoopNode,
     GetNode,
     OnceNode,
     PostNode,
@@ -220,6 +221,43 @@ def _build_transform(spec: Dict[str, Any], ctx: BuildContext) -> Node:
                          into=spec.get("into", "result"), call=spec.get("call", "args"))
 
 
+def _build_agent_loop(spec: Dict[str, Any], ctx: BuildContext) -> Node:
+    if ctx.backend is None:
+        raise ValueError("an 'agent_loop' node needs a model backend; pass backend= to build()")
+    if not hasattr(ctx.backend, "turn"):
+        raise ValueError(
+            "the configured backend ({!r}) only implements .complete() — agent_loop "
+            "needs a ToolBackend with .turn(messages, tools). Either swap the backend "
+            "or use a plain 'agent' node for one-shot stages."
+            .format(type(ctx.backend).__name__))
+    tools = spec.get("tools")
+    if not isinstance(tools, dict) or not tools:
+        raise ValueError(
+            "an 'agent_loop' node needs a non-empty 'tools' dict — {tool_name: "
+            "{description, input_schema, dispatch}}. Got {!r}.".format(tools))
+    # Validate each tool spec eagerly so authoring mistakes surface at build, not turn N.
+    for name, t in tools.items():
+        if not isinstance(t, dict):
+            raise ValueError("tool {!r} must be a dict, got {!r}".format(name, type(t).__name__))
+        if "dispatch" not in t:
+            raise ValueError(
+                "tool {!r} is missing 'dispatch' (e.g. 'fn:mymod:myfunc', "
+                "'node:my_role', or 'http://...')".format(name))
+    # The system prompt is passed through verbatim (a literal string), or as a
+    # 'file:key' reference that the node resolves on first invoke via its
+    # prompt_source. We don't resolve here because the prompt-source `.get` is
+    # async — punt to invoke time. (Same pattern Agent uses.)
+    return AgentLoopNode(
+        backend=ctx.backend,
+        tools=tools,
+        comms=ctx.comms,
+        prompt_source=ctx.prompt_source,
+        max_turns=int(spec.get("max_turns", 10)),
+        system_prompt=spec.get("system_prompt"),
+        model=spec.get("model"),
+    )
+
+
 def _build_worktree(spec: Dict[str, Any], ctx: BuildContext) -> Node:
     repo = spec.get("repo")
     if not repo:
@@ -261,6 +299,7 @@ def default_registry() -> Registry:
     r.register("post", _build_post)
     r.register("transform", _build_transform)
     r.register("render", _build_render)
+    r.register("agent_loop", _build_agent_loop)
     return r
 
 
