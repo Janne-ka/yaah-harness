@@ -11,7 +11,30 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
+import io
+import sys
+
+from yaah.cli import _resolve_version, main as cli_main
 from yaah.runtime import _parse_cli, _parse_subcommand
+
+
+def _run_cli(argv: list) -> tuple:
+    """Drive cli.main() with a fake argv and capture (exit_code, stdout). Used to
+    cover the top-level affordances (`yaah --version`, bare `yaah`) that are
+    handled before subcommand dispatch — _parse_cli / _parse_subcommand never
+    see them, so the unit-level test grammar above doesn't reach them."""
+    old_argv, old_stdout = sys.argv, sys.stdout
+    sys.argv = ["yaah"] + argv
+    sys.stdout = io.StringIO()
+    try:
+        try:
+            cli_main()
+            code = 0
+        except SystemExit as e:
+            code = 0 if e.code is None else int(e.code)
+        return code, sys.stdout.getvalue()
+    finally:
+        sys.argv, sys.stdout = old_argv, old_stdout
 
 
 def _expect(spec: dict, **want) -> None:
@@ -87,7 +110,25 @@ def main() -> None:
         else:
             raise AssertionError("expected SystemExit for {!r}".format(bad))
 
-    print("PASS yaah subcommands map correctly; legacy form intact; bad input exits 2")
+    # Top-level affordances (handled by main() before subcommand dispatch).
+    # --version / -V print a version line and exit 0.
+    for v_argv in (["--version"], ["-V"]):
+        code, out = _run_cli(v_argv)
+        assert code == 0, (v_argv, code)
+        assert out.startswith("yaah "), (v_argv, out)
+    # Bare `yaah` and `yaah --help` / `-h` print help and exit 0 — no confusing
+    # "missing root config" frame before the user has picked a command.
+    for h_argv in ([], ["--help"], ["-h"]):
+        code, out = _run_cli(h_argv)
+        assert code == 0, (h_argv, code)
+        assert "usage: yaah" in out and "error:" not in out, (h_argv, out)
+
+    # Sanity: _resolve_version returns a non-empty string (either an installed
+    # version or the source-checkout placeholder).
+    v = _resolve_version()
+    assert isinstance(v, str) and v, v
+
+    print("PASS yaah subcommands map correctly; legacy form intact; bad input exits 2; --version / bare-yaah affordances")
 
 
 if __name__ == "__main__":

@@ -43,12 +43,14 @@ Commands:
   validate <root>               validate the config and exit (no run)
   explain <root>                print the EFFECTIVE config (post-_extends/_fake + defaults)
   trace <trace.jsonl> [PRICES]  summarize a run's trace (cost / latency / retries / model mix)
+                                add --pretty for a human-readable per-run tree (stages, calls, errors)
   baton-schema <root> <id>      print the JSON Schema of decision.json for one parked baton
 
 Options (on run/list/resume/clear/validate/explain):
-  --fake     merge the root's `_fake` block over the top level (sidecar fake providers/state)
-  --debug    full tracebacks on errors (default: message + exit 2 config / 1 run)
-  -h --help  show this message
+  --fake        merge the root's `_fake` block over the top level (sidecar fake providers/state)
+  --debug       full tracebacks on errors (default: message + exit 2 config / 1 run)
+  -h --help     show this message
+  -V --version  print the installed yaah version
 
 Legacy form (still supported): yaah <root> [--list | --resume ID [FILE] | --clear | --explain | --lint-overlay]
 (equivalent: `python -m yaah.runtime …` when not installed)"""
@@ -171,11 +173,13 @@ def _parse_subcommand(argv: list) -> dict:
         spec["action"] = "validate"    # check-only (never runs the pipeline)
         return spec
     if verb == "trace":
-        files = [a for a in rest if a != "--debug"]
+        flags = {"--debug", "--pretty"}    # everything else is positional
+        files = [a for a in rest if a not in flags]
         if not files:
             _usage_exit("trace needs a trace.jsonl path")
         return {"action": "trace", "trace_path": files[0],
                 "price_map": files[1] if len(files) > 1 else None,
+                "pretty": "--pretty" in rest,
                 "debug": "--debug" in rest}
     if verb == "baton-schema":
         # surface the decision-form shape of one parked baton so a driver skill
@@ -233,6 +237,10 @@ def _dispatch(spec: Dict[str, Any]) -> None:
         from .trace.aggregate import aggregate, load_jsonl
         records = load_jsonl(spec["trace_path"])
         price_map = _read_json(spec["price_map"]) if spec.get("price_map") else None
+        if spec.get("pretty"):
+            from .trace.pretty import pretty
+            print(pretty(records, price_map=price_map), end="")
+            return
         print(json.dumps(aggregate(records, price_map=price_map), indent=2))
         return
     if spec["action"] == "scaffold":
@@ -283,8 +291,33 @@ def _dispatch(spec: Dict[str, Any]) -> None:
         asyncio.run(run_root(root, base))
 
 
+def _resolve_version() -> str:
+    """The installed wheel's metadata version, with a clear fallback for the
+    source-checkout path (PYTHONPATH=src) where no dist-info exists. Falling
+    back loudly to "(source checkout)" is the honest answer — pretending to
+    know a version we can't read would be worse than admitting it."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+        try:
+            return version("yaah-harness")
+        except PackageNotFoundError:
+            return "(source checkout)"
+    except ImportError:    # pragma: no cover - importlib.metadata is stdlib on 3.9+
+        return "(unknown)"
+
+
 def main() -> None:
     argv = sys.argv[1:]
+    # Top-level intercepts before any subcommand dispatch: --version / -V and
+    # bare `yaah` / -h / --help. Putting them here keeps _parse_cli's "missing
+    # root config" branch focused on the real error case (user typed a flag
+    # without a root) instead of confusingly firing on `yaah` alone.
+    if argv and argv[0] in ("--version", "-V"):
+        print("yaah {}".format(_resolve_version()))
+        raise SystemExit(0)
+    if not argv or argv[0] in ("-h", "--help"):
+        print("usage: " + _USAGE)
+        raise SystemExit(0)
     spec = _parse_subcommand(argv) if (argv and argv[0] in _SUBCOMMANDS) else _parse_cli(argv)
     try:
         _dispatch(spec)

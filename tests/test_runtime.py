@@ -280,6 +280,28 @@ def scenario_read_json_extends() -> None:
         assert _read_json(p) == {"q": "p"}
 
 
+def scenario_read_json_bad_json_names_file() -> None:
+    """Usability-gap §7 fix: a JSONDecodeError surfaces with the file path
+    prefixed so the operator knows WHICH file is malformed. Without this, a
+    multi-file pipeline gives a bare `Expecting value: line 1 column 1` with
+    no hint which of root / pipeline / decision file the user mistyped."""
+    from yaah.runtime_factories import _read_json
+
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, "broken.json")
+        with open(p, "w") as f:
+            f.write("this is not json")
+        try:
+            _read_json(p)
+        except ValueError as e:
+            msg = str(e)
+            assert "broken.json" in msg, msg              # the file is named
+            assert "invalid JSON" in msg, msg              # operator-readable framing
+            assert "Expecting value" in msg, msg           # decoder detail preserved
+        else:
+            raise AssertionError("expected bad JSON to raise ValueError")
+
+
 def scenario_data_flow_contract_load_time() -> None:
     """The data-flow contract (agent reply is a STRING in payload['raw']) is
     now enforced at LOAD time, not just at runtime via the
@@ -449,6 +471,7 @@ def main() -> None:
     scenario_stats_sink_price_map_file()
     scenario_cli_parser()
     scenario_read_json_extends()
+    scenario_read_json_bad_json_names_file()
     scenario_data_flow_contract_load_time()
     scenario_main_catches_import_error()
     print("ok")

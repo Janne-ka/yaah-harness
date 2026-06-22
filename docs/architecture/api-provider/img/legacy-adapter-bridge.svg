@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 540" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ar3" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#444"/>
+    </marker>
+  </defs>
+  <rect width="820" height="540" fill="#ffffff"/>
+  <text x="40" y="32" font-size="18" font-weight="700" fill="#1a1a1a">LegacyBackendAdapter — three paths inside one wrapper</text>
+  <text x="40" y="52" font-size="12" fill="#666">Wraps any current ModelBackend / ToolBackend as an ApiProvider. Non-streaming sources collapse to one text_delta.</text>
+
+  <!-- Consumer -->
+  <rect x="320" y="80" width="180" height="44" fill="#eef3f8" stroke="#2c3e50" stroke-width="1.4" rx="3"/>
+  <text x="410" y="100" font-size="11" font-weight="700" fill="#1a1a1a" text-anchor="middle">Consumer</text>
+  <text x="410" y="116" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">async for ev in adapter.stream(ctx)</text>
+
+  <line x1="410" y1="124" x2="410" y2="152" stroke="#444" stroke-width="1.4" marker-end="url(#ar3)"/>
+
+  <!-- Adapter -->
+  <rect x="60" y="152" width="700" height="240" fill="#f7f9fb" stroke="#2c3e50" stroke-width="1.5" rx="6"/>
+  <text x="76" y="172" font-size="12" font-weight="700" fill="#1a1a1a">LegacyBackendAdapter._iter(context, opts)</text>
+  <text x="76" y="188" font-size="10" fill="#666">always yields start first; routes by context.tools; converts old return shapes into events</text>
+
+  <!-- Branch: no tools -->
+  <rect x="84" y="204" width="216" height="170" fill="#ffffff" stroke="#2c8060" stroke-width="1.3" rx="3"/>
+  <text x="192" y="222" font-size="11" font-weight="700" fill="#1a1a1a" text-anchor="middle">no tools</text>
+  <text x="192" y="238" font-size="9" fill="#666" text-anchor="middle">context.tools is empty</text>
+  <line x1="100" y1="246" x2="284" y2="246" stroke="#ddd" stroke-width="1"/>
+  <text x="100" y="262" font-size="10" font-family="monospace" fill="#444">prompt = last_user_text(ctx)</text>
+  <text x="100" y="278" font-size="10" font-family="monospace" fill="#444">text = await backend.complete(</text>
+  <text x="100" y="292" font-size="10" font-family="monospace" fill="#444">    prompt, model=...)</text>
+  <line x1="100" y1="304" x2="284" y2="304" stroke="#ddd" stroke-width="1"/>
+  <text x="100" y="320" font-size="10" font-family="monospace" fill="#1a1a1a">yield start</text>
+  <text x="100" y="334" font-size="10" font-family="monospace" fill="#1a1a1a">yield text_delta(text)</text>
+  <text x="100" y="348" font-size="10" font-family="monospace" fill="#1a1a1a">yield done(end_turn)</text>
+  <text x="100" y="366" font-size="9" fill="#666">collapse: non-streaming → one delta</text>
+
+  <!-- Branch: tools + turn() -->
+  <rect x="308" y="204" width="216" height="170" fill="#ffffff" stroke="#2c8060" stroke-width="1.3" rx="3"/>
+  <text x="416" y="222" font-size="11" font-weight="700" fill="#1a1a1a" text-anchor="middle">tools + backend.turn()</text>
+  <text x="416" y="238" font-size="9" fill="#666" text-anchor="middle">tool-capable backend</text>
+  <line x1="324" y1="246" x2="508" y2="246" stroke="#ddd" stroke-width="1"/>
+  <text x="324" y="262" font-size="10" font-family="monospace" fill="#444">out = await backend.turn(</text>
+  <text x="324" y="276" font-size="10" font-family="monospace" fill="#444">    msgs, tools, model=...)</text>
+  <line x1="324" y1="288" x2="508" y2="288" stroke="#ddd" stroke-width="1"/>
+  <text x="324" y="304" font-size="10" font-family="monospace" fill="#1a1a1a">yield start</text>
+  <text x="324" y="318" font-size="10" font-family="monospace" fill="#1a1a1a">if out.text:</text>
+  <text x="324" y="332" font-size="10" font-family="monospace" fill="#1a1a1a">    yield text_delta(out.text)</text>
+  <text x="324" y="346" font-size="10" font-family="monospace" fill="#1a1a1a">for c in out.calls:</text>
+  <text x="324" y="360" font-size="10" font-family="monospace" fill="#1a1a1a">    yield toolcall_end(...)</text>
+
+  <!-- Branch: tools but no turn() -->
+  <rect x="532" y="204" width="216" height="170" fill="#fff5f0" stroke="#c44" stroke-width="1.3" rx="3"/>
+  <text x="640" y="222" font-size="11" font-weight="700" fill="#a33" text-anchor="middle">tools, no backend.turn()</text>
+  <text x="640" y="238" font-size="9" fill="#666" text-anchor="middle">legacy complete-only backend</text>
+  <line x1="548" y1="246" x2="732" y2="246" stroke="#fcc" stroke-width="1"/>
+  <text x="548" y="262" font-size="10" font-family="monospace" fill="#444">(cannot serve tool calls)</text>
+  <line x1="548" y1="276" x2="732" y2="276" stroke="#fcc" stroke-width="1"/>
+  <text x="548" y="292" font-size="10" font-family="monospace" fill="#1a1a1a">yield start</text>
+  <text x="548" y="306" font-size="10" font-family="monospace" fill="#1a1a1a">yield error("no .turn()")</text>
+  <line x1="548" y1="318" x2="732" y2="318" stroke="#fcc" stroke-width="1"/>
+  <text x="548" y="336" font-size="9" fill="#a33">no raise — in-stream error</text>
+  <text x="548" y="350" font-size="9" fill="#666">consumer decides how to react</text>
+
+  <!-- Common terminator -->
+  <line x1="192" y1="374" x2="410" y2="410" stroke="#444" stroke-width="1.4" marker-end="url(#ar3)"/>
+  <line x1="416" y1="374" x2="416" y2="410" stroke="#444" stroke-width="1.4" marker-end="url(#ar3)"/>
+  <line x1="640" y1="374" x2="422" y2="410" stroke="#444" stroke-width="1.4" marker-end="url(#ar3)"/>
+
+  <rect x="320" y="412" width="180" height="44" fill="#ffffff" stroke="#444" stroke-width="1.4" rx="3"/>
+  <text x="410" y="432" font-size="11" font-weight="700" fill="#1a1a1a" text-anchor="middle">yield done | error</text>
+  <text x="410" y="448" font-size="10" fill="#666" text-anchor="middle">stream terminator (always exactly one)</text>
+
+  <text x="60" y="492" font-size="11" fill="#444">Exceptions from the wrapped backend are caught and emitted as error events.</text>
+  <text x="60" y="510" font-size="11" fill="#444">The adapter never raises out of the stream — error handling moves into the consumer's event loop.</text>
+</svg>

@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 460" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ar4" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#444"/>
+    </marker>
+  </defs>
+  <rect width="820" height="460" fill="#ffffff"/>
+  <text x="40" y="32" font-size="18" font-weight="700" fill="#1a1a1a">Event timeline — one turn at the wire</text>
+  <text x="40" y="52" font-size="12" fill="#666">What a real streaming provider emits over time, and how assemble_message() drains it.</text>
+
+  <!-- Timeline axis -->
+  <line x1="80" y1="120" x2="760" y2="120" stroke="#444" stroke-width="1.4" marker-end="url(#ar4)"/>
+  <text x="780" y="124" font-size="11" font-weight="700" fill="#444">t</text>
+  <text x="80" y="108" font-size="10" fill="#666">t₀</text>
+  <text x="760" y="108" font-size="10" fill="#666" text-anchor="end">tₙ</text>
+
+  <!-- Events as ticks along timeline -->
+  <!-- start -->
+  <circle cx="100" cy="120" r="6" fill="#2c8060" stroke="#fff" stroke-width="1.5"/>
+  <text x="100" y="145" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">start</text>
+
+  <!-- text_delta 1 -->
+  <circle cx="180" cy="120" r="5" fill="#3a7ac0" stroke="#fff" stroke-width="1.5"/>
+  <text x="180" y="145" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">text_delta</text>
+  <text x="180" y="158" font-size="9" fill="#666" text-anchor="middle">"I'll"</text>
+
+  <!-- text_delta 2 -->
+  <circle cx="240" cy="120" r="5" fill="#3a7ac0" stroke="#fff" stroke-width="1.5"/>
+  <text x="240" y="145" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">text_delta</text>
+  <text x="240" y="158" font-size="9" fill="#666" text-anchor="middle">" read"</text>
+
+  <!-- text_delta 3 -->
+  <circle cx="300" cy="120" r="5" fill="#3a7ac0" stroke="#fff" stroke-width="1.5"/>
+  <text x="300" y="145" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">text_delta</text>
+  <text x="300" y="158" font-size="9" fill="#666" text-anchor="middle">" foo.py"</text>
+
+  <!-- toolcall_end -->
+  <circle cx="420" cy="120" r="6" fill="#a25fc5" stroke="#fff" stroke-width="1.5"/>
+  <text x="420" y="145" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">toolcall_end</text>
+  <text x="420" y="158" font-size="9" fill="#666" text-anchor="middle">read({path:"foo.py"})</text>
+
+  <!-- text_delta 4 (after toolcall) -->
+  <circle cx="540" cy="120" r="5" fill="#3a7ac0" stroke="#fff" stroke-width="1.5"/>
+  <text x="540" y="145" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">text_delta</text>
+  <text x="540" y="158" font-size="9" fill="#666" text-anchor="middle">"thinking..."</text>
+
+  <!-- done -->
+  <circle cx="700" cy="120" r="7" fill="#c44" stroke="#fff" stroke-width="1.5"/>
+  <text x="700" y="145" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">done</text>
+  <text x="700" y="158" font-size="9" fill="#666" text-anchor="middle">tool_use</text>
+
+  <!-- Annotation: TTFT -->
+  <line x1="100" y1="92" x2="180" y2="92" stroke="#3a7ac0" stroke-width="1" stroke-dasharray="2,2"/>
+  <text x="140" y="84" font-size="9" fill="#3a7ac0" text-anchor="middle">TTFT</text>
+
+  <!-- Consumer accumulator pane -->
+  <rect x="60" y="200" width="700" height="220" fill="#fafafa" stroke="#999" stroke-width="1" rx="4"/>
+  <text x="76" y="220" font-size="11" font-weight="700" fill="#1a1a1a">Consumer (assemble_message) — accumulator state over time</text>
+
+  <!-- After start -->
+  <rect x="76" y="232" width="120" height="64" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="136" y="248" font-size="9" font-weight="700" fill="#666" text-anchor="middle">after start</text>
+  <text x="86" y="266" font-size="9" font-family="monospace" fill="#444">content: []</text>
+  <text x="86" y="278" font-size="9" font-family="monospace" fill="#444">text_buf: []</text>
+
+  <!-- After 3 text deltas -->
+  <rect x="208" y="232" width="120" height="64" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="268" y="248" font-size="9" font-weight="700" fill="#666" text-anchor="middle">after 3 text_delta</text>
+  <text x="218" y="266" font-size="9" font-family="monospace" fill="#444">content: []</text>
+  <text x="218" y="278" font-size="9" font-family="monospace" fill="#444">text_buf: ["I'll",</text>
+  <text x="218" y="288" font-size="9" font-family="monospace" fill="#444">  " read", " foo.py"]</text>
+
+  <!-- After toolcall_end -->
+  <rect x="340" y="232" width="170" height="84" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="425" y="248" font-size="9" font-weight="700" fill="#666" text-anchor="middle">after toolcall_end (flush)</text>
+  <text x="350" y="264" font-size="9" font-family="monospace" fill="#444">content: [</text>
+  <text x="350" y="276" font-size="9" font-family="monospace" fill="#444">  {type:"text", text:"I'll read foo.py"},</text>
+  <text x="350" y="288" font-size="9" font-family="monospace" fill="#444">  {type:"tool_use", id, name, input}</text>
+  <text x="350" y="300" font-size="9" font-family="monospace" fill="#444">]</text>
+  <text x="350" y="310" font-size="9" font-family="monospace" fill="#444">text_buf: []</text>
+
+  <!-- After more text -->
+  <rect x="522" y="232" width="120" height="64" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="582" y="248" font-size="9" font-weight="700" fill="#666" text-anchor="middle">after text_delta</text>
+  <text x="532" y="266" font-size="9" font-family="monospace" fill="#444">content: [2 blocks]</text>
+  <text x="532" y="278" font-size="9" font-family="monospace" fill="#444">text_buf: ["thinking..."]</text>
+
+  <!-- After done -->
+  <rect x="654" y="232" width="100" height="84" fill="#f4faf7" stroke="#2c8060" stroke-width="1.3" rx="3"/>
+  <text x="704" y="248" font-size="9" font-weight="700" fill="#1a1a1a" text-anchor="middle">after done</text>
+  <text x="664" y="264" font-size="9" font-family="monospace" fill="#444">content: [3 blocks]</text>
+  <text x="664" y="276" font-size="9" font-family="monospace" fill="#444">stop_reason:</text>
+  <text x="664" y="286" font-size="9" font-family="monospace" fill="#444">  "tool_use"</text>
+  <text x="664" y="298" font-size="9" font-family="monospace" fill="#444">usage: {...}</text>
+
+  <!-- Final result -->
+  <rect x="76" y="332" width="668" height="76" fill="#ffffff" stroke="#2c8060" stroke-width="1.3" rx="3"/>
+  <text x="86" y="350" font-size="10" font-weight="700" fill="#1a1a1a">Result: AssistantMessage</text>
+  <text x="86" y="368" font-size="10" font-family="monospace" fill="#444">{role: "assistant",</text>
+  <text x="86" y="382" font-size="10" font-family="monospace" fill="#444"> content: [text "I'll read foo.py", tool_use(read, {path:"foo.py"}), text "thinking..."],</text>
+  <text x="86" y="396" font-size="10" font-family="monospace" fill="#444"> stop_reason: "tool_use", usage: {...}}</text>
+</svg>
