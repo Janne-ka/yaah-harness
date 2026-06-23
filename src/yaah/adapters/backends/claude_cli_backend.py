@@ -216,21 +216,54 @@ class ClaudeCliBackend:
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
         )
-        # Send the prompt on stdin and close it so claude sees EOF and starts.
-        # Real asyncio.subprocess writes to stdin via write+drain; the test
-        # FakeStdin.write is enough for the in-test path.
+        # CRIT-001 (opus bugs review, 2026-06-23): if the spawned process died
+        # before its stdin/stdout pipes opened (misconfigured binary, immediate
+        # exit, OS resource exhaustion), the pipe attributes are None and the
+        # bare `.write()` / `.readline()` calls below crash with AttributeError.
+        # Surface as in-stream error events so consumers get the same shape on
+        # success and failure paths.
+        if proc.stdin is None:
+            yield {"type": "error",
+                   "message": "claude subprocess stdin pipe unavailable "
+                              "(process likely exited before pipe opened)"}
+            return
+        if proc.stdout is None:
+            yield {"type": "error",
+                   "message": "claude subprocess stdout pipe unavailable "
+                              "(process likely exited before pipe opened)"}
+            return
+        # Send the prompt on stdin, drain to flush, then close so claude sees
+        # EOF and starts. CRIT-002 (opus bugs review): the synchronous
+        # `write()` only buffers up to the OS pipe high-water mark (~64KB);
+        # large prompts deadlock if drain() isn't awaited before close()
+        # (claude blocks writing to stdin while we block waiting for its
+        # stdout, mutual deadlock).
         proc.stdin.write(prompt.encode())
-        if hasattr(proc.stdin, "close"):
-            proc.stdin.close()
+        await proc.stdin.drain()
+        proc.stdin.close()
 
         # Read stream-json line by line. JSONL means one event per line;
         # an empty `readline()` return signals EOF. Parse each line ONCE;
         # text_delta events surface immediately; result captures terminator
         # data; everything else is diagnostic noise.
+        # CRIT-003 (opus bugs review): wrap each readline in wait_for so a
+        # wedged claude (mid-stream silence, infinite api_retry loop, MCP
+        # stall) doesn't hang the pipeline indefinitely. self._timeout=None
+        # preserves the legacy "wait forever" behavior.
+        timeout = opts.get("timeout", self._timeout)
         usage: Optional[Dict[str, Any]] = None
         stop_reason = "end_turn"
         while True:
-            line = await proc.stdout.readline()
+            try:
+                line = await asyncio.wait_for(proc.stdout.readline(),
+                                              timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                yield {"type": "error",
+                       "message": "claude stream-json timeout after {}s "
+                                  "(no output received from subprocess)".format(timeout)}
+                return
             if not line:
                 break
             try:
@@ -260,9 +293,17 @@ class ClaudeCliBackend:
                     usage = u
             # system / user / rate_limit_event: ignored (diagnostic noise)
 
+        # CRIT-004 (opus bugs review): drain stderr BEFORE wait(). If the
+        # process filled its stderr pipe buffer (>64KB) it can't exit while
+        # blocked on the write, so wait() would deadlock. We've already drained
+        # stdout (the readline loop hit EOF); reading stderr to EOF unblocks the
+        # process, then wait() returns immediately. Reading empty stderr is
+        # cheap (returns b"" at EOF). stderr may be absent on some stubs.
+        err_bytes = b""
+        if proc.stderr is not None:
+            err_bytes = await proc.stderr.read()
         await proc.wait()
         if proc.returncode != 0:
-            err_bytes = await proc.stderr.read()
             err_text = err_bytes.decode(errors="replace")[:500] if err_bytes else ""
             yield {"type": "error",
                    "message": "claude exit {}{}".format(

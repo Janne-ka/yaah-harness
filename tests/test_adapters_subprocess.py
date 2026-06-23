@@ -268,9 +268,23 @@ class FakeStream:
 
 
 class FakeStdin:
-    def __init__(self): self.data = b""
-    def write(self, data): self.data = (self.data or b"") + data
-    def close(self): self.closed = True
+    """Stdin stub that records write/drain/close ordering so tests can
+    assert the asyncio StreamWriter contract (write → await drain → close)."""
+
+    def __init__(self):
+        self.data = b""
+        self.events = []                          # ["write", "drain", "close"] order witness
+
+    def write(self, data):
+        self.data = (self.data or b"") + data
+        self.events.append("write")
+
+    async def drain(self):                         # real asyncio.StreamWriter contract
+        self.events.append("drain")
+
+    def close(self):
+        self.closed = True
+        self.events.append("close")
 
 
 class FakeStreamProc:
@@ -390,6 +404,47 @@ async def claude_stream_malformed_lines_skipped() -> None:
     assert text_deltas[0]["delta"] == "survived"
 
 
+async def claude_stream_drains_stderr_before_wait() -> None:
+    # CRIT-004 (opus bugs review): the old code did `await proc.wait()` THEN
+    # `await proc.stderr.read()`. If the process fills its stderr pipe buffer
+    # (>64KB) it can't exit while blocked on the write, so wait() deadlocks.
+    # The fix drains stderr BEFORE wait(). This fake mimics the OS deadlock:
+    # wait() blocks until stderr has been fully read. If the code waits first,
+    # this test hangs (red); after the fix it passes.
+
+    class DeadlockingProc(FakeStreamProc):
+        def __init__(self, **kw):
+            super().__init__(**kw)
+            self._stderr_drained = asyncio.Event()
+            # wrap stderr.read to flag when drained
+            real_stderr = self.stderr
+
+            class StderrWitness:
+                def __init__(s): s._inner = real_stderr
+                async def read(s):
+                    data = await s._inner.read()
+                    self._stderr_drained.set()
+                    return data
+                async def readline(s): return await s._inner.readline()
+            self.stderr = StderrWitness()
+
+        async def wait(self):
+            # mimic OS: process can't be reaped until its stderr is drained
+            await self._stderr_drained.wait()
+            self.waited = True
+
+    proc = DeadlockingProc(returncode=2, stdout_lines=[], stderr=b"lots of stderr")
+    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    # If the code waits before draining stderr, this never completes.
+    events = await asyncio.wait_for(
+        _drain(be.stream({"messages": [{"role": "user", "content": "x"}]})),
+        timeout=3.0)
+    types = [e["type"] for e in events]
+    assert "error" in types, types
+    err = [e for e in events if e["type"] == "error"][0]
+    assert "lots of stderr" in err["message"] or "exit 2" in err["message"], err
+
+
 async def claude_stream_nonzero_exit_yields_error_event() -> None:
     # Process crash / auth fail / hung claude that gets reaped non-zero:
     # surface as an in-stream error event (not a raised exception). Consumer
@@ -428,6 +483,91 @@ async def claude_complete_path_unchanged_regression() -> None:
     assert out == "the answer"
 
 
+async def claude_stream_handles_none_stdin_without_crashing() -> None:
+    # CRIT-001 (opus bugs review): if the spawned process died before its
+    # stdin pipe opened (misconfigured binary, immediate-exit, OS resource
+    # exhaustion), `proc.stdin` is None and the old code crashed with
+    # AttributeError. The stream MUST surface this as an error event, not
+    # a raised AttributeError.
+    proc = FakeStreamProc(returncode=127, stdout_lines=[], stderr=b"binary failed")
+    proc.stdin = None                                    # the failure mode
+    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    events = await _drain(be.stream({"messages": [{"role": "user", "content": "x"}]}))
+    types = [e["type"] for e in events]
+    assert types[0] == "start"
+    assert "error" in types, "expected an error event, got: {}".format(types)
+    err = [e for e in events if e["type"] == "error"][0]
+    assert "stdin" in err["message"].lower() or "pipe" in err["message"].lower(), \
+        "error message should mention stdin / pipe; got: {}".format(err["message"])
+    # No done event after error (error is the terminator).
+    assert types.count("done") == 0, types
+
+
+async def claude_stream_drains_stdin_before_closing() -> None:
+    # CRIT-002 (opus bugs review): asyncio.StreamWriter.write() is synchronous
+    # and only buffers up to the high-water mark; large prompts (>64KB pipe
+    # buffer) deadlock if drain() isn't called before close(). This asserts
+    # the contract: write -> await drain -> close. If a future refactor
+    # forgets drain(), this test goes red BEFORE production hangs at 64KB.
+    proc = FakeStreamProc(stdout_lines=[
+        b'{"type":"result","subtype":"success","stop_reason":"end_turn","usage":{}}\n',
+    ])
+    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    await _drain(be.stream({"messages": [{"role": "user", "content": "x"}]}))
+    assert proc.stdin.events == ["write", "drain", "close"], \
+        "expected ordered ['write','drain','close']; got {!r}".format(proc.stdin.events)
+
+
+async def claude_stream_timeout_kills_proc_and_yields_error() -> None:
+    # CRIT-003 (opus bugs review): a wedged claude (mid-stream silence,
+    # infinite api_retry events, MCP stall) used to hang the whole pipeline
+    # because the readline loop had NO upper bound — even though the
+    # constructor docstring promises `timeout` works for this provider.
+    # The fix wraps readline in asyncio.wait_for with self._timeout and
+    # kills the process + emits an error on TimeoutError.
+
+    class HangingStdout:
+        def __init__(self): self._closed = False
+        async def readline(self):
+            # never resolves; simulates a wedged claude that produced no
+            # output. The test relies on self._timeout firing the kill path.
+            await asyncio.Event().wait()
+        async def read(self): return b""
+
+    proc = FakeStreamProc(stdout_lines=[])
+    proc.stdout = HangingStdout()
+    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []), timeout=0.3)
+    # The whole call must complete within a small multiple of self._timeout,
+    # otherwise the kill path isn't running.
+    events = await asyncio.wait_for(
+        _drain(be.stream({"messages": [{"role": "user", "content": "x"}]})),
+        timeout=3.0)
+    types = [e["type"] for e in events]
+    assert types[0] == "start"
+    assert "error" in types, "expected error event on timeout; got: {}".format(types)
+    err = [e for e in events if e["type"] == "error"][0]
+    assert "timeout" in err["message"].lower(), \
+        "expected 'timeout' in error message; got: {}".format(err["message"])
+    # The stalled process must be killed (otherwise it leaks).
+    assert proc.killed, "wedged claude must be killed on timeout"
+
+
+async def claude_stream_handles_none_stdout_without_crashing() -> None:
+    # CRIT-001 mirror: if the spawned process died before its stdout pipe
+    # opened, `proc.stdout` is None and the readline loop crashed with
+    # AttributeError. The stream MUST surface this as an error event.
+    proc = FakeStreamProc(returncode=127, stdout_lines=[], stderr=b"binary failed")
+    proc.stdout = None                                   # the failure mode
+    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    events = await _drain(be.stream({"messages": [{"role": "user", "content": "x"}]}))
+    types = [e["type"] for e in events]
+    assert types[0] == "start"
+    assert "error" in types, "expected an error event, got: {}".format(types)
+    err = [e for e in events if e["type"] == "error"][0]
+    assert "stdout" in err["message"].lower() or "pipe" in err["message"].lower(), \
+        "error message should mention stdout / pipe; got: {}".format(err["message"])
+
+
 async def main() -> None:
     for fn in [
         claude_binary_and_flag_trust,
@@ -448,6 +588,11 @@ async def main() -> None:
         claude_stream_nonzero_exit_yields_error_event,
         claude_stream_passes_prompt_via_stdin,
         claude_complete_path_unchanged_regression,
+        claude_stream_handles_none_stdin_without_crashing,
+        claude_stream_drains_stdin_before_closing,
+        claude_stream_timeout_kills_proc_and_yields_error,
+        claude_stream_drains_stderr_before_wait,
+        claude_stream_handles_none_stdout_without_crashing,
         git_diff_builds_argv_with_ref_paths_and_context,
         git_diff_intent_to_add_runs_add_first,
         git_diff_uses_constructor_repo_when_no_cwd,
