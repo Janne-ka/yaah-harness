@@ -461,7 +461,6 @@ def _print_blast_radius(nodes: Dict[str, Any]) -> None:
 from .cli import (  # noqa: E402, F401
     _SUBCOMMANDS,
     _USAGE,
-    _VERB_FLAG,
     _apply_fake_overlay,
     _dispatch,
     _parse_cli,

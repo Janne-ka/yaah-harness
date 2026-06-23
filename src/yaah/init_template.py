@@ -76,12 +76,6 @@ def load_template(archetype: str) -> Dict[str, str]:
     return out
 
 
-# Back-compat alias for code that imported STARTER_TEMPLATE before scaffold
-# landed — internal to this repo (the test references it). Computed at import
-# time so the contract stays a plain dict the test can iterate over.
-STARTER_TEMPLATE: Dict[str, str] = load_template("linear")
-
-
 def scaffold(target_dir: str, archetype: str = "linear") -> int:
     """Write the named archetype's template into `target_dir`. Returns file
     count.

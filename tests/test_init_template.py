@@ -17,7 +17,7 @@ import os
 import shutil
 import tempfile
 
-from yaah.init_template import ARCHETYPES, STARTER_TEMPLATE, scaffold
+from yaah.init_template import ARCHETYPES, load_template, scaffold
 from yaah.validate import validate_root, validate_pipeline
 
 
@@ -31,14 +31,15 @@ def _read(path: str) -> str:
 
 
 def main() -> None:
+    linear = load_template("linear")
     tmp = tempfile.mkdtemp(prefix="yaah-init-")
     try:
         target = os.path.join(tmp, "my-pipeline")
         n = scaffold(target)
-        assert n == len(STARTER_TEMPLATE), (n, len(STARTER_TEMPLATE))
+        assert n == len(linear), (n, len(linear))
 
         # every declared file landed on disk with its declared content
-        for rel, expected in STARTER_TEMPLATE.items():
+        for rel, expected in linear.items():
             got = _read(os.path.join(target, rel))
             assert got == expected, "scaffold corrupted {}".format(rel)
 
@@ -62,7 +63,7 @@ def main() -> None:
 
         # drift check: the embed must mirror examples/hello-yaah exactly.
         # If you intentionally update one, update the other in the same commit.
-        for rel, expected in STARTER_TEMPLATE.items():
+        for rel, expected in linear.items():
             example_path = os.path.join(EXAMPLE, rel)
             assert os.path.exists(example_path), \
                 "embed has {} but example doesn't — drift".format(rel)

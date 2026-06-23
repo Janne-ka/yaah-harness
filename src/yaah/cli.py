@@ -297,12 +297,6 @@ _VERB_PARSERS: Dict[str, Callable[[list], dict]] = {
 # the parser surface and the shell-completion script's verb list).
 _SUBCOMMANDS = tuple(_VERB_PARSERS.keys())
 
-# Back-compat: pre-refactor name for the legacy-flag mapping the three
-# `_parse_via_flag` parsers wrap. Some downstream code (runtime.py re-export,
-# external callers) imports this; kept here as a literal so the registry can
-# stay self-contained.
-_VERB_FLAG = {"list": "--list", "clear": "--clear", "explain": "--explain"}
-
 
 def _parse_subcommand(argv: list) -> dict:
     """Dispatch the first argv token to its per-verb parser. The registry
