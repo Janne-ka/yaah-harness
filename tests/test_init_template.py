@@ -80,7 +80,9 @@ def scenario_scaffold_every_archetype() -> None:
     lands on disk, the produced starter root + pipeline validate, and no
     archetype shares its target directory with another (the FileExistsError
     refusal still bites the second scaffold)."""
-    for name, template in ARCHETYPES.items():
+    from yaah.init_template import load_template
+    for name in ARCHETYPES:
+        template = load_template(name)
         tmp = tempfile.mkdtemp(prefix="yaah-arch-{}-".format(name))
         try:
             target = os.path.join(tmp, "p")
