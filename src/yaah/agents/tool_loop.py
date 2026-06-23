@@ -1,30 +1,82 @@
 """run_tool_loop — drive a tool-capable backend through model-initiated calls.
 
 Used by: Agent.invoke when an agent has `tools` and its backend supports tool
-calls. Backend-agnostic: it talks to the backend through one method, `turn`.
+calls. Backend-agnostic.
 Where: inside one agent's invoke() — invisible to the harness (the orchestrator
 sees only the agent's final output).
-Why: keep the loop, the Tool spec, and the `call_target` resolver shared; only
-`turn` is backend-specific (litellm function-calling, a scripted test backend,
-etc.). claude does NOT use this — it runs its own native tool-loop.
+Why: keep the loop, the Tool spec, and the `call_target` resolver shared; the
+backend is the only swap point (litellm function-calling, a scripted test
+backend, etc.). claude does NOT use this — it runs its own native tool-loop.
 
-The backend contract:
+The backend contract (MED-002, 2026-06-23): the loop consumes the streaming
+`ApiProvider` shape when available —
+
+  async for ev in backend.stream({"messages", "tools", "model"}, **opts):
+     ev["type"] in {"start","text_delta","toolcall_end","done","error"}
+
+forwarding each StreamEvent to the optional `on_event` callback BEFORE
+assembling it into the collected {text, calls} shape. That callback is the
+seam the whole ApiProvider protocol was built for (H7 advisory watchers,
+per-token tracing) — before MED-002 the events were assembled inside
+backend.turn() and discarded, unreachable from any consumer.
+
+Backends WITHOUT `.stream()` (turn-only test doubles, any external legacy
+backend) fall back to the collected `.turn()` contract:
+
   await backend.turn(messages, tool_schemas, *, model, **opts) ->
-     {"text": str}                          # final answer; loop returns it
-     {"calls": [{"id","name","args"}, ...]}  # run these tools, then turn again
+     {"text": str} | {"calls": [{"id","name","args"}, ...]}
+
+on the fallback path `on_event` simply never fires.
 
 Targets Python 3.9+.
 """
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 from ..external_call import call_target
 from ..trace import NullTracer, Span
 from .tool import Tool
+
+
+async def _fetch_turn(backend: Any, messages_list: List[dict], schemas: List[dict],
+                      model: Optional[str], on_event: Optional[Callable[[dict], Any]],
+                      opts: Dict[str, Any]) -> Tuple[Optional[str], List[dict]]:
+    """Get one turn's (text, raw_calls) from the backend.
+
+    Streaming backends (have `.stream`) are consumed event-by-event, forwarding
+    each StreamEvent to `on_event` (the MED-002 seam), then assembling the
+    collected shape. Turn-only backends fall back to `.turn()` (on_event unused).
+    """
+    if hasattr(backend, "stream"):
+        ctx: Dict[str, Any] = {"messages": messages_list, "tools": schemas}
+        if model is not None:
+            ctx["model"] = model
+        text_parts: List[str] = []
+        raw_calls: List[dict] = []
+        async for ev in backend.stream(ctx, **opts):
+            if on_event is not None:
+                r = on_event(ev)
+                if inspect.isawaitable(r):
+                    await r
+            etype = ev.get("type")
+            if etype == "text_delta":
+                text_parts.append(ev.get("delta", ""))
+            elif etype == "toolcall_end":
+                raw_calls.append({"id": ev.get("id", ""), "name": ev.get("name", ""),
+                                  "args": ev.get("args", {}) or {}})
+            elif etype == "error":
+                # Match the legacy turn() path (assemble_message raised on error):
+                # a backend stream error aborts the loop so the stage fails loudly.
+                raise RuntimeError("backend stream error: {}".format(ev.get("message", "")))
+        return ("".join(text_parts) if text_parts else None), raw_calls
+    # Legacy turn-only backend.
+    turn = await backend.turn(messages_list, schemas, model=model, **opts)
+    return turn.get("text"), (turn.get("calls") or [])
 
 
 async def run_tool_loop(backend: Any, prompt: str = "",
@@ -33,6 +85,7 @@ async def run_tool_loop(backend: Any, prompt: str = "",
                         messages: Optional[List[dict]] = None,         # B8
                         system: Optional[str] = None,                  # B8
                         return_meta: bool = False,                     # B8
+                        on_event: Optional[Callable[[dict], Any]] = None,   # MED-002
                         tracer: Any = None, corr: str = "", parent: Optional[str] = None,
                         **opts: Any) -> Union[str, Tuple[str, Dict[str, Any]]]:
     """Drive a tool-capable backend through model-initiated tool calls.
@@ -62,12 +115,16 @@ async def run_tool_loop(backend: Any, prompt: str = "",
     turns_done = 0
     for _ in range(max_iters):
         turns_done += 1
-        turn = await backend.turn(messages_list, schemas, model=model, **opts)
+        # MED-002: consume the streaming ApiProvider shape (forwarding each
+        # event to on_event) when the backend supports it; fall back to the
+        # collected turn() shape otherwise. _fetch_turn returns the same
+        # (text, raw_calls) the inline `backend.turn()` used to.
+        text_val, raw_calls = await _fetch_turn(
+            backend, messages_list, schemas, model, on_event, opts)
         # Defensive (assessment cluster 3 B3): a malformed call structure
         # (missing `name`, not a dict, etc.) is FILTERED before subscripting —
         # a backend that returns garbage shouldn't crash the agent with KeyError.
         # Unknown tool NAMES are still handled below (with an "unknown tool" result).
-        raw_calls = turn.get("calls") or []
         calls = [c for c in raw_calls if isinstance(c, dict) and c.get("name")]
         if not calls:
             # No calls this turn — either a final-text answer or an empty
@@ -75,7 +132,7 @@ async def run_tool_loop(backend: Any, prompt: str = "",
             # pattern) is NOT a final answer; the text is intermediate and the
             # calls are what must execute. The previous order (early-return on
             # any text) discarded calls when both were present.
-            text = turn.get("text")
+            text = text_val
             if text is not None and text != "":
                 if return_meta:
                     return text, {"turns": turns_done, "outcome": "completed"}

@@ -255,6 +255,11 @@ async def main() -> None:
     await scenario_b8_messages_kwarg_skips_prompt_arg()
     await scenario_b8_system_prepends_as_role_message()
     await scenario_b8_default_return_shape_unchanged()
+    # MED-002 — run_tool_loop consumes provider.stream(); on_event seam
+    await scenario_med2_on_event_receives_stream_events()
+    await scenario_med2_turn_only_backend_falls_back_no_events()
+    await scenario_med2_on_event_can_be_async()
+    await scenario_med2_streaming_backend_drives_full_loop()
     print("ok")
 
 
@@ -445,6 +450,118 @@ async def scenario_b8_default_return_shape_unchanged() -> None:
         return
     raise AssertionError("legacy callers must still see RuntimeError on exhaustion "
                          "(only return_meta=True suppresses the raise)")
+
+
+# ---- MED-002: run_tool_loop consumes provider.stream(); on_event seam -------
+
+class _StreamingToolBackend:
+    """A streaming backend (ApiProvider shape) scripted turn-by-turn. Unlike
+    the turn-only stubs, this one implements stream() so run_tool_loop's
+    event-forwarding path is exercised. Each call to stream() emits the next
+    scripted turn's events: start -> [text_delta] -> [toolcall_end...] -> done."""
+
+    def __init__(self, turns):
+        self._turns = list(turns)        # each: {"text": str?, "calls": [{id,name,args}]?}
+        self._i = 0
+
+    def stream(self, context, **opts):
+        return self._iter()
+
+    async def _iter(self):
+        yield {"type": "start"}
+        spec = self._turns[self._i] if self._i < len(self._turns) else {"text": ""}
+        self._i += 1
+        text = spec.get("text")
+        if text:
+            yield {"type": "text_delta", "delta": text}
+        calls = spec.get("calls") or []
+        for c in calls:
+            yield {"type": "toolcall_end", "id": c.get("id", c["name"]),
+                   "name": c["name"], "args": c.get("args", {})}
+        yield {"type": "done", "stop_reason": "tool_use" if calls else "end_turn"}
+
+
+async def scenario_med2_on_event_receives_stream_events() -> None:
+    # The marquee MED-002 behavior: run_tool_loop forwards every StreamEvent
+    # to on_event during consumption. This is the H7-advisory / per-token-trace
+    # seam the whole ApiProvider protocol was built for. Before MED-002 the
+    # events were assembled inside backend.turn() and discarded — unreachable.
+    from yaah.agents.tool_loop import run_tool_loop
+
+    seen = []
+    backend = _StreamingToolBackend([
+        {"text": "reading", "calls": [{"id": "c1", "name": "rf", "args": {"p": "x"}}]},
+        {"text": "all set"},
+    ])
+
+    def rf(args):
+        return {"ok": True}
+
+    out = await run_tool_loop(backend, "go", [Tool(name="rf", impl=rf)],
+                              on_event=lambda ev: seen.append(ev["type"]))
+    assert out == "all set"
+    # turn 1: start, text_delta, toolcall_end, done ; turn 2: start, text_delta, done
+    assert "toolcall_end" in seen, seen
+    assert seen.count("text_delta") == 2, seen
+    assert seen.count("start") == 2 and seen.count("done") == 2, seen
+
+
+async def scenario_med2_turn_only_backend_falls_back_no_events() -> None:
+    # A turn-only backend (no .stream()) must STILL drive the loop via the
+    # backend.turn() fallback. on_event simply never fires (documented).
+    from yaah.agents.tool_loop import run_tool_loop
+
+    class _TurnOnly:
+        def __init__(self): self._t = 0
+        async def turn(self, messages, schemas, *, model=None, **opts):
+            self._t += 1
+            if self._t == 1:
+                return {"calls": [{"id": "c1", "name": "rf", "args": {}}]}
+            return {"text": "done via turn"}
+
+    seen = []
+    out = await run_tool_loop(_TurnOnly(), "go", [Tool(name="rf", impl=lambda a: {"ok": 1})],
+                              on_event=lambda ev: seen.append(ev))
+    assert out == "done via turn"
+    assert seen == [], "on_event must not fire for a turn-only backend (no stream)"
+
+
+async def scenario_med2_on_event_can_be_async() -> None:
+    # on_event may be an async callable — run_tool_loop awaits it.
+    from yaah.agents.tool_loop import run_tool_loop
+
+    seen = []
+
+    async def sink(ev):
+        seen.append(ev["type"])
+
+    backend = _StreamingToolBackend([{"text": "answer"}])
+    out = await run_tool_loop(backend, "go", [], on_event=sink)
+    assert out == "answer"
+    assert seen == ["start", "text_delta", "done"], seen
+
+
+async def scenario_med2_streaming_backend_drives_full_loop() -> None:
+    # Regression: a streaming backend drives a multi-turn tool loop end-to-end
+    # (tool dispatched, result fed back, final text) WITHOUT on_event — the
+    # default path post-MED-002 must behave exactly as the old turn() path.
+    from yaah.agents.tool_loop import run_tool_loop
+
+    calls_made = []
+
+    def rf(args):
+        calls_made.append(args)
+        return {"content": "file body"}
+
+    backend = _StreamingToolBackend([
+        {"calls": [{"id": "c1", "name": "rf", "args": {"p": "a.txt"}}]},
+        {"text": "the file says: file body"},
+    ])
+    out, meta = await run_tool_loop(backend, "read a.txt", [Tool(name="rf", impl=rf)],
+                                    return_meta=True)
+    assert out == "the file says: file body"
+    assert meta["outcome"] == "completed" and meta["turns"] == 2, meta
+    assert calls_made == [{"p": "a.txt"}], calls_made
 
 
 if __name__ == "__main__":
