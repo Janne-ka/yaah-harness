@@ -341,8 +341,8 @@ class ClaudeCliBackend:
 
 def _prompt_from_messages(messages: List[Dict[str, Any]], system: Optional[str]) -> str:
     """Stitch a context.messages list into a single prompt string for claude -p.
-    Picks the most recent user-role string content (matching the LegacyBackendAdapter
-    convention) and prepends a system preamble if present. Multi-turn conversation
+    Picks the most recent user-role string content and prepends a system
+    preamble if present. Multi-turn conversation
     history isn't passed through — claude -p has no stdin format for it; the
     --output-format stream-json upgrade is where real conversations become possible."""
     user_text = ""

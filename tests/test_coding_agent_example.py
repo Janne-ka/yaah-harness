@@ -7,7 +7,7 @@ the buggy fixture; the model decisions are scripted (no model calls,
 no network) so the test is fast + deterministic + CI-safe.
 
 What this test proves (after opus B4 review, narrowed):
-- The example's pipeline.json + local.json load without error
+- The example's pipeline_yaah_driven.json + local.json load without error
 - `call_target` resolves `fn:tools:edit_file` and the patch lands on disk
   (post-state assertions on the file content)
 - The agent_loop walks all 5 scripted turns and exits cleanly with
@@ -17,11 +17,12 @@ What this test proves (after opus B4 review, narrowed):
 What this test does NOT prove:
 - That `read_file` and `run_tests` tool RESULTS round-trip back to the
   model — the fake_tool provider doesn't condition next-turn output on
-  prior tool results. A regression that makes those tools always
-  return errors would still ship the asserted post-state because the
-  scripted edit-turn fires unconditionally. The honest verification
-  for tool-result round-trip is via the real-claude smoke test
-  documented in README.md.
+  prior tool results, so this e2e smoke can't prove it. The round-trip
+  property IS covered, at the loop level, by
+  test_agent_tools.scenario_test001_tool_result_round_trips_to_model
+  (the backend's 2nd turn derives its answer from the tool result, so a
+  broken round-trip fails the test). The real-claude smoke in README.md
+  is the integration-level check.
 - The hardened tools' SECURITY contract (workdir confinement, symlink
   refusal, no-shell run_tests) — that's covered by
   test_coding_agent_tools_security.py.
@@ -56,11 +57,11 @@ def _scaffold_workdir(td: str) -> str:
 def _write_local_for_workdir(td: str, work: str) -> str:
     """Generate a per-test local.json that overrides the input fixture's
     path to absolute (so the agent's tool calls land in the tmpdir). Copies
-    the example's pipeline.json + prompts + tools.py into the tmpdir so the
+    the example's pipeline_yaah_driven.json + prompts + tools.py into the tmpdir so the
     runtime resolves relative refs against the test's working tree."""
     # Copy the pipeline + prompts + tools into the test directory so
     # relative paths resolve from there.
-    for name in ("pipeline.json", "tools.py", "prompts"):
+    for name in ("pipeline_yaah_driven.json", "tools.py", "prompts"):
         src = os.path.join(EXAMPLE_DIR, name)
         dst = os.path.join(td, name)
         if os.path.isdir(src):
@@ -75,18 +76,13 @@ def _write_local_for_workdir(td: str, work: str) -> str:
                            "currently fails. Read the file, find the wrong operator, edit it, "
                            "run the test to verify, then signal done.",
                    "workdir": work}, f)
-    # Read the canonical local.json so the scripted-fix turns stay
-    # co-located with the example; rewrite paths to absolute tmpdir.
+    # Read the canonical local.json. The scripted tool paths are RELATIVE and
+    # resolve against YAAH_CODING_AGENT_WORKDIR (set to `work` below), so no
+    # path substitution is needed — only the input ref is repointed.
     src_local = os.path.join(EXAMPLE_DIR, "local.json")
     with open(src_local) as f:
         local = json.load(f)
-    # Rewrite scripted tool-call args to use the absolute tmpdir paths.
-    # The local.json template uses {{WORK}} placeholder for the path the
-    # test must substitute.
-    raw = json.dumps(local)
-    raw = raw.replace("{{WORK}}", work)
-    raw = raw.replace('"input": "fixtures/input.json"', '"input": "input.json"')
-    local = json.loads(raw)
+    local["input"] = "input.json"
     local_path = os.path.join(td, "local.json")
     with open(local_path, "w") as f:
         json.dump(local, f)
@@ -151,12 +147,12 @@ def test_coding_agent_example_fixes_bug_end_to_end():
             post_result.returncode, post_result.stdout.decode())
 
 
-def test_pipeline_native_and_claude_json_validate():
-    """The claude variant uses pipeline_native.json (single `agent` node with
+def test_model_driven_and_claude_json_validate():
+    """The claude variant uses pipeline_model_driven.json (single `agent` node with
     no YAAH tools, claude uses its own --allowedTools loop). End-to-end run
     needs a real claude binary and ~$0.01; CI just validates the config.
 
-    This test catches: misconfigured pipeline.json/local.json shape; missing
+    This test catches: misconfigured pipeline/local.json shape; missing
     keys; bad provider name; broken extends. The real fix-bug-end-to-end
     smoke test against claude is documented in examples/coding-agent/README.md.
     """
@@ -174,5 +170,5 @@ def test_pipeline_native_and_claude_json_validate():
 
 if __name__ == "__main__":
     test_coding_agent_example_fixes_bug_end_to_end()
-    test_pipeline_native_and_claude_json_validate()
+    test_model_driven_and_claude_json_validate()
     print("OK")

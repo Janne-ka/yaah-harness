@@ -1,5 +1,13 @@
 # ApiProvider — architecture
 
+> **Status note (2026-06-23):** the migration is complete. The legacy
+> `ModelBackend`/`ToolBackend` Protocols were removed in B6, and the
+> `LegacyBackendAdapter` bridge was removed in MED-001 (every backend now
+> implements `stream()` natively; a new backend author writes `stream()`,
+> not the old `turn()`). The `LegacyBackendAdapter` sections and the
+> `legacy-adapter-bridge.svg` / `migration-shape.svg` diagrams below are
+> **historical** — kept for the migration story, not current code.
+
 `ApiProvider` is the streaming model interface that replaces `ModelBackend`
 / `ToolBackend` over the course of Phase 1b. Where the legacy protocol is
 two collected-result methods (`complete() -> str`, `turn() -> {text|calls}`),

@@ -1,13 +1,16 @@
-"""ApiProvider — the streaming model interface that will replace ModelBackend.
+"""ApiProvider — the streaming model interface (replaced the legacy ModelBackend).
 
-Used by: future call sites that want event-level visibility (token deltas,
-tool-call assembly, usage events). Implemented by: forthcoming native
-streaming backends (B2+) and LegacyBackendAdapter (this file) which wraps a
-current ModelBackend/ToolBackend.
-Where: a NEW seam alongside `model_backend.py` — both protocols coexist
-through Phase 1b. Module-level helpers `complete()` and `turn()` give
-callers the OLD return shapes while routing through the new protocol, so
-migration happens one consumer at a time.
+Used by: call sites that want event-level visibility (token deltas, tool-call
+assembly, usage events) — e.g. run_tool_loop consumes provider.stream()
+directly. Implemented by: every backend natively (FakeBackend, ScriptedBackend,
+FakeToolBackend, ScriptedToolBackend, LiteLLMBackend, ClaudeCliBackend,
+RoutingBackend).
+Where: the model seam. The legacy ModelBackend/ToolBackend Protocols were
+removed in B6, and the LegacyBackendAdapter bridge was removed in MED-001
+(its migration purpose was complete — a new backend author implements
+stream(), not the old turn()). Module-level helpers `complete()` and `turn()`
+project a stream into the OLD return shapes for callers that still want a
+collected result.
 Why: the current `complete() -> str` / `turn() -> {text|calls}` pair is a
 collected-result shape. It can't surface partial outputs, makes streaming
 backends impossible to wire cleanly, and forces the tool-loop to assemble
@@ -236,91 +239,3 @@ async def turn(provider: ApiProvider, messages: List[Dict[str, Any]],
     if calls:
         out["calls"] = calls
     return out
-
-
-# --- Adapter: legacy ModelBackend / ToolBackend -> ApiProvider --------------
-
-class LegacyBackendAdapter:
-    """Wrap an old ModelBackend (or ToolBackend) as an ApiProvider.
-
-    Non-streaming sources collapse to a single text_delta. The whole point
-    is that existing FakeBackend / ScriptedBackend / ClaudeCliBackend /
-    LiteLLMBackend implementations keep working as the new protocol gains
-    consumers, with zero changes to their code. Once every consumer has
-    migrated, B2's per-backend native implementations replace the adapter
-    one backend at a time."""
-
-    def __init__(self, backend: Any) -> None:
-        if not hasattr(backend, "complete"):
-            raise TypeError(
-                "LegacyBackendAdapter requires a ModelBackend (has .complete()); "
-                "got {!r}".format(type(backend).__name__))
-        self._backend = backend
-
-    def stream(self, context: Context, **opts: Any) -> AsyncIterator[StreamEvent]:
-        # `_iter` is an async generator function — calling it (no await) returns
-        # the generator, which IS an AsyncIterator. Matches the Protocol signature
-        # so consumers can `async for ev in provider.stream(ctx)` directly.
-        return self._iter(context, opts)
-
-    async def _iter(self, context: Context, opts: Dict[str, Any]) -> AsyncIterator[StreamEvent]:
-        yield {"type": "start"}
-        model = context.get("model")
-        system = context.get("system")
-        tools = context.get("tools") or []
-        messages = context.get("messages") or []
-        try:
-            if tools:
-                if not hasattr(self._backend, "turn"):
-                    raise TypeError("legacy backend {!r} has no .turn() — cannot serve tool calls".format(
-                        type(self._backend).__name__))
-                kw: Dict[str, Any] = {**opts}
-                if model is not None:
-                    kw["model"] = model
-                if system is not None:
-                    kw["system"] = system
-                result = await self._backend.turn(messages, tools, **kw)
-                text = result.get("text")
-                calls = result.get("calls") or []
-                if text:
-                    yield {"type": "text_delta", "delta": text}
-                for call in calls:
-                    if not isinstance(call, dict) or not call.get("name"):
-                        continue
-                    yield {"type": "toolcall_end", "id": call.get("id", call.get("name", "")),
-                           "name": call.get("name", ""), "args": call.get("args", {}) or {}}
-                yield {"type": "done", "stop_reason": "tool_use" if calls else "end_turn"}
-            else:
-                # No tools — collapse to one message via .complete(). Build the prompt
-                # from the messages list (last user message), keeping legacy semantics.
-                prompt = _last_user_text(messages)
-                kw = {**opts}
-                if model is not None:
-                    kw["model"] = model
-                if system is not None:
-                    # Legacy ModelBackend.complete() has no `system` arg; pass via opts.
-                    # Backends that ignore unknown kwargs are fine; those that don't
-                    # would have already broken in legacy code paths.
-                    kw["system"] = system
-                text = await self._backend.complete(prompt, **kw)
-                if text:
-                    yield {"type": "text_delta", "delta": text}
-                yield {"type": "done", "stop_reason": "end_turn"}
-        except Exception as exc:  # pragma: no cover - exercised in test_api_provider
-            yield {"type": "error", "message": "{}: {}".format(type(exc).__name__, exc)}
-
-
-def _last_user_text(messages: List[Dict[str, Any]]) -> str:
-    """Best-effort: pull the most recent user-role string content from a
-    messages list. Matches the convention complete()/turn() callers
-    already use (a single-shot user prompt)."""
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            content = msg.get("content")
-            if isinstance(content, str):
-                return content
-            # Anthropic-style content blocks: concatenate text blocks.
-            if isinstance(content, list):
-                return "".join(b.get("text", "") for b in content
-                               if isinstance(b, dict) and b.get("type") == "text")
-    return ""

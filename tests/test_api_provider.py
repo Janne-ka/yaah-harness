@@ -1,14 +1,17 @@
-"""Tests for the new ApiProvider protocol (B1).
+"""Tests for the ApiProvider protocol (B1) + module helpers.
+
+After MED-001 the LegacyBackendAdapter was removed (its migration purpose
+was complete — every backend implements stream() natively post-B2, and a
+new backend author implements stream(), not the legacy turn()). These tests
+now exercise the LIVE surface: the module-level complete()/turn() helpers
+and assemble_message(), driven by native streaming backends.
 
 Cases:
- 1. LegacyBackendAdapter wraps FakeBackend (complete-only) correctly
- 2. LegacyBackendAdapter wraps a tool-capable backend correctly
- 3. Module-level complete() matches FakeBackend.complete() output
- 4. Module-level turn() round-trips tool calls through adapter -> assembly
- 5. Adapter rejects non-backends
- 6. Adapter's tool path errors when wrapping a complete-only backend
- 7. assemble_message merges adjacent text deltas into one text block
- 8. Errors during streaming surface as `error` events (not raised through)
+ 1. complete() collects text from a native streaming backend
+ 2. turn() projects tool_use blocks into the {text, calls} shape
+ 3. assemble_message merges adjacent text deltas into one text block
+ 4. assemble_message raises on an error event
+ 5. a native backend structurally satisfies ApiProvider
 """
 from __future__ import annotations
 
@@ -20,95 +23,52 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from yaah.agents.api_provider import (  # noqa: E402
-    ApiProvider, LegacyBackendAdapter, assemble_message, complete, turn,
+    ApiProvider, assemble_message, complete, turn,
 )
 from yaah.agents.fake_backend import FakeBackend  # noqa: E402
 
 
-# --- Minimal tool-capable backend for test 2 (no production import needed) ---
-class _CannedToolBackend:
-    def __init__(self, response):
-        self._response = response
+# --- A minimal native streaming tool backend (emits StreamEvents directly) ---
+class _StreamingToolBackend:
+    """ApiProvider that yields a scripted single turn's events. Replaces the
+    old _CannedToolBackend + LegacyBackendAdapter pairing for the turn() test."""
 
-    async def complete(self, prompt, *, model=None, **opts):
-        return ""
+    def __init__(self, *, text=None, calls=None):
+        self._text = text
+        self._calls = calls or []
 
-    async def turn(self, messages, tools, *, model=None, **opts):
-        return self._response
+    def stream(self, context, **opts):
+        return self._iter()
 
-
-async def _drain(it):
-    return [ev async for ev in it]
-
-
-def test_adapter_wraps_complete_only_backend():
-    backend = FakeBackend(responses=["hello world"])
-    adapter = LegacyBackendAdapter(backend)
-    events = asyncio.run(_drain(adapter.stream({"messages": [{"role": "user", "content": "hi"}]})))
-    types = [e["type"] for e in events]
-    assert types == ["start", "text_delta", "done"], types
-    assert events[1]["delta"] == "hello world"
-    assert events[2]["stop_reason"] == "end_turn"
+    async def _iter(self):
+        yield {"type": "start"}
+        if self._text:
+            yield {"type": "text_delta", "delta": self._text}
+        for c in self._calls:
+            yield {"type": "toolcall_end", "id": c["id"], "name": c["name"],
+                   "args": c.get("args", {})}
+        yield {"type": "done", "stop_reason": "tool_use" if self._calls else "end_turn"}
 
 
-def test_adapter_wraps_tool_backend_with_calls():
-    backend = _CannedToolBackend({
-        "calls": [{"id": "c1", "name": "read", "args": {"path": "/a"}}],
-    })
-    adapter = LegacyBackendAdapter(backend)
-    ctx = {"messages": [{"role": "user", "content": "go"}],
-           "tools": [{"name": "read", "description": "", "input_schema": {}}]}
-    events = asyncio.run(_drain(adapter.stream(ctx)))
-    types = [e["type"] for e in events]
-    assert types == ["start", "toolcall_end", "done"], types
-    tc = events[1]
-    assert tc["id"] == "c1" and tc["name"] == "read" and tc["args"] == {"path": "/a"}
-    assert events[2]["stop_reason"] == "tool_use"
-
-
-def test_module_complete_matches_legacy_output():
-    backend = FakeBackend(responses=["the answer"])
-    legacy_out = asyncio.run(backend.complete("ignored"))
-    # NEW backend instance so the canned-response cursor starts fresh.
-    new_out = asyncio.run(complete(LegacyBackendAdapter(FakeBackend(responses=["the answer"])), "ignored"))
-    assert legacy_out == new_out == "the answer"
+def test_module_complete_collects_text_from_native_stream():
+    # FakeBackend is a native ApiProvider (B2.1); complete() drains its stream
+    # into a single string — same result as the backend's own complete().
+    out = asyncio.run(complete(FakeBackend(responses=["the answer"]), "ignored"))
+    assert out == "the answer"
 
 
 def test_module_turn_roundtrips_tool_calls():
-    backend = _CannedToolBackend({
-        "text": "I'll read it",
-        "calls": [{"id": "c1", "name": "read", "args": {"path": "/x"}},
-                  {"id": "c2", "name": "read", "args": {"path": "/y"}}],
-    })
-    provider = LegacyBackendAdapter(backend)
-    result = asyncio.run(turn(provider, [{"role": "user", "content": "go"}],
+    backend = _StreamingToolBackend(
+        text="I'll read it",
+        calls=[{"id": "c1", "name": "read", "args": {"path": "/x"}},
+               {"id": "c2", "name": "read", "args": {"path": "/y"}}])
+    result = asyncio.run(turn(backend, [{"role": "user", "content": "go"}],
                               [{"name": "read", "description": "", "input_schema": {}}]))
     assert result["text"] == "I'll read it"
     assert result["calls"] == [
         {"id": "c1", "name": "read", "args": {"path": "/x"}},
         {"id": "c2", "name": "read", "args": {"path": "/y"}},
     ]
-
-
-def test_adapter_rejects_non_backend():
-    try:
-        LegacyBackendAdapter(object())
-    except TypeError as e:
-        assert "ModelBackend" in str(e)
-    else:
-        raise AssertionError("expected TypeError")
-
-
-def test_adapter_tool_path_errors_on_complete_only_backend():
-    adapter = LegacyBackendAdapter(FakeBackend(responses=["x"]))
-    ctx = {"messages": [{"role": "user", "content": "go"}],
-           "tools": [{"name": "read", "description": "", "input_schema": {}}]}
-    events = asyncio.run(_drain(adapter.stream(ctx)))
-    # The adapter caught the TypeError and emitted an error event — the stream
-    # is still a clean (start, error) sequence, not a raised exception.
-    types = [e["type"] for e in events]
-    assert types == ["start", "error"], types
-    assert "no .turn()" in events[1]["message"]
 
 
 def test_assemble_message_merges_text_deltas():
@@ -142,20 +102,16 @@ def test_assemble_message_raises_on_error_event():
         raise AssertionError("expected RuntimeError")
 
 
-def test_adapter_satisfies_apiprovider_protocol():
-    adapter = LegacyBackendAdapter(FakeBackend(responses=["x"]))
-    assert isinstance(adapter, ApiProvider), \
-        "LegacyBackendAdapter should structurally satisfy ApiProvider"
+def test_native_backend_satisfies_apiprovider_protocol():
+    assert isinstance(FakeBackend(responses=["x"]), ApiProvider), \
+        "FakeBackend should structurally satisfy ApiProvider (native stream())"
+    assert isinstance(_StreamingToolBackend(text="x"), ApiProvider)
 
 
 if __name__ == "__main__":
-    test_adapter_wraps_complete_only_backend()
-    test_adapter_wraps_tool_backend_with_calls()
-    test_module_complete_matches_legacy_output()
+    test_module_complete_collects_text_from_native_stream()
     test_module_turn_roundtrips_tool_calls()
-    test_adapter_rejects_non_backend()
-    test_adapter_tool_path_errors_on_complete_only_backend()
     test_assemble_message_merges_text_deltas()
     test_assemble_message_raises_on_error_event()
-    test_adapter_satisfies_apiprovider_protocol()
+    test_native_backend_satisfies_apiprovider_protocol()
     print("PASS")

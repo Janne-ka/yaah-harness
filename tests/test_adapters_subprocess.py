@@ -573,6 +573,30 @@ async def claude_stream_timeout_kills_proc_and_yields_error() -> None:
     assert proc.killed, "wedged claude must be killed on timeout"
 
 
+async def claude_stream_parses_captured_fixture_end_to_end() -> None:
+    # TEST-002 (opus test-quality review): the other stream scenarios use tiny
+    # hand-curated byte lines. This one feeds the REAL captured session
+    # (sanitized) through the parser line-by-line, so a regression in the
+    # multi-event sequence (system init -> thinking -> tool_use -> tool_result
+    # -> text -> result) is caught against an actual claude wire shape.
+    import os
+    fixture = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "fixtures", "claude_stream_json", "tool_use_session.jsonl")
+    with open(fixture, "rb") as f:
+        lines = [ln if ln.endswith(b"\n") else ln + b"\n" for ln in f.read().splitlines()]
+    proc = FakeStreamProc(stdout_lines=lines)
+    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    events = await _drain(be.stream({"messages": [{"role": "user", "content": "read it"}]}))
+    types = [e["type"] for e in events]
+    # The session has thinking (skipped) + an internal tool_use/tool_result
+    # (claude-internal, NOT surfaced) + one final assistant text + result.
+    assert types == ["start", "text_delta", "done"], types
+    assert "toolcall_end" not in types, "claude-internal tool calls must not surface"
+    assert events[1]["delta"] == "The file contains: example file contents"
+    assert events[2]["stop_reason"] == "end_turn"
+    assert events[2]["usage"]["input_tokens"] == 22
+
+
 async def claude_stream_handles_none_stdout_without_crashing() -> None:
     # CRIT-001 mirror: if the spawned process died before its stdout pipe
     # opened, `proc.stdout` is None and the readline loop crashed with
@@ -614,6 +638,7 @@ async def main() -> None:
         claude_stream_drains_stdin_before_closing,
         claude_stream_timeout_kills_proc_and_yields_error,
         claude_stream_drains_stderr_before_wait,
+        claude_stream_parses_captured_fixture_end_to_end,
         claude_stream_handles_none_stdout_without_crashing,
         git_diff_builds_argv_with_ref_paths_and_context,
         git_diff_intent_to_add_runs_add_first,

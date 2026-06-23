@@ -260,6 +260,7 @@ async def main() -> None:
     await scenario_med2_turn_only_backend_falls_back_no_events()
     await scenario_med2_on_event_can_be_async()
     await scenario_med2_streaming_backend_drives_full_loop()
+    await scenario_test001_tool_result_round_trips_to_model()
     print("ok")
 
 
@@ -539,6 +540,36 @@ async def scenario_med2_on_event_can_be_async() -> None:
     out = await run_tool_loop(backend, "go", [], on_event=sink)
     assert out == "answer"
     assert seen == ["start", "text_delta", "done"], seen
+
+
+async def scenario_test001_tool_result_round_trips_to_model() -> None:
+    # TEST-001 (opus test-quality review): the coding-agent e2e smoke scripts
+    # tool calls UNCONDITIONALLY, so a tool that returned garbage would still
+    # ship the asserted post-state — it never proves the result round-trips
+    # back to the model. This closes that gap at the loop level: the backend's
+    # SECOND turn inspects the tool-result message from turn 1 and only answers
+    # correctly if the real result reached it. If round-trip breaks, this fails.
+    from yaah.agents.tool_loop import run_tool_loop
+
+    class _ConditionalBackend:
+        """Turn 2's answer is DERIVED from the tool result in the message
+        history — so a broken round-trip produces a wrong (failing) answer."""
+        def __init__(self): self._t = 0
+        async def turn(self, messages, schemas, *, model=None, **opts):
+            self._t += 1
+            if self._t == 1:
+                return {"calls": [{"id": "c1", "name": "lookup", "args": {}}]}
+            # find the tool-result message and echo its content
+            tool_msgs = [m for m in messages if m.get("role") == "tool"]
+            assert tool_msgs, "tool result never reached the model (round-trip broken)"
+            return {"text": "the tool said: " + tool_msgs[-1]["content"]}
+
+    def lookup(args):
+        return "SECRET-42"
+
+    out = await run_tool_loop(_ConditionalBackend(), "go", [Tool(name="lookup", impl=lookup)])
+    # The answer can ONLY be this if the tool's return value round-tripped.
+    assert "SECRET-42" in out, out
 
 
 async def scenario_med2_streaming_backend_drives_full_loop() -> None:

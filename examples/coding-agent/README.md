@@ -21,8 +21,8 @@ and different backend requirements:
 
 | pattern | node type | backend needs | who owns the inside loop |
 |---|---|---|---|
-| YAAH-driven | `agent_loop` + `tools` dict | `turn(messages, tools)` (model-side function calling) | **YAAH** dispatches each tool call via `call_target`; observes every turn |
-| Model-driven | `agent` (no YAAH tools) | `complete(prompt)` | **the model** runs its own loop natively; YAAH just calls and waits |
+| YAAH-driven | `agent_loop` + `tools` dict | function-calling backend (`stream()` with tool events; e.g. LiteLLM) | **YAAH** dispatches each tool call via `call_target`; observes every turn |
+| Model-driven | `agent` (no YAAH tools) | plain `stream()` / `complete()` (any backend) | **the model** runs its own loop natively; YAAH just calls and waits |
 
 The honest tradeoff:
 
@@ -42,31 +42,29 @@ The honest tradeoff:
   observability across multiple stages, prompt rendering. Claude just
   runs its inside loop.
 
-  **Honest scope of THIS isolated example:** `pipeline_native.json` is
-  a single agent node with no gates, no fan-in, no retries, no
-  composition. In this configuration YAAH is doing very little the
-  bare CLI couldn't (`claude -p "$(cat prompts/coding_agent_native.md)"
-  --allowedTools Read,Edit,Bash` reaches the same end). The YAAH value
-  surfaces when this stage is composed with others — a scout stage
-  before, a verify gate after, observability across the whole flow.
-  This example shows the harness CAN host claude_cli as an agent stage,
-  not that the harness adds value here.
+  This example keeps the model-driven variant to ONE stage so the
+  mechanics are legible. The harness's payoff shows up at composition
+  time: drop a scout stage before this one, a verify gate after, and
+  observability across the whole flow — none of which the bare CLI
+  gives you. (For a single isolated stage, `claude -p "$(cat
+  prompts/coding_agent_native.md)" --allowedTools Read,Edit,Bash`
+  reaches the same end; the harness is the multi-stage orchestration
+  around it, not this one node.)
 
 ## How to run
 
 ### Offline (fake_tool, YAAH-driven, no model, no network, no cost)
 
-Uses `pipeline.json` (agent_loop) + `local.json` (fake_tool with
-scripted-fix turns). This is what `tests/test_coding_agent_example.py`
+Uses `pipeline_yaah_driven.json` (agent_loop) + `local.json` (fake_tool
+with scripted-fix turns). This is what `tests/test_coding_agent_example.py`
 exercises in CI.
 
 ```bash
 cd examples/coding-agent
-# the hardened tools confine all FS access here and refuse to run without it
+# the hardened tools confine all FS access here and refuse to run without it.
+# scripted tool paths are relative and resolve against this dir — no sed needed.
 export YAAH_CODING_AGENT_WORKDIR="$PWD/fixtures/buggy_code"
-# the local.json uses {{WORK}} placeholder — point it at the fixture
-sed "s|{{WORK}}|$YAAH_CODING_AGENT_WORKDIR|g" local.json > /tmp/local.resolved.json
-PYTHONPATH=$PWD:../../src python3 -m yaah.runtime /tmp/local.resolved.json
+PYTHONPATH=$PWD:../../src python3 -m yaah.runtime local.json
 # verify the fix
 cd fixtures/buggy_code && python3 test_is_fizzbuzz.py
 # reset for the next run
@@ -81,7 +79,7 @@ end-state IS the fixed file.
 
 ### Real claude (claude_cli, model-driven)
 
-Uses `pipeline_native.json` (single `agent` node, no YAAH tools) +
+Uses `pipeline_model_driven.json` (single `agent` node, no YAAH tools) +
 `claude.json` (claude_cli with `allowed_tools: ["Read", "Edit", "Bash"]`).
 Claude uses its native tools to fix the file.
 
@@ -136,7 +134,7 @@ is a future upgrade (see `.notes/breaking-changes.md`, B2.5 entry).
 ## What this example proves about the harness
 
 - **The agent_loop primitive works end-to-end against scripted backends.**
-  pipeline.json + local.json: harness owns the loop, dispatches each
+  pipeline_yaah_driven.json + local.json: harness owns the loop, dispatches each
   tool call via `call_target`, observes every turn.
 - **`Tool` errors flow back as observations.** Try editing `local.json`
   to break the edit_file args (e.g. pass an `old_string` that doesn't

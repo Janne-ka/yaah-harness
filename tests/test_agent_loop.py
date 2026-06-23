@@ -175,6 +175,35 @@ def test_b8_dispatch_validation_precedes_tool_conversion():
     raise AssertionError("expected ValueError for tool spec missing 'dispatch'")
 
 
+def test_node_dispatch_routes_tool_through_comms():
+    # TEST-004 (opus test-quality review): every other agent_loop test uses
+    # `fn:` dispatch. The `node:` path — dispatching a tool call to another
+    # YAAH node over Comms — is the NOVELTY of AgentLoopNode vs a bare
+    # run_tool_loop, and had ZERO coverage. This drives a tool call to a
+    # registered node and verifies the result flows back into the loop.
+    from yaah.comms import InProcessComms
+    from yaah.core import NodeConfig
+
+    class Adder:  # a node that IS a tool, reached over Comms
+        async def invoke(self, input, config):
+            return input.reply(Kind.RESULT, sum=input.payload["a"] + input.payload["b"])
+
+    comms = InProcessComms()
+    comms.register("role:adder", Adder())
+    backend = FakeToolBackend(turns=[
+        {"calls": [{"id": "c1", "name": "add", "args": {"a": 2, "b": 3}}]},
+        {"text": "the sum is 5"},
+    ])
+    node = _make(backend, tools={
+        "add": {"description": "add two ints", "input_schema": {},
+                "dispatch": "node:role:adder"},
+    }, comms=comms, max_turns=5)
+    env = Envelope(Kind.TASK, payload={"goal": "add 2 and 3"})
+    result = _run(node.invoke(env, {}))
+    assert result.payload["outcome"] == "completed", result.payload
+    assert result.payload["answer"] == "the sum is 5", result.payload
+
+
 def test_non_dict_input_schema_rejected_at_construction():
     # MED-011 (opus bugs review): a non-dict input_schema (an author typo like
     # "object" instead of {"type": "object"}) was accepted at construction and
@@ -192,6 +221,7 @@ def test_non_dict_input_schema_rejected_at_construction():
 
 if __name__ == "__main__":
     test_loop_completes_with_final_text()
+    test_node_dispatch_routes_tool_through_comms()
     test_non_dict_input_schema_rejected_at_construction()
     test_tool_error_flows_back_as_observation()
     test_unknown_tool_is_an_error_observation_not_a_crash()
