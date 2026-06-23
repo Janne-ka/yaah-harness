@@ -2,16 +2,21 @@
 
 How YAAH lets an agent call tools. Short reference.
 
-> **⚠ Design target, not current state.** None of the JSON snippets
-> in this doc currently load via `yaah.runtime`. `agent_loop`,
-> `mcp_tool`, `mcp_server`, and `fake_tool` are not registered in
-> `src/yaah/build/builders.py`. The `stream()` provider protocol
-> described below is the v2 target; today's code implements
-> `ToolBackend.turn(messages, tools)`. The spike at
-> `src/yaah/adapters/nodes/agent_loop_node.py` is wired by hand for
-> examples, not by the builder registry. **Read this as the
-> architecture we're building toward, not what runs today.** Tracking
-> via [.notes/two-layer-proposal.md](../.notes/two-layer-proposal.md).
+> **Status (2026-06-23) — mostly shipped.** `agent_loop` is registered
+> in `src/yaah/build/builders.py` and `fake_tool` in
+> `src/yaah/runtime_factories.py`; both are exercised end-to-end by
+> [`examples/coding-agent/`](../examples/coding-agent/) and
+> `tests/test_coding_agent_example.py`. The `stream()` provider protocol
+> below is **implemented** — `claude_cli` parses real
+> `--output-format stream-json` events, and `run_tool_loop` consumes
+> `provider.stream()` directly (forwarding events to an `on_event` hook).
+> The agent_loop node lives at `src/yaah/nodes/agent_loop_node.py` and is
+> built by the registry, not hand-wired.
+> **Still design target:** `mcp_tool` / `mcp_server` node types are NOT
+> yet registered — MCP tools go through `node:` dispatch to a future
+> adapter node (see [`external_call.py`](../src/yaah/external_call.py)).
+> Token-level streaming for `litellm` collapses to a single call today
+> (real chunk streaming is a follow-up).
 
 ## The three layers
 
@@ -171,8 +176,10 @@ suite proving them is part of the implementation plan, not shipped.
 - Tool catalog: build once per stage `invoke()`, never per turn.
 - MCP servers: one connection per server, held for runtime lifetime
   (or per-run if configured).
-- Parallel tool calls in one turn: dispatched concurrently via
-  `asyncio.gather` unless any tool in the batch is `sequential`.
+- Parallel tool calls in one turn: dispatched **sequentially** today
+  (`run_tool_loop` runs each call in order). Concurrent dispatch via
+  `asyncio.gather` is a future option — see the "What's NOT in this flow"
+  note in [`docs/architecture/agent-loop/flow.md`](architecture/agent-loop/flow.md).
 
 ## Where the code lives
 
