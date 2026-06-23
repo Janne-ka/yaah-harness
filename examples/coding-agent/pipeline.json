@@ -27,17 +27,16 @@
           },
           "dispatch": "fn:tools:edit_file"
         },
-        "run_bash": {
-          "description": "Run a shell command. Returns {exit_code, stdout, stderr}. Use for running tests / builds.",
+        "run_tests": {
+          "description": "Run a test file to verify your fix. Returns {exit_code, stdout, stderr}. The 'test' arg is a path (relative to the working directory) to a runnable test file; it is run with a fixed interpreter, no shell.",
           "input_schema": {
             "type": "object",
             "properties": {
-              "cmd": {"type": "string"},
-              "cwd": {"type": "string"}
+              "test": {"type": "string"}
             },
-            "required": ["cmd"]
+            "required": ["test"]
           },
-          "dispatch": "fn:tools:run_bash"
+          "dispatch": "fn:tools:run_tests"
         },
         "done": {
           "description": "Signal that the task is complete. Carries a one-line summary of what was fixed.",

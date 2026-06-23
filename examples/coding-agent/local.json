@@ -14,9 +14,8 @@
            "new_string": "n % 3 == 0 and n % 5 == 0"
          }}]},
         {"text": "Edit applied. Running the test to verify.",
-         "calls": [{"id": "c3", "name": "run_bash", "args": {
-           "cmd": "python3 test_is_fizzbuzz.py",
-           "cwd": "{{WORK}}"
+         "calls": [{"id": "c3", "name": "run_tests", "args": {
+           "test": "test_is_fizzbuzz.py"
          }}]},
         {"text": "Test passes — bug fixed.",
          "calls": [{"id": "c4", "name": "done", "args": {

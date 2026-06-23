@@ -15,13 +15,16 @@ What this test proves (after opus B4 review, narrowed):
 - The accompanying test_is_fizzbuzz.py passes after the patch
 
 What this test does NOT prove:
-- That `read_file` and `run_bash` tool RESULTS round-trip back to the
+- That `read_file` and `run_tests` tool RESULTS round-trip back to the
   model — the fake_tool provider doesn't condition next-turn output on
   prior tool results. A regression that makes those tools always
   return errors would still ship the asserted post-state because the
   scripted edit-turn fires unconditionally. The honest verification
   for tool-result round-trip is via the real-claude smoke test
   documented in README.md.
+- The hardened tools' SECURITY contract (workdir confinement, symlink
+  refusal, no-shell run_tests) — that's covered by
+  test_coding_agent_tools_security.py.
 - That a real model would make the right fix decisions (manual smoke
   test against claude.json — see examples/coding-agent/README.md)
 - That the pipeline runs against claude_cli or litellm (the validate
@@ -116,6 +119,9 @@ def test_coding_agent_example_fixes_bug_end_to_end():
         # to PYTHONPATH so 'fn:tools:read_file' resolves to the copy beside
         # the pipeline config.
         env["PYTHONPATH"] = td + os.pathsep + env["PYTHONPATH"]
+        # The hardened tools confine all filesystem access to this dir and
+        # refuse to run without it (HIGH-001..003 security fix).
+        env["YAAH_CODING_AGENT_WORKDIR"] = work
         result = subprocess.run(
             [sys.executable, "-m", "yaah.runtime", local_path],
             cwd=td, env=env, capture_output=True, text=True,
