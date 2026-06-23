@@ -115,14 +115,19 @@ class ClaudeCliBackend:
         # real `claude` binary.
         self._spawn = spawn or asyncio.create_subprocess_exec
 
-    def _build_args(self, model: Optional[str], opts: dict, *, json_output: bool = False) -> List[str]:
+    def _build_args(self, model: Optional[str], opts: dict, *,
+                    json_output: bool = False, stream_json: bool = False) -> List[str]:
         # per-call opts (from the agent's config) override the constructor defaults,
         # so tool permissions / permission-mode are PER-AGENT, not per-provider.
         permission_mode = opts.get("permission_mode", self._permission_mode)
         allowed_tools = opts.get("allowed_tools", self._allowed_tools)
         mcp = opts.get("mcp")  # a servers map resolved from the agent's mcp config
         args: List[str] = [self._binary, "-p"]
-        if json_output:  # cost capture on -> ask claude for usage (bug review L8)
+        if stream_json:
+            # claude requires --verbose alongside --output-format stream-json
+            # (the CLI rejects stream-json without it).
+            args += ["--output-format", "stream-json", "--verbose"]
+        elif json_output:  # cost capture on -> ask claude for usage (bug review L8)
             args += ["--output-format", "json"]
         if model:
             args += ["--model", model]
@@ -174,22 +179,100 @@ class ClaudeCliBackend:
         return self._iter(context, opts)
 
     async def _iter(self, context: _ap.Context, opts: Dict[str, Any]) -> AsyncIterator[_ap.StreamEvent]:
+        """B3 (2026-06-23): real `--output-format stream-json` parsing. Spawns
+        claude with --verbose --output-format stream-json, writes the prompt
+        to stdin, reads stdout line-by-line as JSONL, maps each claude event
+        to a StreamEvent.
+
+        What surfaces as YAAH events:
+          - assistant.content[text]   → text_delta
+          - result                    → done(stop_reason, usage)
+          - process exit != 0         → error
+        What does NOT surface (claude handles its own tool loop internally):
+          - assistant.content[tool_use], user.content[tool_result] are
+            claude-internal. Emitting them as toolcall_end would mislead
+            consumers into thinking they need to dispatch.
+          - assistant.content[thinking] is internal reasoning, not the
+            user-facing answer.
+        Other claude event types (system init, system api_retry, user,
+        rate_limit_event) are ignored — they're transport/diagnostic
+        noise, not user-visible content.
+
+        claude -p is single-prompt-shaped (no conversation history through
+        stdin); the most-recent user message becomes the prompt. Tool
+        definitions in context.tools are not surfaced — claude handles its
+        own tool loop natively via --allowedTools / --permission-mode.
+        """
         yield {"type": "start"}
-        # claude -p is single-prompt-shaped (no conversation history through
-        # stdin format). Extract the last user message + optional system
-        # preamble; matches what LegacyBackendAdapter does for complete-only
-        # backends. Tool definitions in context.tools are not surfaced — claude
-        # handles its own tool loop natively via --allowedTools.
         prompt = _prompt_from_messages(context.get("messages") or [],
                                        context.get("system"))
         model = context.get("model")
-        # Exceptions from complete() (TimeoutError, RuntimeError on exit) propagate
-        # naturally — preserves legacy behavior; tests catch them on the .complete()
-        # path. Consumers that want in-stream error events can wrap.
-        text = await self.complete(prompt, model=model, **opts)
-        if text:
-            yield {"type": "text_delta", "delta": text}
-        yield {"type": "done", "stop_reason": "end_turn"}
+        cwd = opts.get("cwd")
+        args = self._build_args(model, opts, stream_json=True)
+        proc = await self._spawn(
+            *args,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+        )
+        # Send the prompt on stdin and close it so claude sees EOF and starts.
+        # Real asyncio.subprocess writes to stdin via write+drain; the test
+        # FakeStdin.write is enough for the in-test path.
+        proc.stdin.write(prompt.encode())
+        if hasattr(proc.stdin, "close"):
+            proc.stdin.close()
+
+        # Read stream-json line by line. JSONL means one event per line;
+        # an empty `readline()` return signals EOF. Parse each line ONCE;
+        # text_delta events surface immediately; result captures terminator
+        # data; everything else is diagnostic noise.
+        usage: Optional[Dict[str, Any]] = None
+        stop_reason = "end_turn"
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            try:
+                obj = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                # Garbage line (blank, plain text notice from claude, partial
+                # buffer). Skip silently — the stream should not crash on
+                # noise outside the JSONL envelope.
+                continue
+            event_type = obj.get("type")
+            if event_type == "assistant":
+                msg = obj.get("message") or {}
+                for block in msg.get("content") or []:
+                    if not isinstance(block, dict):
+                        continue
+                    btype = block.get("type")
+                    if btype == "text":
+                        text = block.get("text") or ""
+                        if text:
+                            yield {"type": "text_delta", "delta": text}
+                    # thinking / tool_use: deliberately NOT surfaced
+                    # (claude-internal — see method docstring)
+            elif event_type == "result":
+                stop_reason = obj.get("stop_reason") or stop_reason
+                u = obj.get("usage")
+                if isinstance(u, dict):
+                    usage = u
+            # system / user / rate_limit_event: ignored (diagnostic noise)
+
+        await proc.wait()
+        if proc.returncode != 0:
+            err_bytes = await proc.stderr.read()
+            err_text = err_bytes.decode(errors="replace")[:500] if err_bytes else ""
+            yield {"type": "error",
+                   "message": "claude exit {}{}".format(
+                       proc.returncode, ": " + err_text if err_text else "")}
+            return
+
+        done: Dict[str, Any] = {"type": "done", "stop_reason": stop_reason}
+        if usage is not None:
+            done["usage"] = usage
+        yield done
 
 
 def _prompt_from_messages(messages: List[Dict[str, Any]], system: Optional[str]) -> str:
