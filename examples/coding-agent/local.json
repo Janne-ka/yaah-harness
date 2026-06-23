@@ -1,0 +1,36 @@
+{
+  "_note": "Offline fake_tool variant — the scripted turns below mimic a successful fix flow against a fixed-path test-owned workdir. The test substitutes {{WORK}} with an absolute tmpdir at run time; for manual invocation against the repo fixture, replace {{WORK}} with examples/coding-agent/fixtures/buggy_code before running.",
+  "transport": {"type": "inproc"},
+  "providers": {
+    "fake_tool": {
+      "type": "fake_tool",
+      "turns": [
+        {"text": "Let me read the buggy file first.",
+         "calls": [{"id": "c1", "name": "read_file", "args": {"path": "{{WORK}}/is_fizzbuzz.py"}}]},
+        {"text": "I see the bug — the operator is `or` instead of `and`. Fixing.",
+         "calls": [{"id": "c2", "name": "edit_file", "args": {
+           "path": "{{WORK}}/is_fizzbuzz.py",
+           "old_string": "n % 3 == 0 or n % 5 == 0",
+           "new_string": "n % 3 == 0 and n % 5 == 0"
+         }}]},
+        {"text": "Edit applied. Running the test to verify.",
+         "calls": [{"id": "c3", "name": "run_bash", "args": {
+           "cmd": "python3 test_is_fizzbuzz.py",
+           "cwd": "{{WORK}}"
+         }}]},
+        {"text": "Test passes — bug fixed.",
+         "calls": [{"id": "c4", "name": "done", "args": {
+           "summary": "Replaced 'or' with 'and' in is_fizzbuzz.py; test now passes."
+         }}]},
+        {"text": "Task complete."}
+      ]
+    }
+  },
+  "default_provider": "fake_tool",
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "memory"},
+  "pipeline": "pipeline.json",
+  "input": "fixtures/input.json",
+  "run": true
+}

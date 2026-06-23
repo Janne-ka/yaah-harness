@@ -1,0 +1,21 @@
+{
+  "_note": "Real claude_cli variant. Pairs claude_cli with pipeline_native.json (single `agent` node, no YAAH tools) so claude can use ITS OWN Read/Edit/Bash via --allowedTools. The harness orchestrates the pipeline + observability; claude owns the inside tool loop. To re-run, reset the fixture with `git checkout fixtures/buggy_code/`. Cost: roughly a few cents per opus run; haiku is cheaper.",
+  "transport": {"type": "inproc"},
+  "providers": {
+    "claude_cli": {
+      "type": "claude_cli",
+      "binary": "claude",
+      "strip_mcp": true,
+      "timeout": 180,
+      "permission_mode": "acceptEdits",
+      "allowed_tools": ["Read", "Edit", "Bash"]
+    }
+  },
+  "default_provider": "claude_cli",
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "memory"},
+  "pipeline": "pipeline_native.json",
+  "input": "fixtures/input.json",
+  "run": true
+}

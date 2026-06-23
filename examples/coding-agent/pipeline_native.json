@@ -1,0 +1,17 @@
+{
+  "_note": "Variant pipeline for claude_cli — uses a single `agent` node with NO YAAH-side tools. The model is expected to use ITS OWN native tools (Read, Edit, Bash via claude_cli's --allowedTools) to fix the bug. The harness orchestrates the pipeline + observability; claude owns the inside loop. Contrast with pipeline.json (agent_loop, YAAH owns the loop and dispatches the tools).",
+  "nodes": {
+    "fix_bug": {
+      "type": "agent",
+      "stage": "fix_bug",
+      "prompt": "file:coding_agent_native",
+      "parse": false
+    }
+  },
+  "graph": {
+    "start": "fix_bug",
+    "stages": {
+      "fix_bug": {"node": "fix_bug", "then": null}
+    }
+  }
+}
