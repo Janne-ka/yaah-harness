@@ -175,8 +175,24 @@ def test_b8_dispatch_validation_precedes_tool_conversion():
     raise AssertionError("expected ValueError for tool spec missing 'dispatch'")
 
 
+def test_non_dict_input_schema_rejected_at_construction():
+    # MED-011 (opus bugs review): a non-dict input_schema (an author typo like
+    # "object" instead of {"type": "object"}) was accepted at construction and
+    # deferred-crashed deep in the provider with an opaque error. Validate it
+    # eagerly, same as 'dispatch' — fail fast at build, not at turn N.
+    backend = FakeToolBackend(turns=[])
+    try:
+        _make(backend, tools={"x": {"description": "", "input_schema": "object",
+                                    "dispatch": "fn:x:y"}})
+    except ValueError as e:
+        assert "input_schema" in str(e), e
+        return
+    raise AssertionError("expected ValueError for non-dict input_schema")
+
+
 if __name__ == "__main__":
     test_loop_completes_with_final_text()
+    test_non_dict_input_schema_rejected_at_construction()
     test_tool_error_flows_back_as_observation()
     test_unknown_tool_is_an_error_observation_not_a_crash()
     test_max_turns_exhausted()

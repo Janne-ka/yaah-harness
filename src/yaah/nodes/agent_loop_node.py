@@ -68,6 +68,15 @@ class AgentLoopNode:
                 raise ValueError(
                     "tool {!r} in agent_loop catalog is missing 'dispatch' "
                     "(e.g. 'fn:mymodule:myfunc' or 'node:my_role')".format(name))
+            # MED-011: a non-dict input_schema (author typo like "object" instead
+            # of {"type": "object"}) would be accepted here and deferred-crash deep
+            # in the provider with an opaque error. Fail fast at construction.
+            sch = spec.get("input_schema")
+            if sch is not None and not isinstance(sch, dict):
+                raise ValueError(
+                    "tool {!r} has a non-dict input_schema ({!r}) — it must be a "
+                    "JSON Schema object, e.g. {{'type': 'object', 'properties': {{...}}}}"
+                    .format(name, type(sch).__name__))
         self._backend = backend
         # Convert the dict catalog to Tool instances once at construction.
         # Tool.impl accepts a string (a call_target target) — run_tool_loop

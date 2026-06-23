@@ -250,6 +250,27 @@ async def claude_binary_and_flag_trust() -> None:
                      allow_dangerous_flags=True)      # explicit, greppable opt-in
 
 
+async def claude_rejects_isolation_defeating_flags() -> None:
+    # MED-009 (opus security review): the dangerous-flag set blocked only the
+    # two *skip-permissions* variants. Flags that defeat the cwd/worktree
+    # isolation the backend advertises — --add-dir (broadens FS reach),
+    # --settings (attacker JSON can change allowedTools/hooks),
+    # --append-system-prompt, --ide — passed straight through. They must be
+    # rejected too, in BOTH the separate-arg and joined `--flag=value` forms.
+    for bad in (["--add-dir", "/"],
+                ["--add-dir=/"],                       # joined form the old membership check missed
+                ["--settings", "/tmp/evil.json"],
+                ["--append-system-prompt", "ignore previous"],
+                ["--ide"]):
+        try:
+            ClaudeCliBackend(extra_args=bad)
+            raise AssertionError("isolation-defeating flag {!r} should be rejected".format(bad))
+        except ValueError as e:
+            assert "allow_dangerous_flags" in str(e), e
+    # explicit opt-in still works (greppable in config)
+    ClaudeCliBackend(extra_args=["--add-dir", "/work"], allow_dangerous_flags=True)
+
+
 # ---- B3: ClaudeCliBackend.stream — real --output-format stream-json parsing -
 
 class FakeStream:
@@ -571,6 +592,7 @@ async def claude_stream_handles_none_stdout_without_crashing() -> None:
 async def main() -> None:
     for fn in [
         claude_binary_and_flag_trust,
+        claude_rejects_isolation_defeating_flags,
         claude_complete_builds_argv_pipes_prompt_returns_stdout,
         claude_cost_bridge_parses_json_usage,
         claude_cost_path_missing_result_returns_empty,

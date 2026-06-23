@@ -51,9 +51,22 @@ from ...agents import api_provider as _ap
 # in config, never implicit).
 _ALLOWED_BARE_BINARIES = frozenset({"claude"})
 _UNSAFE_CHARS_RE = re.compile(r"[\s\x00-\x1f]")  # whitespace/control — never in a binary name
+# Flags rejected unless explicitly opted in. Two families:
+#  - permission bypass (BUG-629): skip the permission system entirely;
+#  - isolation defeat (MED-009, opus security review): broaden claude's
+#    filesystem reach or change its trust config past the cwd/worktree
+#    isolation this backend advertises. --add-dir grants extra dirs;
+#    --settings can swap allowedTools/hooks via attacker JSON;
+#    --append-system-prompt injects into the system prompt; --ide connects
+#    to an external IDE. An author who genuinely needs one opts in
+#    EXPLICITLY (allow_dangerous_flags: true — greppable in config).
 _DANGEROUS_FLAGS = frozenset({
     "--dangerously-skip-permissions",
     "--allow-dangerously-skip-permissions",
+    "--add-dir",
+    "--settings",
+    "--append-system-prompt",
+    "--ide",
 })
 
 
@@ -80,12 +93,22 @@ def _validate_binary(binary: str) -> str:
 def _validate_extra_args(extra_args: Sequence[str], allow_dangerous: bool) -> List[str]:
     args = list(extra_args or [])
     if not allow_dangerous:
-        bad = [a for a in args if a in _DANGEROUS_FLAGS]
+        # Match both the separate-arg form (`--add-dir`, `/`) and the joined
+        # form (`--add-dir=/`) — the bare membership check missed the latter
+        # (MED-009). An arg is dangerous if it equals a flag or starts with
+        # `<flag>=`.
+        def _is_dangerous(a: str) -> bool:
+            if a in _DANGEROUS_FLAGS:
+                return True
+            head = a.split("=", 1)[0]
+            return head in _DANGEROUS_FLAGS
+        bad = [a for a in args if _is_dangerous(a)]
         if bad:
             raise ValueError(
-                "claude_cli extra_args carry permission-bypass flag(s) {} — set "
-                "allow_dangerous_flags: true in the provider config to opt in "
-                "EXPLICITLY (BUG-629: this must never happen implicitly)".format(bad))
+                "claude_cli extra_args carry permission-bypass / isolation-defeating "
+                "flag(s) {} — set allow_dangerous_flags: true in the provider config "
+                "to opt in EXPLICITLY (BUG-629 / MED-009: this must never happen "
+                "implicitly)".format(bad))
     return args
 
 
