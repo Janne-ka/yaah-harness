@@ -100,6 +100,21 @@ _NAMED_MAP_FACTORIES = {
     "mcp_sources": "_MCP_TYPES",
 }
 
+# (map_key, default_key, noun) per pluggable layer. Each triple mirrors ONE
+# `_build_router(cfg.get(map_key), ..., default=cfg.get(default_key))` call site
+# in `runtime_factories` — the authoritative pairing. The noun is the layer's own
+# word for an entry (the singular of the map), used in the load-time
+# default-resolution error so the message reads in the user's vocabulary. A
+# `default_*` that names no declared entry would otherwise surface only as a
+# runtime LookupError on the first use of that layer.
+_DEFAULT_REFS = (
+    ("providers", "default_provider", "provider"),
+    ("prompt_sources", "default_prompt_source", "prompt source"),
+    ("data_sources", "default_data_source", "data source"),
+    ("data_sinks", "default_data_sink", "data sink"),
+    ("mcp_sources", "default_mcp_source", "mcp source"),
+)
+
 # R13: defaults for keys the runtime fills in when the user omits them. Sourced
 # from the `.get(k, <default>)` sites in `runtime_factories`. Used by
 # `yaah --explain` to show the EFFECTIVE config (Spring `--debug` / `helm template`
@@ -255,8 +270,15 @@ def _check_enums(root: Dict[str, Any], errs: List[str]) -> None:
 
 
 def _check_cross_field(root: Dict[str, Any], errs: List[str]) -> None:
-    """Catch silent-no-op configurations the user almost certainly didn't mean.
-    Mirrors what `_build_tracer` actually reads per mode: `none` reads nothing,
+    """Catch silent-no-op / dangling configurations the user almost certainly
+    didn't mean: trace mode/field consistency, and every `default_*` resolving to
+    a declared map entry."""
+    _check_trace_cross_field(root, errs)
+    _check_default_refs(root, errs)
+
+
+def _check_trace_cross_field(root: Dict[str, Any], errs: List[str]) -> None:
+    """Mirrors what `_build_tracer` actually reads per mode: `none` reads nothing,
     `envelope` reads only capture + buffer_max (no bus, no sinks), `tracer`
     reads capture + sinks + topic (no buffer)."""
     tr = root.get("trace")
@@ -277,6 +299,27 @@ def _check_cross_field(root: Dict[str, Any], errs: List[str]) -> None:
     elif mode == "tracer" and tr.get("buffer_max"):
         errs.append("trace.buffer_max is set but trace.mode is 'tracer' — the buffer "
                     "only exists in 'envelope' mode; remove it or switch mode")
+
+
+def _check_default_refs(root: Dict[str, Any], errs: List[str]) -> None:
+    """Each `default_*` must name a declared entry of its named map — the same
+    spirit as the pipeline's 'branch default must resolve to a declared node'.
+    A dangling default (e.g. `default_provider: "ghost"` with no provider named
+    "ghost") otherwise slips past load and dies as a runtime LookupError on the
+    first call into that layer.
+
+    Only fires for a NON-EMPTY string default against a PRESENT dict-shaped map:
+    a missing/empty/non-dict map is either already flagged by `_check_shapes` or
+    legitimately deferred (an absent providers map is valid), so resolving against
+    it here would be a spurious second error."""
+    for map_key, default_key, noun in _DEFAULT_REFS:
+        want = root.get(default_key)
+        names = root.get(map_key)
+        if not (isinstance(want, str) and want) or not isinstance(names, dict) or not names:
+            continue
+        if want not in names:
+            errs.append("{} {!r} is not a declared {}; have {}".format(
+                default_key, want, noun, sorted(names)))
 
 
 def validate_root(root: Dict[str, Any]) -> None:

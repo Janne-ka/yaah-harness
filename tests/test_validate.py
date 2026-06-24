@@ -292,6 +292,70 @@ def test_tracer_mode_with_buffer_max_is_an_error() -> None:
     raise AssertionError("buffer_max under mode=tracer should raise (cross-field)")
 
 
+# ----- cross-field: a default_* must name a declared map entry -----
+
+def test_dangling_default_provider_rejected() -> None:
+    """A `default_provider` that names no declared provider used to slip past load
+    validation and surface as a runtime LookupError on the first model call. R15
+    catches it at LOAD with the layer's noun and the available names."""
+    root = _valid_root()
+    root["default_provider"] = "ghost"   # only "claude" is declared
+    try:
+        validate_root(root)
+    except ValueError as e:
+        msg = str(e)
+        assert "default_provider" in msg and "ghost" in msg, msg
+        assert "provider" in msg, msg            # the layer's noun
+        assert "claude" in msg, msg              # the available names listed
+        return
+    raise AssertionError("a dangling default_provider should raise at load")
+
+
+def test_valid_default_provider_passes() -> None:
+    """The positive case: a default pointing at a declared provider must NOT raise
+    (the valid baseline already exercises this, but pin it explicitly)."""
+    root = _valid_root()
+    root["default_provider"] = "claude"   # declared in _valid_root
+    validate_root(root)  # must not raise
+
+
+def test_dangling_default_prompt_source_rejected() -> None:
+    """A second layer, proving the check is generic over every default_* pair and
+    not special-cased to providers."""
+    root = _valid_root()
+    root["default_prompt_source"] = "nowhere"   # only "file" is declared
+    try:
+        validate_root(root)
+    except ValueError as e:
+        msg = str(e)
+        assert "default_prompt_source" in msg and "nowhere" in msg, msg
+        assert "prompt source" in msg, msg       # the layer's noun
+        assert "file" in msg, msg                # the available names listed
+        return
+    raise AssertionError("a dangling default_prompt_source should raise at load")
+
+
+def test_default_without_a_map_is_not_newly_rejected() -> None:
+    """Regression: an absent or empty providers map must NOT be newly rejected by
+    the default-resolution check. A default whose map is missing/empty/non-dict is
+    either flagged elsewhere (shape check) or legitimately deferred — this check
+    only fires for a NON-EMPTY default against a present, dict-shaped map."""
+    from yaah.validate import _check_cross_field
+    # absent map, default present: _check_cross_field must add no error
+    errs: list = []
+    _check_cross_field({"default_data_source": "ghost"}, errs)
+    assert errs == [], "absent map must not be flagged by cross-field: {}".format(errs)
+    # empty map, default present: same
+    errs = []
+    _check_cross_field({"data_sources": {}, "default_data_source": "ghost"}, errs)
+    assert errs == [], "empty map must not be flagged by cross-field: {}".format(errs)
+    # empty-string default against a real map: nothing to resolve, no error
+    errs = []
+    _check_cross_field(
+        {"providers": {"claude": {"type": "claude_cli"}}, "default_provider": ""}, errs)
+    assert errs == [], "empty-string default must not be flagged: {}".format(errs)
+
+
 # ----- all errors gathered into one pass -----
 
 def test_multiple_errors_gathered() -> None:
@@ -491,6 +555,10 @@ def main() -> None:
     test_trace_must_be_a_dict()
     test_envelope_mode_with_sinks_is_an_error()
     test_tracer_mode_with_buffer_max_is_an_error()
+    test_dangling_default_provider_rejected()
+    test_valid_default_provider_passes()
+    test_dangling_default_prompt_source_rejected()
+    test_default_without_a_map_is_not_newly_rejected()
     test_multiple_errors_gathered()
     test_pipeline_valid_passes()
     test_pipeline_typo_then_surfaces()
@@ -503,7 +571,7 @@ def main() -> None:
     test_budget_node_timeout_exceeds_transport_window()
     test_budget_inproc_has_no_reply_window()
     test_budget_fork_wait_smaller_than_branch_node_timeout()
-    print("test_validate: PASS (32 scenarios)")
+    print("test_validate: PASS (36 scenarios)")
 
 
 if __name__ == "__main__":
