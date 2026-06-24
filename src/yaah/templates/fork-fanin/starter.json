@@ -1,0 +1,26 @@
+{
+  "nodes": {
+    "role:lens-a": {"type": "agent", "model": "fake:lens-a", "stage": "lens-a",
+                    "template": "Review {{text}} from PERSPECTIVE A. Return JSON: {\"finding\": \"...\"}"},
+    "role:lens-b": {"type": "agent", "model": "fake:lens-b", "stage": "lens-b",
+                    "template": "Review {{text}} from PERSPECTIVE B. Return JSON: {\"finding\": \"...\"}"},
+    "role:lens-c": {"type": "agent", "model": "fake:lens-c", "stage": "lens-c",
+                    "template": "Review {{text}} from PERSPECTIVE C. Return JSON: {\"finding\": \"...\"}"},
+    "role:report": {"type": "render", "out": "report.html",
+                    "template_text": "<h1>Report — {{count}} lenses</h1>\n<pre>{{report}}</pre>\n"}
+  },
+  "graph": {
+    "start": "spread",
+    "stages": {
+      "spread": {"node": "", "fork": ["lens-a", "lens-b", "lens-c"], "then": "report"},
+      "lens-a": {"node": "role:lens-a", "then": "join"},
+      "lens-b": {"node": "role:lens-b", "then": "join"},
+      "lens-c": {"node": "role:lens-c", "then": "join"},
+      "join":   {"node": "",
+                 "fanin": {"expect": ["lens-a", "lens-b", "lens-c"], "wait": "all",
+                           "reduce": "fn:transforms:merge"},
+                 "then": null},
+      "report": {"node": "role:report", "then": null}
+    }
+  }
+}

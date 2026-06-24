@@ -5,7 +5,7 @@ that config actually flows — `_extends` chain, pipeline graph, fixture, and
 how the pipeline's `model:` / `prompt:` / `target:` strings resolve back into
 the root's named maps. Works on any yaah example or a user-authored config.
 
-This is the third yaah example to ship as a working pipeline (after
+This is the fifth yaah example to ship as a working pipeline (after
 hello-yaah, review-pipeline, fork-join, arch-drift), and the first that
 exists as a *tool* — its job is to operate on other yaah configs.
 
@@ -19,7 +19,7 @@ examples/config-flow/visualize examples/hello-yaah/starter.local.json
 That's it. The wrapper:
 - Computes the output path: `<target-dir>/diagrams/<config-stem>_<utc>.svg`
   (and a stable `<config-stem>.svg` alias next to it).
-- Runs the pipeline real-mode, auto-approving at the gate.
+- Runs the pipeline real-mode (gateless — nothing to approve).
 - Prints the SVG paths on stderr at exit so you don't have to read the
   RESULT envelope to find them.
 
@@ -47,11 +47,11 @@ This tool walks ALL of that and asks claude to draw it.
 config-flow.local.json                ← offline / fake provider / canned renderer
   └─ config-flow.real.json            ← real claude + real mmdc + by_model:null
 
-config-flow-ab.dogfood.json           ← A/B comparison (sonnet vs haiku), auto-approve at gate
+config-flow-ab.real.json              ← A/B comparison (sonnet vs haiku), gateless
 ```
 
 Plus:
-- `config-flow-pipeline.json` — 5 stages: snapshot → extract → check → parse → render-svg → land. **No human gate** — config-flow is regenerable; the user re-runs whenever. Default model: `claude-haiku-4-5`. (The 2026-06-19 A/B run initially showed haiku producing denser/less-clear output; a tightened prompt — explicit 4-subgraph structure with named IDs and required layout directions — closed the gap. With the current prompt, haiku produces output structurally equivalent to sonnet at ~3.4× lower cost and ~2× faster.)
+- `config-flow-pipeline.json` — 4 stages: snapshot → extract → render-svg → land (the agent parses by default per ADR-0004, so there's no separate parse stage). **No human gate** — config-flow is regenerable; the user re-runs whenever. Default model: `claude-haiku-4-5`. (The 2026-06-19 A/B run initially showed haiku producing denser/less-clear output; a tightened prompt — explicit 4-subgraph structure with named IDs and required layout directions — closed the gap. With the current prompt, haiku produces output structurally equivalent to sonnet at ~3.4× lower cost and ~2× faster.)
 - `config-flow-pipeline-ab.json` — A/B variant. **No gate** — writes BOTH SVGs to disk with `-a` and `-b` appended, in the same dir. The comparison IS the artifact; you open both and pick visually. Sonnet uses `prompts/extract.md` (loose); haiku uses `prompts/extract-strict.md` (tight) — see "Two prompts, one per model" below.
 - `transforms.py` — `snapshot_config_flow` (the new one) + `parse`/`render`/`write` (copied from arch-drift) + A/B helpers (`UsageAttacher`, `merge_candidates`, `prepare_ab_template`, `write_both_candidates`).
 - `prompts/extract.md` — loose prompt: gives the model freedom on layout. Used by sonnet in A/B. Sonnet's judgment beats the over-constrained prompt for it.
@@ -64,9 +64,12 @@ Plus:
 | Run | Use when | Cost |
 |---|---|---|
 | `./visualize <target>` | One-shot SVG production for any config. The convenient default. | ~$0.07 + ~40s (haiku) |
-| `python3 -m yaah.runtime config-flow.real.json` | Default target (arch-drift), runs end-to-end with no human input. | same |
-| `python3 -m yaah.runtime config-flow-ab.real.json` | A/B comparison sonnet vs haiku — produces BOTH SVGs (`<stem>-a.svg` + `<stem>-b.svg`) side-by-side in the target's `diagrams/` dir. Fully automated, no gate. Use to verify haiku is still good enough on a new config shape. | ~$0.23 + ~85s |
-| `MERMAID_RENDERER=:canned python3 -m yaah.runtime config-flow.local.json` | Verify the pipeline shape without an LLM key. Output is a canned SVG (visually meaningless). | zero |
+| `yaah run config-flow.real.json` | Default target (arch-drift), runs end-to-end with no human input. | same |
+| `yaah run config-flow-ab.real.json` | A/B comparison sonnet vs haiku — produces BOTH SVGs (`<stem>-a.svg` + `<stem>-b.svg`) side-by-side in the target's `diagrams/` dir. Fully automated, no gate. Use to verify haiku is still good enough on a new config shape. | ~$0.23 + ~85s |
+| `MERMAID_RENDERER=:canned yaah run config-flow.local.json` | Verify the pipeline shape without an LLM key. Output is a canned SVG (visually meaningless). | zero |
+
+(Not installed? `python3 -m yaah.runtime <config>` is the equivalent; from a
+source checkout prefix `PYTHONPATH=src`.)
 
 ## Dependencies
 
@@ -87,9 +90,9 @@ Same as arch-drift:
 2. Writes `fixtures/_runtime.json` (gitignored) with `target_config_path`,
    `arch_svg_path`, `arch_svg_dir`.
 3. Writes `_visualize-run.json` (gitignored shim root) that `_extends
-   config-flow.dogfood.json` and overrides `input:` to point at the
+   config-flow.real.json` and overrides `input:` to point at the
    runtime fixture.
-4. Runs `python3 -m yaah.runtime _visualize-run.json`.
+4. Runs `yaah run _visualize-run.json`.
 5. Cleans up the shim root on exit (trap).
 
 The gitignored intermediates (`fixtures/_runtime.json`, `_visualize-run.json`)
@@ -123,7 +126,7 @@ for how that decision got made. To re-compare on a config you find tougher:
 
 ```bash
 cd examples/config-flow
-python3 -m yaah.runtime config-flow-ab.real.json
+yaah run config-flow-ab.real.json
 # → produces TWO SVGs side-by-side in the target's diagrams/:
 #     <stem>-a-claude-sonnet-4-6-<utc>.svg + <stem>-a.svg  (latest pointer)
 #     <stem>-b-claude-haiku-4-5-<utc>.svg  + <stem>-b.svg

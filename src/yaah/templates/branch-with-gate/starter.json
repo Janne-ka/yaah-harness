@@ -1,0 +1,23 @@
+{
+  "nodes": {
+    "role:draft":   {"type": "agent", "prompt": "file:draft",
+                     "model": "fake:draft", "stage": "draft"},
+    "role:review":  {"type": "human_gate", "form": "approve_or_revise",
+                     "awaiting": "human:review",
+                     "ask": "Review the draft:\n\n  {{summary}}\n\nApprove to publish, or revise to redraft."},
+    "role:publish": {"type": "render", "template_file": "templates/published.html",
+                     "out": "published.html"}
+  },
+  "graph": {
+    "start": "draft",
+    "stages": {
+      "draft":   {"node": "role:draft",
+                  "max_attempts": 3, "feedback": true, "then": "review"},
+      "review":  {"node": "role:review",
+                  "branch": {"on": "decision",
+                             "routes": {"revise": "draft"},
+                             "default": "publish"}},
+      "publish": {"node": "role:publish", "then": null}
+    }
+  }
+}

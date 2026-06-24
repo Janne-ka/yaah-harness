@@ -4,7 +4,7 @@ Used by: yaah.build (the 'agent' node type) and apps; invoked by the harness
 like any Node.
 Where: the common body for every model-backed stage (spec, review, eval, ...).
 Why: render a prompt (inline template or fetched from a PromptSource), fold in
-retry feedback, call a swappable ModelBackend, and return the raw output — so a
+retry feedback, call a swappable backend, and return the raw output — so a
 stage's behaviour is data (prompt + model + config), not bespoke code.
 
 Targets Python 3.9+.
@@ -22,7 +22,10 @@ from ..core import Envelope, Failure, NodeConfig, Verdict
 from ..cwd import carry_cwd, resolve_cwd
 from ..jsonio import extract_json
 from ..trace import NullTracer, Span
-from .model_backend import ModelBackend
+# Backend is typed as Any: it's a structural ApiProvider, duck-typed on
+# `complete` / `turn` at call time. That runtime check is what this Agent
+# actually relies on; a static Protocol annotation would only duplicate it
+# without adding any guarantee.
 from .tool import Tool
 from .tool_loop import run_tool_loop
 
@@ -77,7 +80,7 @@ _RESERVED_REPLY_KWARGS = frozenset({"raw"})
 class Agent:
     def __init__(
         self,
-        backend: ModelBackend,
+        backend: Any,
         template: Optional[str] = None,
         *,
         prompt_source: Optional[Any] = None,   # a yaah.prompts.PromptSource
@@ -184,17 +187,17 @@ class Agent:
 
     def _supports_turn(self, model: object) -> bool:
         """Tool capability of the backend THIS call will actually hit (H4). A
-        router (RoutingBackend) defines `turn` itself, so the old structural
-        isinstance(backend, ToolBackend) was ALWAYS true behind a router — the
-        R11 manifest fallback was unreachable, and a non-turn provider
-        (claude_cli) with tools/expose/broker crashed mid-loop instead of
-        getting the manifest. A router resolves the route first via its
-        `supports_turn`; a bare leaf answers structurally."""
+        router (RoutingBackend) defines `turn` itself, so a structural
+        isinstance check would be ALWAYS true behind a router — the R11
+        manifest fallback would be unreachable, and a non-turn provider
+        (claude_cli) with tools/expose/broker would crash mid-loop instead of
+        getting the manifest. So a router resolves the route first via its
+        `supports_turn`; a bare leaf answers structurally via `hasattr` on
+        `turn` — which is the actual runtime contract, no Protocol needed."""
         be = self._backend
         if hasattr(be, "supports_turn"):
             return bool(be.supports_turn(model))
-        from .model_backend import ToolBackend
-        return isinstance(be, ToolBackend)
+        return callable(getattr(be, "turn", None))
 
     async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
         template = self._template

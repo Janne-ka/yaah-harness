@@ -108,6 +108,8 @@ Concrete shapes to adapt — smallest-viable linear, fork (asymmetric A/B), fano
 
 Two rules that travel with every template: the parse stage between an agent and any render/branch is **not optional**, and `fn:` targets in config are **trusted code** — never point one at anything payload-derived.
 
+`fn:module:func` resolves relative to the config's directory — keep `transforms.py` next to the config and it just resolves; for shared/production code, package it (`pip install -e .`) and use a dotted path. Full note: [`docs/node-reference.md`](../../../docs/node-reference.md#transform--call-a-functionnodeurl).
+
 ## Common mistakes
 
 | Mistake | Reality |

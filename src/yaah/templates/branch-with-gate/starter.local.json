@@ -1,0 +1,13 @@
+{
+  "_about": "starter for the branch-with-gate archetype. The state store is FILE-backed because human gates suspend across processes.",
+  "transport": {"type": "inproc"},
+  "providers": {"fake": {"type": "fake_scripted",
+                         "by_model": {"draft": ["{\"summary\":\"draft v1\"}"]}}},
+  "default_provider": "fake",
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "file", "dir": "state"},
+  "pipeline": "starter.json",
+  "input": "fixtures/input.json",
+  "run": true
+}

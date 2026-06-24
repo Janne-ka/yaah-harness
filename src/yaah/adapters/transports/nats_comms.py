@@ -44,11 +44,19 @@ class _NatsSubscription:
 
 class NatsComms:
     def __init__(self, servers: str = "nats://127.0.0.1:4222", *, request_timeout: float = 300.0,
+                 connect_timeout: float = 10.0,
                  user: Optional[str] = None, password: Optional[str] = None,
                  token: Optional[str] = None, creds: Optional[str] = None,
                  tls: Any = None, tls_hostname: Optional[str] = None,
                  tracer: Any = None) -> None:
         self._servers = servers
+        # Upper bound on the INITIAL connect. nats-py retries the first
+        # connection with no caller-visible bound, so a broker that's down at
+        # startup hung the orchestrator (~20s+, and hung the test suite). We
+        # wrap nats.connect in asyncio.wait_for so a dead broker surfaces as a
+        # prompt ConnectionError instead of an open-ended stall. The deployment
+        # config can raise it if a slow-starting broker needs more grace.
+        self._connect_timeout = connect_timeout
         # Default request/reply deadline. LLM nodes (a real `claude -p`) can take
         # MINUTES, far past NATS's usual sub-second RPC assumption — so the default
         # is 300s for the stated primary use case (agent pipelines), not the 30s
@@ -85,7 +93,14 @@ class NatsComms:
             opts["disconnected_cb"] = self._on_disconnected
             opts["reconnected_cb"] = self._on_reconnected
             opts["closed_cb"] = self._on_closed
-        self._nc = await nats.connect(self._servers, **opts)
+        # Bound the initial connect (see _connect_timeout note in __init__).
+        try:
+            self._nc = await asyncio.wait_for(
+                nats.connect(self._servers, **opts), timeout=self._connect_timeout)
+        except asyncio.TimeoutError:
+            raise ConnectionError(
+                "NATS connect to {!r} timed out after {}s — is the broker "
+                "running and reachable?".format(self._servers, self._connect_timeout))
         return self
 
     async def _emit_conn(self, event: str, *, status: str, detail: str = "") -> None:

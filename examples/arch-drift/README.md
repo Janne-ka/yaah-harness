@@ -81,6 +81,11 @@ snapshot → read-svg → extract → parse → render-svg → diff
 
 ## Run it (offline, no API key, no mmdc)
 
+Run from the repo root (paths below are repo-root-relative; `fn:transforms`
+resolves relative to the config's own directory, so no `PYTHONPATH` hack is
+needed). Not installed? `python3 -m yaah.runtime <config>` is the equivalent of
+`yaah run <config>`; from a source checkout prefix `PYTHONPATH=src`.
+
 ```bash
 MERMAID_RENDERER=:canned yaah run examples/arch-drift/arch-drift.local.json
 ```

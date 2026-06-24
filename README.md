@@ -65,8 +65,10 @@ yaah run <root>                       # run the configured pipeline (the default
 yaah list <root> [--json]             # mailbox view: every suspended baton
 yaah baton-schema <root> <id>         # surface the parked gate's decision form
 yaah resume <root> <id> [decision]    # deliver a decision + drive to next gate / completion
-yaah validate <root>                  # validate + exit; no run
+yaah validate <root>                  # validate root + pipeline + exit; no run
 yaah explain <root>                   # print the EFFECTIVE config (post-_extends/_fake)
+yaah trace <jsonl> [--pretty | --errors-only | --cost] [--last N]   # post-hoc inspect
+yaah doctor                           # diagnose install (Python, optional deps, packaged bases)
 ```
 
 Full verb list + per-key reference: [`docs/shape-grammar.md`](docs/shape-grammar.md). Legacy `python3 -m yaah.runtime <root> [--list | --resume …]` still works.

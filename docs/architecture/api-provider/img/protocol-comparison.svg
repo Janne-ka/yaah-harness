@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 500" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ar" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#444"/>
+    </marker>
+  </defs>
+  <rect width="820" height="500" fill="#ffffff"/>
+  <text x="40" y="32" font-size="18" font-weight="700" fill="#1a1a1a">Protocol comparison — ModelBackend vs ApiProvider</text>
+  <text x="40" y="52" font-size="12" fill="#666">Same job at the boundary; different shape inside. New protocol is one method emitting an event stream.</text>
+
+  <!-- LEFT: Legacy -->
+  <rect x="40" y="80" width="360" height="380" fill="#fafafa" stroke="#bbb" stroke-width="1.4" rx="6"/>
+  <text x="60" y="106" font-size="14" font-weight="700" fill="#1a1a1a">Legacy — collected results</text>
+  <text x="60" y="124" font-size="10" fill="#666">two methods, two return shapes, capability check</text>
+
+  <rect x="60" y="140" width="320" height="68" fill="#ffffff" stroke="#2c3e50" stroke-width="1.4" rx="3"/>
+  <text x="76" y="160" font-size="11" font-weight="700" fill="#1a1a1a">ModelBackend.complete(prompt) → str</text>
+  <text x="76" y="178" font-size="10" font-family="monospace" fill="#555">text = await backend.complete("hi")</text>
+  <text x="76" y="194" font-size="10" fill="#666">awaits one call, returns the whole string</text>
+
+  <rect x="60" y="216" width="320" height="88" fill="#ffffff" stroke="#2c3e50" stroke-width="1.4" rx="3"/>
+  <text x="76" y="236" font-size="11" font-weight="700" fill="#1a1a1a">ToolBackend.turn(messages, tools) → dict</text>
+  <text x="76" y="254" font-size="10" font-family="monospace" fill="#555">out = await backend.turn(msgs, tools)</text>
+  <text x="76" y="270" font-size="10" font-family="monospace" fill="#555">if "text" in out: final answer</text>
+  <text x="76" y="286" font-size="10" font-family="monospace" fill="#555">if "calls" in out: run them, turn again</text>
+
+  <rect x="60" y="316" width="320" height="64" fill="#fff5f0" stroke="#c44" stroke-width="1.3" rx="3"/>
+  <text x="76" y="334" font-size="11" font-weight="700" fill="#a33">Capability check required</text>
+  <text x="76" y="350" font-size="10" font-family="monospace" fill="#555">if backend.supports_turn(model):</text>
+  <text x="76" y="364" font-size="10" font-family="monospace" fill="#555">    out = await backend.turn(...)</text>
+  <text x="76" y="378" font-size="10" font-family="monospace" fill="#555">else: out = await backend.complete(...)</text>
+
+  <text x="60" y="404" font-size="10" fill="#666">No partial output. No token-level trace. No streaming UX.</text>
+  <text x="60" y="420" font-size="10" fill="#666">Two paths the caller must keep straight.</text>
+
+  <!-- ARROW between -->
+  <line x1="410" y1="270" x2="450" y2="270" stroke="#444" stroke-width="2" marker-end="url(#ar)"/>
+  <text x="430" y="262" font-size="10" font-weight="700" fill="#444" text-anchor="middle">B2–B6</text>
+
+  <!-- RIGHT: New -->
+  <rect x="460" y="80" width="320" height="380" fill="#f4faf7" stroke="#2c8060" stroke-width="1.4" rx="6"/>
+  <text x="480" y="106" font-size="14" font-weight="700" fill="#1a1a1a">New — event stream</text>
+  <text x="480" y="124" font-size="10" fill="#666">one method, one shape, no capability surface</text>
+
+  <rect x="480" y="140" width="280" height="100" fill="#ffffff" stroke="#2c8060" stroke-width="1.4" rx="3"/>
+  <text x="496" y="160" font-size="11" font-weight="700" fill="#1a1a1a">ApiProvider.stream(context)</text>
+  <text x="496" y="176" font-size="11" font-weight="700" fill="#1a1a1a">  → AsyncIterator[StreamEvent]</text>
+  <text x="496" y="196" font-size="10" font-family="monospace" fill="#555">async for ev in provider.stream(ctx):</text>
+  <text x="496" y="210" font-size="10" font-family="monospace" fill="#555">    if ev["type"] == "text_delta":</text>
+  <text x="496" y="224" font-size="10" font-family="monospace" fill="#555">        consume(ev["delta"])</text>
+
+  <rect x="480" y="252" width="280" height="170" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="496" y="270" font-size="11" font-weight="700" fill="#1a1a1a">Event types (tagged via "type")</text>
+  <text x="496" y="288" font-size="10" font-family="monospace" fill="#1a1a1a">start         </text>
+  <text x="600" y="288" font-size="10" fill="#666">exactly once at the beginning</text>
+  <text x="496" y="304" font-size="10" font-family="monospace" fill="#1a1a1a">text_delta    </text>
+  <text x="600" y="304" font-size="10" fill="#666">zero or more chunks, interleaved</text>
+  <text x="496" y="320" font-size="10" font-family="monospace" fill="#1a1a1a">toolcall_end  </text>
+  <text x="600" y="320" font-size="10" fill="#666">one per assembled call</text>
+  <text x="496" y="336" font-size="10" font-family="monospace" fill="#1a1a1a">done          </text>
+  <text x="600" y="336" font-size="10" fill="#666">terminator + stop_reason + usage</text>
+  <text x="496" y="352" font-size="10" font-family="monospace" fill="#1a1a1a">error         </text>
+  <text x="600" y="352" font-size="10" fill="#666">replaces done on failure</text>
+  <line x1="496" y1="364" x2="744" y2="364" stroke="#ddd" stroke-width="1"/>
+  <text x="496" y="380" font-size="10" fill="#666">Module helpers complete() / turn() drain the</text>
+  <text x="496" y="394" font-size="10" fill="#666">stream into legacy return shapes — same call</text>
+  <text x="496" y="408" font-size="10" fill="#666">ergonomics as before, just a different seam.</text>
+</svg>

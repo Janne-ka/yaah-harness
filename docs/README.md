@@ -3,6 +3,31 @@
 Start with the [project README](../README.md) for the pitch and a 5-minute run.
 This folder is the deeper reference.
 
+## By task
+
+If you know what you want to do, jump straight here.
+
+| I want to… | Read |
+|---|---|
+| run my first pipeline (no API key) | [quickstart.md](quickstart.md) |
+| pick the shape for a new pipeline | [archetypes.md](archetypes.md) — five shapes; pick the nearest, copy from `examples/` |
+| author a pipeline step by step | [tutorial.md](tutorial.md) |
+| see every key/verb on one page | [shape-grammar.md](shape-grammar.md) |
+| pause for a human decision | [decision-forms.md](decision-forms.md) + [`examples/review-pipeline`](../examples/review-pipeline/) |
+| do parallel work + reduce | [archetypes.md#fork-fanin](archetypes.md) + [`examples/fork-join`](../examples/fork-join/) |
+| retry on bad agent output | [decisions/0004-parse-by-default.md](decisions/0004-parse-by-default.md) (parse-by-default + validator feedback) |
+| give an agent tools (incl. MCP) | [agent-tools.md](agent-tools.md) |
+| run offline / in CI | [cookbook/offline-runs.md](cookbook/offline-runs.md) — three patterns: single-file fake, paired `*.local`+`*.real` via `_extends`, the `_fake` block + `--fake` flag |
+| make state survive a restart | [durable-state.md](durable-state.md) |
+| ship across processes / NATS | [cookbook/deploy.md](cookbook/deploy.md) — single-binary Docker, NATS fleet, state mount, secrets, trace sinks |
+| debug what just ran | `yaah trace <run>.jsonl --pretty` — per-run tree of stages, calls, errors; or `--errors-only` for CI, `--cost` for spend, `--last N` / `--corr <id>` to filter. Full playbook: [cookbook/debugging.md](cookbook/debugging.md) |
+| diagnose an install | `yaah doctor` — Python version, optional deps, packaged base configs |
+| understand a specific error | [troubleshooting.md](troubleshooting.md) — catalog of common messages + the next move each maps to |
+| see the effective config after `_extends`/`_fake` | `yaah explain <root>` |
+| drive a parked run from the CLI | `yaah list` → `yaah baton-schema <id>` → `yaah resume <id> decision.json` |
+| compare prompt/model variants | [case-study/prompt-tuning/](case-study/prompt-tuning/) |
+| point an AI assistant at this repo | [../AGENTS.md](../AGENTS.md) (cross-tool) or [../.claude/skills/](../.claude/skills/) (Claude Code) |
+
 ## Start here
 
 | | |

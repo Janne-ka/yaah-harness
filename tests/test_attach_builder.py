@@ -55,7 +55,7 @@ def _not_an_attacher(envelope, span):
 # --- helpers -----------------------------------------------------------------
 
 class _FakeBackend:
-    """Minimal stand-in for ModelBackend — only needs to exist as ctx.backend
+    """Minimal stand-in backend — only needs to exist as ctx.backend
     so the agent builder doesn't reject."""
 
 

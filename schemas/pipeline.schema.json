@@ -68,6 +68,7 @@
           "type": {
             "enum": [
               "agent",
+              "agent_loop",
               "expect_field",
               "get",
               "human_gate",

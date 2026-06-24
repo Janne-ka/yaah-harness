@@ -2,7 +2,7 @@
 outside system lives here, grouped by the port it fulfils:
 
   transports/  Comms      — local_bus, nats_comms        (the engine ships InProcessComms)
-  backends/    ModelBackend — claude_cli, litellm         (the engine ships Fake/Scripted/Routing)
+  backends/    ApiProvider — claude_cli, litellm          (the engine ships Fake/Scripted/Routing)
   prompts/     PromptSource — file, http, langfuse         (the engine ships Static/Routing)
   data/        DataSource/Sink — file, git_diff, file_sink (the engine ships Routing)
   mcp/         McpSource    — file                          (the engine ships Static/Routing)

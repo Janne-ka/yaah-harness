@@ -24,7 +24,7 @@ The whole model, before you invest in the rest of the page:
 - **Build your own:** list stages → pick a node per stage → wire them → run on the
   fake backend → swap in a real model. Or copy the nearest example and edit.
 - **Run one right now:**
-  `cd examples/hello-yaah && python3 -m yaah.runtime starter.local.json`
+  `cd examples/hello-yaah && yaah run starter.local.json`
 
 That's it. The rest of this page shows each piece in a runnable example.
 
@@ -61,7 +61,7 @@ Have something in mind ("draft → review → publish", "fix a bug test-first",
    `fork` + `fanin` (parallel).
 4. **Copy a `*.local.json` root**, point it at your pipeline and a `fake` provider
    so it runs offline.
-5. **Run → fix → go real:** `python3 -m yaah.runtime your.local.json`, iterate until
+5. **Run → fix → go real:** `yaah run your.local.json`, iterate until
    green, then swap `fake` for `claude`/`litellm`.
 
 **Fastest start:** copy the example closest to your shape — `hello-yaah` (linear),
@@ -77,8 +77,11 @@ Run the smallest pipeline and watch one envelope move through it:
 
 ```bash
 cd examples/hello-yaah
-python3 -m yaah.runtime starter.local.json
+yaah run starter.local.json
 ```
+
+(Not pip-installed? `python3 -m yaah.runtime starter.local.json` is the
+equivalent; from a source checkout prefix `PYTHONPATH=src`.)
 
 It has four steps: **summarize** (an agent) → **check** (a validator) → **parse**
 (a transform) → **render**. Here is the envelope's `payload` at each step — this is
@@ -173,15 +176,18 @@ Run it. It stops at the gate and saves its place (a *baton*) to disk:
 ```bash
 cd examples/review-pipeline
 
-python3 -m yaah.runtime review.local.json
+yaah run review.local.json
 # → parks, prints:  GATE baton_id=<id> awaiting=review
 
-python3 -m yaah.runtime review.local.json --list
+yaah list review.local.json
 # → shows the parked gate and the question it's asking
 
-python3 -m yaah.runtime review.local.json --resume <id> decision.json
+yaah resume review.local.json <id> decision.json
 # → delivers {"decision": "approve"} and finishes (publishes)
 ```
+
+(Not pip-installed? prefix `python3 -m yaah.runtime` for `yaah run`; from a
+source checkout add `PYTHONPATH=src`.)
 
 That's the whole human-in-the-loop story: **stop → look → resume**. The baton is on
 disk, so the run survives closing your laptop. Change `decision.json` to
@@ -205,13 +211,19 @@ disk, so the run survives closing your laptop. Change `decision.json` to
 
 ```bash
 cd examples/fork-join
-python3 -m yaah.runtime review.local.json     # → review.html
+yaah run review.local.json     # → review.html
 ```
+
+(Not pip-installed? `python3 -m yaah.runtime review.local.json` is the
+equivalent; from a source checkout prefix `PYTHONPATH=src`.)
 
 `fork` sends the same envelope to all three lenses; they run at the same time.
 `fanin` waits for them, then hands the collected results to your `reduce` function,
 which combines them however you like (the engine never looks inside the data). The
-merged report flows on to `report`.
+merged report flows on to `report`. The `reduce` target is `fn:lenses:merge` —
+`fn:` modules resolve relative to the config's directory, so `lenses.py` sits
+right beside `review.local.json` (the packaging-vs-convenience note is in the
+[node reference](node-reference.md#transform--call-a-functionnodeurl)).
 
 This is how you scatter-gather: multi-lens review, A/B drafts, parallel fetches —
 no threads to manage.
@@ -253,7 +265,7 @@ Now each stage records its status, cost, **which branch it took** (so you can se
 `--explain` prints the final, validated config with defaults filled in:
 
 ```bash
-python3 -m yaah.runtime <root>.json --explain
+yaah explain <root>.json
 ```
 
 ---

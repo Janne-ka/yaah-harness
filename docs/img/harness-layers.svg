@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 500" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#444"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="760" height="500" fill="#ffffff"/>
+  <text x="40" y="32" font-size="18" font-weight="700" fill="#1a1a1a">YAAH harness — three layers</text>
+  <text x="40" y="52" font-size="12" fill="#666">Pipeline orchestrates stages. One stage type (agent_loop) hosts a turn loop. The loop calls a provider.</text>
+
+  <!-- PIPELINE layer -->
+  <rect x="40" y="80" width="680" height="100" fill="#f7f9fb" stroke="#2c3e50" stroke-width="1.5" rx="4"/>
+  <text x="56" y="104" font-size="13" font-weight="700" fill="#1a1a1a">PIPELINE  (DAG of stages)</text>
+  <text x="56" y="122" font-size="11" fill="#666">declarative graph: nodes + edges (then / branch / fork-fanin), human gates, fanin, durable suspend/resume</text>
+
+  <!-- inline stage boxes -->
+  <rect x="80" y="138" width="78" height="28" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="119" y="156" font-size="11" font-family="monospace" fill="#1a1a1a" text-anchor="middle">start</text>
+
+  <line x1="158" y1="152" x2="200" y2="152" stroke="#999" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <rect x="200" y="138" width="120" height="28" fill="#eef3f8" stroke="#2c3e50" stroke-width="1.5" rx="3"/>
+  <text x="260" y="156" font-size="11" font-family="monospace" font-weight="700" fill="#1a1a1a" text-anchor="middle">agent_loop</text>
+
+  <line x1="320" y1="152" x2="362" y2="152" stroke="#999" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <rect x="362" y="138" width="78" height="28" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="401" y="156" font-size="11" font-family="monospace" fill="#1a1a1a" text-anchor="middle">human_gate</text>
+
+  <line x1="440" y1="152" x2="482" y2="152" stroke="#999" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <rect x="482" y="138" width="78" height="28" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="521" y="156" font-size="11" font-family="monospace" fill="#1a1a1a" text-anchor="middle">render</text>
+
+  <text x="710" y="156" font-size="10" fill="#999" text-anchor="end">domain-free harness</text>
+
+  <!-- arrow down: stage hosts -->
+  <line x1="260" y1="180" x2="260" y2="218" stroke="#444" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="270" y="202" font-size="10" fill="#666">stage type</text>
+
+  <!-- AGENT_LOOP layer -->
+  <rect x="40" y="218" width="680" height="130" fill="#f7f9fb" stroke="#2c3e50" stroke-width="1.5" rx="4"/>
+  <text x="56" y="242" font-size="13" font-weight="700" fill="#1a1a1a">AGENT_LOOP  (one stage = one bounded turn loop)</text>
+  <text x="56" y="260" font-size="11" fill="#666">while not done: provider.stream() → if tool_call: dispatch via call_target → append observation → repeat</text>
+
+  <rect x="80" y="276" width="600" height="58" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="96" y="296" font-size="11" font-family="monospace" fill="#1a1a1a">tools: { read_file: node:read, write_file: node:write, search: mcp_tool:linear/issues }</text>
+  <text x="96" y="312" font-size="11" font-family="monospace" fill="#1a1a1a">max_turns: 10    backend: claude_cli    steering: { before_turn, after_turn, after_stop }</text>
+  <text x="96" y="328" font-size="10" fill="#666">tool catalog is AUTHOR-DECLARED — agent has agency only within this fence (workers-not-citizens)</text>
+
+  <!-- arrow down: loop calls -->
+  <line x1="260" y1="348" x2="260" y2="386" stroke="#444" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text x="270" y="370" font-size="10" fill="#666">stream(ctx, options)</text>
+
+  <!-- PROVIDER layer -->
+  <rect x="40" y="386" width="680" height="94" fill="#f7f9fb" stroke="#2c3e50" stroke-width="1.5" rx="4"/>
+  <text x="56" y="410" font-size="13" font-weight="700" fill="#1a1a1a">PROVIDER  (ApiProvider — one verb, replaceable seam)</text>
+  <text x="56" y="428" font-size="11" fill="#666">stream(model, context, options) → AsyncIterator&lt;StreamEvent&gt; carrying content blocks: text | thinking | toolCall</text>
+
+  <rect x="80" y="442" width="120" height="28" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="140" y="460" font-size="11" font-family="monospace" fill="#1a1a1a" text-anchor="middle">claude_cli</text>
+  <rect x="208" y="442" width="120" height="28" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="268" y="460" font-size="11" font-family="monospace" fill="#1a1a1a" text-anchor="middle">litellm</text>
+  <rect x="336" y="442" width="120" height="28" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="396" y="460" font-size="11" font-family="monospace" fill="#1a1a1a" text-anchor="middle">anthropic</text>
+  <rect x="464" y="442" width="120" height="28" fill="#eef3f8" stroke="#2c3e50" stroke-width="1" rx="3"/>
+  <text x="524" y="460" font-size="11" font-family="monospace" fill="#1a1a1a" text-anchor="middle">fake_tool</text>
+  <rect x="592" y="442" width="88" height="28" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="636" y="460" font-size="11" font-family="monospace" fill="#1a1a1a" text-anchor="middle">pi_agent</text>
+
+</svg>

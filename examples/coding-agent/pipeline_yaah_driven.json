@@ -1,0 +1,59 @@
+{
+  "nodes": {
+    "fix_bug": {
+      "type": "agent_loop",
+      "max_turns": 10,
+      "system_prompt": "file:coding_agent",
+      "tools": {
+        "read_file": {
+          "description": "Read a file's contents. Returns the file text, or an error string if the file is missing.",
+          "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"]
+          },
+          "dispatch": "fn:tools:read_file"
+        },
+        "edit_file": {
+          "description": "Replace exact-string `old_string` with `new_string` in the file at `path`. `old_string` must appear in the file VERBATIM exactly once. Returns 'ok: ...' on success or 'error: ...' on failure (try reading the file again if old_string isn't found).",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "path": {"type": "string"},
+              "old_string": {"type": "string"},
+              "new_string": {"type": "string"}
+            },
+            "required": ["path", "old_string", "new_string"]
+          },
+          "dispatch": "fn:tools:edit_file"
+        },
+        "run_tests": {
+          "description": "Run a test file to verify your fix. Returns {exit_code, stdout, stderr}. The 'test' arg is a path (relative to the working directory) to a runnable test file; it is run with a fixed interpreter, no shell.",
+          "input_schema": {
+            "type": "object",
+            "properties": {
+              "test": {"type": "string"}
+            },
+            "required": ["test"]
+          },
+          "dispatch": "fn:tools:run_tests"
+        },
+        "done": {
+          "description": "Signal that the task is complete. Carries a one-line summary of what was fixed.",
+          "input_schema": {
+            "type": "object",
+            "properties": {"summary": {"type": "string"}},
+            "required": ["summary"]
+          },
+          "dispatch": "fn:tools:done"
+        }
+      }
+    }
+  },
+  "graph": {
+    "start": "fix_bug",
+    "stages": {
+      "fix_bug": {"node": "fix_bug", "then": null}
+    }
+  }
+}

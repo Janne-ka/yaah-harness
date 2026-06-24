@@ -128,7 +128,8 @@ def scenario_underscore_keys_excluded_from_report() -> None:
             "default_prompt_source": "file",
             "pipeline": "p.json",
             "_about": "doc string",
-            "_fake": {"providers": {"f": {"type": "fake_scripted", "fixtures": "f.json"}}},
+            "_fake": {"providers": {"f": {"type": "fake_scripted", "fixtures": "f.json"}},
+                      "default_provider": "f"},
         })
         # Provenance line for a key looks like "  <key>  (source)  <value>" —
         # so the regression we're guarding is "an underscore key gets a row."

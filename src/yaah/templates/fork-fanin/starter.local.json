@@ -1,0 +1,13 @@
+{
+  "transport": {"type": "inproc"},
+  "providers": {"fake": {"type": "fake_scripted",
+                         "by_model": {
+                            "lens-a": ["{\"finding\":\"finding from lens A\"}"],
+                            "lens-b": ["{\"finding\":\"finding from lens B\"}"],
+                            "lens-c": ["{\"finding\":\"finding from lens C\"}"]}}},
+  "default_provider": "fake",
+  "state": {"type": "memory"},
+  "pipeline": "starter.json",
+  "input": "fixtures/input.json",
+  "run": true
+}

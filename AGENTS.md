@@ -72,6 +72,10 @@ are battle-tested in ways a fresh design isn't.
   render/branch.
 - **A human gate must `branch` on `decision`** — a gate with only `then` is a pause,
   not a gate; the human's reject is ignored.
+- **`fn:` targets resolve relative to the config's directory** — keep
+  `transforms.py` next to the config and it just resolves; for shared/production
+  code, package it (`pip install -e .`) and use a dotted path. Full note in
+  [docs/node-reference.md](docs/node-reference.md#transform--call-a-functionnodeurl).
 - **Compose, don't invent.** `fork`+`fanin`+`transform` express most things; a new
   node type pays a test file + future drift. (A `subpipeline` node was added and
   retired in 24h for this reason.)

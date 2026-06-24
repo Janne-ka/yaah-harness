@@ -1,0 +1,12 @@
+{
+  "transport": {"type": "inproc"},
+  "providers": {"fake": {"type": "fake_scripted",
+                         "by_model": {"summarize": ["{\"summary\":\"hello\"}"]}}},
+  "default_provider": "fake",
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "memory"},
+  "pipeline": "starter.json",
+  "input": "fixtures/input.json",
+  "run": true
+}

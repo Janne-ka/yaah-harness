@@ -47,6 +47,17 @@ where = ["src"]
 # Ship the R14-seed base configs inside the wheel so `_extends: "yaah:bases/..."`
 # resolves from an installed package, not just the source tree.
 "yaah.configs.bases" = ["*.json"]
+# Scaffold archetype templates ship as ACTUAL FILES under yaah/templates/
+# (loaded by init_template.load_template via importlib.resources). Only
+# yaah/templates itself is a Python package; the archetype subdirs are
+# plain data directories (hyphens like `branch-with-gate` aren't valid
+# Python module names, and the py39 import guard would trip on them).
+# Setuptools accepts the wildcard entries below as package-data for the
+# parent package and ships the subdirs intact.  Wildcards cover dotfiles
+# (.gitignore) and nested dirs (prompts/, fixtures/).
+"yaah.templates.linear" = ["*", ".*", "**/*"]
+"yaah.templates.branch-with-gate" = ["*", ".*", "**/*"]
+"yaah.templates.fork-fanin" = ["*", ".*", "**/*"]
 
 [tool.coverage.run]
 branch = true

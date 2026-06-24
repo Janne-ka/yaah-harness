@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 600" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="ar2" markerWidth="10" markerHeight="10" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#444"/>
+    </marker>
+  </defs>
+  <rect width="820" height="600" fill="#ffffff"/>
+  <text x="40" y="32" font-size="18" font-weight="700" fill="#1a1a1a">agent_loop.invoke() — one stage lifecycle</text>
+  <text x="40" y="52" font-size="12" fill="#666">From input envelope to result envelope. The loop body is the four boxes inside the dashed region.</text>
+
+  <!-- Input -->
+  <rect x="320" y="78" width="180" height="42" fill="#eef3f8" stroke="#2c3e50" stroke-width="1.5" rx="3"/>
+  <text x="410" y="98" font-size="11" font-weight="700" fill="#1a1a1a" text-anchor="middle">Input Envelope (Kind.TASK)</text>
+  <text x="410" y="113" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">payload.goal: "fix the bug in foo.py"</text>
+
+  <line x1="410" y1="120" x2="410" y2="148" stroke="#444" stroke-width="1.4" marker-end="url(#ar2)"/>
+
+  <!-- One-time setup -->
+  <rect x="60" y="148" width="700" height="84" fill="#fafafa" stroke="#bbbbbb" stroke-width="1" rx="3"/>
+  <text x="76" y="168" font-size="11" font-weight="700" fill="#1a1a1a">One-time setup (runs once per invoke)</text>
+
+  <rect x="84" y="180" width="216" height="40" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="192" y="200" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">resolve system_prompt</text>
+  <text x="192" y="214" font-size="9" fill="#666" text-anchor="middle">"file:agent" → prompt_source.get("agent")</text>
+
+  <rect x="312" y="180" width="216" height="40" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="420" y="200" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">build tool_specs ONCE</text>
+  <text x="420" y="214" font-size="9" fill="#666" text-anchor="middle">[{name, description, input_schema}, ...]</text>
+
+  <rect x="540" y="180" width="216" height="40" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="648" y="200" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">init messages</text>
+  <text x="648" y="214" font-size="9" fill="#666" text-anchor="middle">[{role: "user", content: goal}]</text>
+
+  <line x1="410" y1="232" x2="410" y2="260" stroke="#444" stroke-width="1.4" marker-end="url(#ar2)"/>
+
+  <!-- Loop region -->
+  <rect x="60" y="260" width="700" height="240" fill="#f7f9fb" stroke="#2c3e50" stroke-width="1.5" stroke-dasharray="4,3" rx="6"/>
+  <text x="76" y="280" font-size="11" font-weight="700" fill="#1a1a1a">Loop body — for turn in range(max_turns):</text>
+
+  <!-- backend.turn -->
+  <rect x="200" y="294" width="420" height="44" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="410" y="314" font-size="11" font-family="monospace" font-weight="700" fill="#1a1a1a" text-anchor="middle">response = await backend.turn(messages, tool_specs, ...)</text>
+  <text x="410" y="328" font-size="9" fill="#666" text-anchor="middle">response.text and/or response.calls</text>
+
+  <line x1="410" y1="338" x2="410" y2="358" stroke="#444" stroke-width="1.2"/>
+  <text x="416" y="354" font-size="10" font-style="italic" fill="#666">stop_reason?</text>
+
+  <!-- Branch -->
+  <line x1="410" y1="358" x2="220" y2="378" stroke="#444" stroke-width="1.2" marker-end="url(#ar2)"/>
+  <line x1="410" y1="358" x2="600" y2="378" stroke="#444" stroke-width="1.2" marker-end="url(#ar2)"/>
+
+  <rect x="84" y="380" width="280" height="80" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="224" y="400" font-size="11" font-weight="700" fill="#1a1a1a" text-anchor="middle">text and no calls → DONE</text>
+  <text x="224" y="418" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">return reply_with(Kind.RESULT,</text>
+  <text x="224" y="432" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">  {answer, turns, outcome:</text>
+  <text x="224" y="446" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">  "completed"})</text>
+
+  <rect x="456" y="380" width="288" height="80" fill="#ffffff" stroke="#999" stroke-width="1" rx="3"/>
+  <text x="600" y="400" font-size="11" font-weight="700" fill="#1a1a1a" text-anchor="middle">calls → DISPATCH</text>
+  <text x="600" y="418" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">for call in calls:</text>
+  <text x="600" y="432" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">  result = call_target(target, args, ...)</text>
+  <text x="600" y="446" font-size="10" fill="#666" text-anchor="middle">see tool-dispatch.svg</text>
+
+  <!-- Back arrow to loop -->
+  <line x1="600" y1="460" x2="600" y2="476" stroke="#444" stroke-width="1.2"/>
+  <line x1="600" y1="476" x2="80" y2="476" stroke="#444" stroke-width="1.2"/>
+  <line x1="80" y1="476" x2="80" y2="316" stroke="#444" stroke-width="1.2"/>
+  <line x1="80" y1="316" x2="198" y2="316" stroke="#444" stroke-width="1.2" marker-end="url(#ar2)"/>
+  <text x="88" y="395" font-size="9" font-style="italic" fill="#666">append</text>
+  <text x="88" y="408" font-size="9" font-style="italic" fill="#666">results</text>
+  <text x="88" y="421" font-size="9" font-style="italic" fill="#666">to messages</text>
+
+  <!-- Output -->
+  <line x1="224" y1="460" x2="224" y2="520" stroke="#444" stroke-width="1.4" marker-end="url(#ar2)"/>
+
+  <rect x="240" y="522" width="340" height="44" fill="#eef3f8" stroke="#2c3e50" stroke-width="1.5" rx="3"/>
+  <text x="410" y="542" font-size="11" font-weight="700" fill="#1a1a1a" text-anchor="middle">Result Envelope (Kind.RESULT)</text>
+  <text x="410" y="557" font-size="10" font-family="monospace" fill="#1a1a1a" text-anchor="middle">{answer, turns, outcome: completed | empty_response | max_turns_exhausted}</text>
+
+  <text x="56" y="588" font-size="10" font-style="italic" fill="#666">Tool errors flow back as observations (is_error: True); loop continues. Loop-internal errors crash the stage.</text>
+
+</svg>

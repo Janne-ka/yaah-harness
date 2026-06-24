@@ -1,0 +1,22 @@
+{
+  "transport": {"type": "inproc"},
+  "providers": {
+    "fake_tool": {
+      "type": "fake_tool",
+      "turns": [
+        {"text": "Let me look at the data file first.",
+         "calls": [{"id": "c1", "name": "read_file", "args": {"path": "fixtures/data.txt"}}]},
+        {"text": "Got it. Now I'll summarize and finish.",
+         "calls": [{"id": "c2", "name": "done", "args": {"summary": "data.txt contained the input goal"}}]},
+        {"text": "Task complete."}
+      ]
+    }
+  },
+  "default_provider": "fake_tool",
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "memory"},
+  "pipeline": "pipeline.json",
+  "input": "fixtures/input.json",
+  "run": true
+}

@@ -57,7 +57,7 @@ The substrate is `KVStore`; `BatonStore`, `IdempotencyStore`, and the durable
 We do not pick a database. We define a **base store contract**; every concrete
 store (memory, file, blob/object, sqlite, mongo, redis, nats_kv, …) is an
 **extender** of it, selected by config from a registry — exactly like
-`ModelBackend`, `DataSource`/`DataSink`, and `PrefixRouter` already work. None is
+`ApiProvider`, `DataSource`/`DataSink`, and `PrefixRouter` already work. None is
 privileged; none is baked in beyond the in-memory default.
 
 Backends differ in what they can do (a blob/object store can't compare-and-set or

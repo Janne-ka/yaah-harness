@@ -76,7 +76,7 @@ the application sits entirely above the engine.
 ║    root-config bootstrap, gate CLI. The ONLY place adapters get wired.║
 ╠══════════════════════════════════════════════════════════════════════╣
 ║ 5. CAPABILITY PORTS + DEFAULTS                                        ║  pluggable
-║    prompts/ · data/ · mcp/ · store/ · ModelBackend (in agents/)       ║
+║    prompts/ · data/ · mcp/ · store/ · ApiProvider (in agents/)        ║
 ║    each = a Protocol + zero-config default + a Routing `source:key`   ║
 ╠══════════════════════════════════════════════════════════════════════╣
 ║ 4. WORKER LIBRARY  nodes/ · agents/                                   ║  the work
@@ -149,8 +149,8 @@ application draws from.
 
 | Component | Responsibility |
 |---|---|
-| `agents/Agent` | the LLM worker — render prompt (inline or from a PromptSource) + feedback, call a `ModelBackend`, return raw output; optional tools + MCP + worktree cwd |
-| `agents/` backends + `tool_loop`/`tool` | `ModelBackend` port; `Fake`/`Scripted`/`Routing` defaults; model-initiated tool-call loop |
+| `agents/Agent` | the LLM worker — render prompt (inline or from a PromptSource) + feedback, call an `ApiProvider`, return raw output; optional tools + MCP + worktree cwd |
+| `agents/` backends + `tool_loop`/`tool` | `ApiProvider` port; `Fake`/`Scripted`/`Routing` defaults; model-initiated tool-call loop |
 | `agents/envelope_tool` (R9 `envelope_get`) | built-in tool bound per-invocation: the model PULLS slices from its own envelope under an `expose` allow-list + `max_chars` cap. Lets a slim arm fetch on demand instead of inlining the whole envelope |
 | `agents/context_broker_tool` (R12 `context_broker`) | the fuzzy companion to R9: same allow-list, but the agent describes what it needs in NL and a cheap broker NODE (regular yaah agent at `broker_role`) returns the slice. FAST PATH = if `field:` is allow-listed + present, served locally without a model call |
 | `agents/manifest` (R11 `tool_manifest`) | renders an agent's `tools` into a deterministic markdown block via `{{tool_manifest}}` so prompts don't hand-write usage. With a turn-capable backend, the SAME Tool spec feeds `to_function_schema()` — one source of truth |
@@ -159,7 +159,7 @@ application draws from.
 | `nodes/` shell · shell_check · render · worktree · once | deterministic workers: run a command / assert exit / fill a template / git-worktree isolation / run-effect-once wrapper |
 | `validators.py`, `build/human_gate` | generic validators (`json_object`, `expect_field`) and the `human_gate` (returns `await`) |
 
-### 5. Capability ports + defaults — `prompts/`, `data/`, `mcp/`, `store/` (+ `ModelBackend` in `agents/`)
+### 5. Capability ports + defaults — `prompts/`, `data/`, `mcp/`, `store/` (+ `ApiProvider` in `agents/`)
 Where a node gets its externalizable inputs. Each layer is the **same pattern**: a
 `Protocol` port, an in-memory/static **default**, and a `Routing*` composer that
 dispatches a `source:key` string (e.g. `file:eval`, `git:`, `registry:acme-prod`).
@@ -170,7 +170,7 @@ dispatches a `source:key` string (e.g. `file:eval`, `git:`, `registry:acme-prod`
 | `DataSource`/`DataSink` (data/) | — | **get**/**post** payloads |
 | `McpSource` (mcp/) | `StaticMcpSource` | an agent's MCP server set |
 | `Store` (store/) | `MemoryStore` | durable baton state + idempotency (`store/idempotency.py`, the `once` node) |
-| `ModelBackend` (agents/) | `FakeBackend`/`ScriptedBackend` | a provider via `provider:model` |
+| `ApiProvider` (agents/) | `FakeBackend`/`ScriptedBackend` | a provider via `provider:model` |
 
 ### 6. Assembly — `build/`, `runtime.py` (+ `runtime_factories.py`)
 Turns config into a wired, running harness. The seam where everything is composed
@@ -296,7 +296,7 @@ A `spec` stage with a JSON validator and a human gate, to see the layers coopera
 2. **Comms** (2) routes to the `spec` node — an **Agent** (4).
 3. The **Agent** fetches its prompt via the **PromptSource** port (5) using
    `prompt: "file:spec"` → the **file adapter** reads it; folds in `payload` +
-   any retry `feedback`; calls the **ModelBackend** router (5) → the **claude
+   any retry `feedback`; calls the **ApiProvider** router (`RoutingBackend`, 5) → the **claude
    adapter** runs `claude -p`. Returns a `result` Envelope.
 4. **Harness** runs the stage's validator (`json_object`, layer 4). Soft fails are
    recorded on the baton as `concerns`; a hard fail re-invokes the Agent with the

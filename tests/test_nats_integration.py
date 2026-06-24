@@ -29,7 +29,9 @@ from yaah.validators import JsonObjectValidator
 async def main() -> None:
     servers = os.environ.get("NATS_URL", "nats://127.0.0.1:4222")
     try:
-        comms = await NatsComms(servers).connect()
+        # Short connect_timeout so a missing broker skips this test in ~2s
+        # rather than stalling the suite on nats-py's initial-connect retries.
+        comms = await NatsComms(servers, connect_timeout=2.0).connect()
     except Exception as e:  # no server reachable
         print("skip: cannot connect to nats ({})".format(e))
         return

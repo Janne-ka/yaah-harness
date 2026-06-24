@@ -1,0 +1,16 @@
+{
+  "nodes": {
+    "role:summarize": {"type": "agent", "prompt": "file:summarize",
+                       "model": "fake:summarize", "stage": "summarize"},
+    "role:render":    {"type": "render", "template_file": "templates/output.html",
+                       "out": "summary.html"}
+  },
+  "graph": {
+    "start": "summarize",
+    "stages": {
+      "summarize": {"node": "role:summarize",
+                    "max_attempts": 3, "feedback": true, "then": "render"},
+      "render":    {"node": "role:render", "then": null}
+    }
+  }
+}

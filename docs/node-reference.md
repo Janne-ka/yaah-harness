@@ -83,6 +83,13 @@ payload-derived**), `node:role` (another node over Comms), or `http(s)://url`
                  "target": "fn:app.transforms:merge_findings"}
 ```
 
+**Where `fn:` resolves from.** `fn:module:func` targets are imported relative
+to your config file's directory — keep your `transforms.py` / tool module next
+to your config and it just resolves. For shared or production code, install it
+as a package (`pip install -e .`) and use a dotted path, e.g.
+`fn:mypkg.transforms:func`. The convenience is the on-ramp; packaging is the
+durable path.
+
 ## `get` — read through the data port
 
 `source` (required): a `"source:key"` ref into the data-source layer

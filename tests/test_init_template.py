@@ -17,7 +17,7 @@ import os
 import shutil
 import tempfile
 
-from yaah.init_template import ARCHETYPES, STARTER_TEMPLATE, scaffold
+from yaah.init_template import ARCHETYPES, load_template, scaffold
 from yaah.validate import validate_root, validate_pipeline
 
 
@@ -31,14 +31,15 @@ def _read(path: str) -> str:
 
 
 def main() -> None:
+    linear = load_template("linear")
     tmp = tempfile.mkdtemp(prefix="yaah-init-")
     try:
         target = os.path.join(tmp, "my-pipeline")
         n = scaffold(target)
-        assert n == len(STARTER_TEMPLATE), (n, len(STARTER_TEMPLATE))
+        assert n == len(linear), (n, len(linear))
 
         # every declared file landed on disk with its declared content
-        for rel, expected in STARTER_TEMPLATE.items():
+        for rel, expected in linear.items():
             got = _read(os.path.join(target, rel))
             assert got == expected, "scaffold corrupted {}".format(rel)
 
@@ -62,7 +63,7 @@ def main() -> None:
 
         # drift check: the embed must mirror examples/hello-yaah exactly.
         # If you intentionally update one, update the other in the same commit.
-        for rel, expected in STARTER_TEMPLATE.items():
+        for rel, expected in linear.items():
             example_path = os.path.join(EXAMPLE, rel)
             assert os.path.exists(example_path), \
                 "embed has {} but example doesn't — drift".format(rel)
@@ -80,7 +81,9 @@ def scenario_scaffold_every_archetype() -> None:
     lands on disk, the produced starter root + pipeline validate, and no
     archetype shares its target directory with another (the FileExistsError
     refusal still bites the second scaffold)."""
-    for name, template in ARCHETYPES.items():
+    from yaah.init_template import load_template
+    for name in ARCHETYPES:
+        template = load_template(name)
         tmp = tempfile.mkdtemp(prefix="yaah-arch-{}-".format(name))
         try:
             target = os.path.join(tmp, "p")
@@ -138,7 +141,24 @@ def scenario_scaffold_unknown_archetype() -> None:
     print("PASS scaffold rejects unknown archetypes with an actionable message")
 
 
+def scenario_archetypes_and_descriptions_in_sync() -> None:
+    """ARCHETYPES (the templates) and ARCHETYPE_DESCRIPTIONS (the catalog
+    `yaah scaffold --list` prints) must declare the same keys. Without this
+    check, adding a new template means `scaffold --list` shows "(no
+    description)" — invisible drift the first user notices."""
+    from yaah.init_template import ARCHETYPE_DESCRIPTIONS, ARCHETYPES
+    missing = set(ARCHETYPES) - set(ARCHETYPE_DESCRIPTIONS)
+    extra = set(ARCHETYPE_DESCRIPTIONS) - set(ARCHETYPES)
+    assert not missing, "archetype(s) without a --list description: {}".format(missing)
+    assert not extra, "description(s) for non-existent archetype(s): {}".format(extra)
+    # The description text isn't empty / placeholder-only.
+    for name, desc in ARCHETYPE_DESCRIPTIONS.items():
+        assert len(desc) >= 30, "{}: description too short: {!r}".format(name, desc)
+    print("PASS archetypes and --list descriptions are in sync")
+
+
 if __name__ == "__main__":
     main()
     scenario_scaffold_every_archetype()
     scenario_scaffold_unknown_archetype()
+    scenario_archetypes_and_descriptions_in_sync()

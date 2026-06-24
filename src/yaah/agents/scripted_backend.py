@@ -1,4 +1,4 @@
-"""ScriptedBackend — a deterministic ModelBackend keyed by model name.
+"""ScriptedBackend — a deterministic ApiProvider keyed by model name.
 
 Used by: multi-stage offline runs (the runtime's `fake_scripted` provider) and
 tests, where each stage needs its own canned output.
@@ -23,16 +23,24 @@ gracefully across cross-process resume:
 
 EXHAUSTION (assessment cluster 3 B2): when the cursor passes the end of the
 sequence, return `self._default` — same shape as FakeBackend, so the offline
-defaults aren't three answers to one question (FakeBackend → default,
-scripted_tool_backend → distinct default, this one used to repeat seq[-1]).
-Callers wanting loud failure pass `on_exhaustion="raise"`; `"repeat_last"`
+defaults aren't three answers to one question. Callers wanting loud failure
+pass `on_exhaustion="raise"` (raises IndexError, preserved through the new
+stream protocol because the exception propagates naturally — error events
+are for soft errors; truly exceptional cases raise); `"repeat_last"`
 restores the old behavior.
+
+After B2.2 (provider unification): native ApiProvider. `stream()` is the
+canonical method, `complete()` is a thin wrapper delegating to the module-
+level helper. Both share the same cursor state, so legacy callers and
+new consumers can interleave without surprise.
 
 Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
+
+from . import api_provider as _ap
 
 
 class ScriptedBackend:
@@ -51,16 +59,30 @@ class ScriptedBackend:
         self._default = default
         self._on_exhaustion = on_exhaustion
 
-    async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
-        m = model or ""
-        seq = self._by.get(m)
+    def stream(self, context: _ap.Context, **opts: Any) -> AsyncIterator[_ap.StreamEvent]:
+        return self._iter(context)
+
+    async def _iter(self, context: _ap.Context) -> AsyncIterator[_ap.StreamEvent]:
+        yield {"type": "start"}
+        prompt = _prompt_text(context.get("messages") or [])
+        model = context.get("model") or ""
+        text = self._next(prompt, model)
+        if text:
+            yield {"type": "text_delta", "delta": text}
+        yield {"type": "done", "stop_reason": "end_turn"}
+
+    def _next(self, prompt: str, model: str) -> str:
+        """Shared cursor logic — same algorithm as the legacy complete()
+        used so resume durability + content-cursor + on_exhaustion behave
+        identically through both stream() and complete()."""
+        seq = self._by.get(model)
         if not seq:
             return self._default
-        process_cursor = self._i.get(m, 0)
+        process_cursor = self._i.get(model, 0)
         content_cursor = sum(1 for s in seq if s and s in prompt)
         turn = max(process_cursor, content_cursor)
         if turn < len(seq):
-            self._i[m] = turn + 1   # advance same-process counter (idempotent vs content)
+            self._i[model] = turn + 1   # advance same-process counter (idempotent vs content)
             return seq[turn]
         if self._on_exhaustion == "raise":
             raise IndexError(
@@ -69,3 +91,23 @@ class ScriptedBackend:
         if self._on_exhaustion == "repeat_last":
             return seq[-1]
         return self._default
+
+    async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
+        return await _ap.complete(self, prompt, model=model, **opts)
+
+
+def _prompt_text(messages: List[Dict[str, Any]]) -> str:
+    """Reconstruct a prompt-like string from a messages list so the
+    content_cursor heuristic keeps working when called via stream(). The
+    legacy complete() received a raw prompt string; the new path uses
+    {messages: [{"role": "user", "content": prompt}]}, so the most-recent
+    user-string content is the equivalent."""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            content = msg.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "".join(b.get("text", "") for b in content
+                               if isinstance(b, dict) and b.get("type") == "text")
+    return ""
