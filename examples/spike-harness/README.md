@@ -7,8 +7,8 @@ tool call → harness dispatches via `call_target` → result flows back
 
 ## What this demonstrates
 
-YAAH had the `ToolBackend.turn(messages, tools)` protocol but no node
-that drove a loop against it. Phase 1a closes that gap:
+YAAH had an `ApiProvider` seam whose `stream()` a loop drives, but no
+node that drove that loop. Phase 1a closes that gap:
 
 - `src/yaah/nodes/agent_loop_node.py` — the loop. Bounded by
   `max_turns`. Tool catalog is **author-declared** (preserves
@@ -26,8 +26,11 @@ that drove a loop against it. Phase 1a closes that gap:
 ## Run it
 
 ```bash
-python3 -m yaah.runtime examples/spike-harness/local.json
+yaah run examples/spike-harness/local.json
 ```
+
+(Not installed? `python3 -m yaah.runtime examples/spike-harness/local.json`
+is the equivalent; from a source checkout prefix `PYTHONPATH=src`.)
 
 Expected: three scripted turns (read_file → done → final), result
 envelope with `answer: "Task complete."`, `turns: 3`,
@@ -51,7 +54,7 @@ envelope with `answer: "Task complete."`, `turns: 3`,
 Phase 1a deliberately keeps things small:
 
 - Backend is **scripted-only** (`fake_tool`). A real
-  `claude_cli_backend.turn()` implementation is Phase 1b work.
+  `claude_cli_backend.stream()` implementation **shipped in 1b**.
 - Tools are `fn:` dispatch only here. `node:`, `http:`, and a
   future `mcp_tool` adapter node would compose without engine
   change.
@@ -72,13 +75,13 @@ Read in this order (~150 lines of new code total):
 5. `examples/spike-harness/local.json` — runtime wiring
 6. `tests/test_agent_loop.py` — end-to-end coverage
 
-## What's next (Phase 1b)
+## Shipped in 1b
 
-The decision gate fires here: does the shape feel right? If yes:
-- Provider unification (collapse `ModelBackend`/`ToolBackend` into
-  one streaming `ApiProvider`)
-- `claude_cli_backend.turn()` (real backend driving the loop)
-- A realistic coding-agent example (read/edit/bash on a fixture)
-
-If no: the cheap time to redesign is HERE, before the larger
-rewrite commits to the current shape.
+The decision gate fired here — the shape held, and Phase 1b landed
+all three follow-ons:
+- Provider unification — one streaming `ApiProvider` seam with
+  `stream()` as the single required method (the old `ModelBackend`/
+  `ToolBackend` Protocols are gone).
+- `claude_cli_backend.stream()` — a real backend driving the loop.
+- A realistic coding-agent example (read/edit/test on a fixture) —
+  see `examples/coding-agent/`.

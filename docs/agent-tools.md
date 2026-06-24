@@ -145,6 +145,11 @@ So **tools are uniform config; execution is per-backend.** The loop, the
 `call_target` resolver, and the `Tool` spec are shared; only `turn` is
 backend-specific.
 
+(`stream()` is the native `ApiProvider` interface every backend implements;
+`turn()`/`complete()` survive as collected-shape projection helpers over a
+stream — so "implements `turn`" above reads as "exposes the collected
+tool-call projection", not a second port.)
+
 ## Why not make every tool a node?
 
 You can — wrap a capability in a `transform` and route to it as a stage. But a

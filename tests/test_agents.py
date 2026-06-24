@@ -110,10 +110,8 @@ async def scenario_claude_per_agent_tools() -> None:
 
 
 async def scenario_backend_protocol_conformance() -> None:
-    # Post-B6: ModelBackend + ToolBackend Protocols are gone. The canonical
-    # check is now ApiProvider (every backend implements stream()) plus a
-    # structural `hasattr(b, "turn")` for tool-capable ones. The shape this
-    # test enforces hasn't changed — only the type system it expresses it in.
+    # The canonical conformance check is ApiProvider (every backend implements
+    # stream()) plus a structural `hasattr(b, "turn")` for tool-capable ones.
     from yaah.agents import (ApiProvider, FakeBackend, RoutingBackend,
                              ScriptedBackend, ScriptedToolBackend)
     from yaah.adapters.backends import ClaudeCliBackend, LiteLLMBackend

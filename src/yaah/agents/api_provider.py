@@ -1,20 +1,18 @@
-"""ApiProvider — the streaming model interface (replaced the legacy ModelBackend).
+"""ApiProvider — the streaming model interface.
 
 Used by: call sites that want event-level visibility (token deltas, tool-call
 assembly, usage events) — e.g. run_tool_loop consumes provider.stream()
 directly. Implemented by: every backend natively (FakeBackend, ScriptedBackend,
 FakeToolBackend, ScriptedToolBackend, LiteLLMBackend, ClaudeCliBackend,
 RoutingBackend).
-Where: the model seam. The legacy ModelBackend/ToolBackend Protocols were
-removed in B6, and the LegacyBackendAdapter bridge was removed in MED-001
-(its migration purpose was complete — a new backend author implements
-stream(), not the old turn()). Module-level helpers `complete()` and `turn()`
-project a stream into the OLD return shapes for callers that still want a
-collected result.
-Why: the current `complete() -> str` / `turn() -> {text|calls}` pair is a
-collected-result shape. It can't surface partial outputs, makes streaming
-backends impossible to wire cleanly, and forces the tool-loop to assemble
-tool calls from whatever ad-hoc dict the backend chose. A single
+Where: the model seam. A backend author implements `stream()` and nothing
+else. Module-level helpers `complete()` and `turn()` project a stream into
+collected-result shapes (a string / a `{text, calls}` dict) for call sites
+that don't want to drain the stream themselves.
+Why: a collected-result `complete() -> str` / `turn() -> {text|calls}` pair
+can't surface partial outputs, makes streaming backends impossible to wire
+cleanly, and forces the tool-loop to assemble tool calls from whatever ad-hoc
+dict the backend chose. A single
 `stream(context) -> AsyncIterator[StreamEvent]` matches what every
 provider's wire format already is, and is the shape Pi-ai converged on
 after the same evolution.
@@ -130,7 +128,7 @@ class Context(TypedDict, total=False):
 
 @runtime_checkable
 class ApiProvider(Protocol):
-    """Single-method streaming provider. Replaces ModelBackend over Phase 1b.
+    """Single-method streaming provider — the model seam every backend implements.
 
     Implementations MUST yield a `start` event first and a `done` (or
     `error`) event last. Between them: any number of `text_delta` events
@@ -194,7 +192,7 @@ async def assemble_message(events: AsyncIterator[StreamEvent]) -> AssistantMessa
 async def complete(provider: ApiProvider, prompt: str, *,
                    model: Optional[str] = None, system: Optional[str] = None,
                    **opts: Any) -> str:
-    """Same return shape as ModelBackend.complete() — a single string.
+    """Collect a stream into a single string (the `complete()` shape).
 
     Drives the provider with a one-message user prompt, collects every
     text block into one string. Migration helper: call sites can swap
@@ -213,7 +211,7 @@ async def turn(provider: ApiProvider, messages: List[Dict[str, Any]],
                tools: List[Dict[str, Any]], *,
                model: Optional[str] = None, system: Optional[str] = None,
                **opts: Any) -> Dict[str, Any]:
-    """Same return shape as ToolBackend.turn() — `{text, calls}` dict.
+    """Collect a stream into a `{text, calls}` dict (the `turn()` shape).
 
     Calls are projected from tool_use content blocks into the
     `{id, name, args}` shape the existing tool-loop expects. Text is

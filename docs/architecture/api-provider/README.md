@@ -74,10 +74,9 @@ intentional cleanup commit.
 events: `start`, `text_delta`, `toolcall_end`, `done`, `error`. Module-
 level helpers `complete(provider, prompt)` and `turn(provider, messages,
 tools)` reproduce the legacy return shapes by draining a stream — so call
-sites can migrate one at a time without big-bang renames. The
-`LegacyBackendAdapter` wraps any current `ModelBackend`/`ToolBackend` as
-an `ApiProvider` (non-streaming sources collapse to a single
-`text_delta`), so the new protocol works against EVERY existing backend
-from day one. Native `stream()` implementations replace the adapter
-backend-by-backend as B2 progresses, gaining wire-level streaming as a
-byproduct.
+sites can migrate one at a time without big-bang renames. Through the
+migration, a `LegacyBackendAdapter` wrapped any legacy backend as an
+`ApiProvider` (non-streaming sources collapse to a single `text_delta`),
+so the new protocol worked against EVERY existing backend from day one;
+it was removed in MED-001 once native `stream()` implementations replaced
+it backend-by-backend, gaining wire-level streaming as a byproduct.

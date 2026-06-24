@@ -3,10 +3,9 @@ zero-dependency reference backends (Fake / Scripted / Routing). The external
 model providers (claude_cli, litellm) are swap-in adapters in
 yaah.adapters.backends. One class per file; re-exported for convenience.
 
-Post-B6: the legacy ModelBackend / ToolBackend Protocols are gone; every
-backend implements ApiProvider natively. Type annotations that named the
-old Protocols now use `Any` (or `ApiProvider` when streaming is required).
-See .notes/breaking-changes.md for the consumer migration guide.
+Every backend implements ApiProvider (`stream()`) natively. Backend type
+annotations use `Any` (structural duck-typing) — or `ApiProvider` where
+streaming is explicitly required.
 """
 from .agent import Agent
 from .api_provider import ApiProvider

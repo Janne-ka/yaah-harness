@@ -15,10 +15,9 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-# `backend` is typed as Any post-B6 (legacy ModelBackend Protocol removed
-# once every backend implemented ApiProvider). The build layer only forwards
-# the backend handle; it doesn't introspect it, so a structural Any is the
-# honest annotation.
+# `backend` is typed as Any: the build layer only forwards the backend handle
+# (a structural ApiProvider); it never introspects it, so a structural Any is
+# the honest annotation.
 from ..comms import Comms, InProcessComms
 from ..harness import Graph, Harness, Stage
 from ..runtime_factories import _read_json  # `_extends`-aware JSON loader

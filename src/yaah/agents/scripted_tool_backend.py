@@ -76,10 +76,10 @@ class ScriptedToolBackend:
         return {"text": self._default}
 
     async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
-        # Legacy: a plain ModelBackend for tool-less use returned self._default.
-        # The new stream-path consumes a script turn (which is loop-shaped) —
-        # preserve the "complete() returns default, doesn't touch the script"
-        # contract so non-loop callers don't accidentally consume tool turns.
+        # Tool-less `complete()` returns self._default and does NOT touch the
+        # script — the stream/turn path consumes script turns (which are
+        # loop-shaped), so keeping complete() script-free stops non-loop
+        # callers from accidentally consuming a tool turn.
         return self._default
 
     async def turn(self, messages: List[dict], tools: List[dict], *,

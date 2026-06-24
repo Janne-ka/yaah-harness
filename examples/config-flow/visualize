@@ -10,10 +10,8 @@
 # the output dir with the OUTPUT_DIR env var:
 #   OUTPUT_DIR=. ./visualize ../hello-yaah/starter.local.json
 #
-# Auto-approves at the gate. For interactive review, run the pipeline directly:
-#   python3 -m yaah.runtime config-flow.real.json
-#   yaah list config-flow.real.json    # see the parked baton
-#   yaah resume config-flow.real.json <id> approve.json
+# The pipeline is gateless — config-flow is regenerable, so there's nothing to
+# approve. To run it directly:  yaah run config-flow.real.json
 
 set -euo pipefail
 

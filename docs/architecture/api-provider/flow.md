@@ -29,6 +29,9 @@ The events that compose a turn:
 
 ## 2. LegacyBackendAdapter — the bridge
 
+> **Historical** — the `LegacyBackendAdapter` was removed in MED-001; this
+> section documents the migration bridge as it existed through B1–B6.
+
 The adapter lets the new protocol work against EVERY existing backend
 from day one. No consumer is blocked waiting for B2 migration.
 

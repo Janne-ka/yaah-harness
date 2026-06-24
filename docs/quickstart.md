@@ -22,8 +22,12 @@ them for this.)
 
 ```bash
 cd examples/hello-yaah
-python3 -m yaah.runtime starter.local.json
+yaah run starter.local.json
 ```
+
+(Step 1 installed the `yaah` console script. Not pip-installed? `python3 -m
+yaah.runtime starter.local.json` is the equivalent; from a source checkout
+prefix `PYTHONPATH=src`.)
 
 You should see each stage trace, then `RESULT: Done`, and a `summary.html` file:
 

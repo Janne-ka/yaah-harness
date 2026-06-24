@@ -17,7 +17,7 @@ from yaah.trace.contributors import CostContributor, PhaseContributor, ToolsCont
 
 
 class _UsageBackend:
-    """A ModelBackend that reports token usage via the R4 on_usage callback."""
+    """A backend that reports token usage via the R4 on_usage callback."""
     async def complete(self, prompt, *, model=None, **opts):
         on_usage = opts.get("on_usage")
         if on_usage is not None:

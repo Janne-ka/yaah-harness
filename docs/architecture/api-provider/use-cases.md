@@ -160,9 +160,11 @@ the model itself.
 
 ## Cross-cutting observations
 
-**What the protocol unlocks today (B1):** capability uniformity (every
-backend goes through the same shape) + the migration affordance
-(LegacyBackendAdapter means consumers don't have to wait).
+**What the protocol unlocks (B1):** capability uniformity (every
+backend goes through the same shape). During the B1–B6 migration a
+`LegacyBackendAdapter` let consumers adopt the protocol before backends
+were migrated; it was removed in MED-001 once every backend implemented
+`stream()` natively.
 
 **What ships as backends migrate (B2–B5):** real token streaming (5–6),
 partial tool-call surfacing (3+), per-token tracing (3).

@@ -1,5 +1,5 @@
 {
-  "_doc": "Offline / fake config for the config-flow visualizer. Same trick as arch-drift.local.json: fake_scripted provider returns a canned mermaid response, MERMAID_RENDERER=:canned returns a canned SVG. Runs end-to-end with no API key and no mmdc install — for verifying the pipeline shape, the snapshot output, and the gate/render flow. trace.capture includes 'cost' so future attacher use works without re-editing.",
+  "_doc": "Offline / fake config for the config-flow visualizer. Same trick as arch-drift.local.json: fake_scripted provider returns a canned mermaid response, MERMAID_RENDERER=:canned returns a canned SVG. Runs end-to-end with no API key and no mmdc install — for verifying the pipeline shape, the snapshot output, and the render flow (gateless). trace.capture includes 'cost' so future attacher use works without re-editing.",
   "transport": {"type": "inproc"},
   "providers": {
     "claude": {

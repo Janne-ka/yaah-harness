@@ -53,6 +53,9 @@ The honest tradeoff:
 
 ## How to run
 
+(Not installed? `python3 -m yaah.runtime <config>` is the equivalent of
+`yaah run <config>`; from a source checkout prefix `PYTHONPATH=src`.)
+
 ### Offline (fake_tool, YAAH-driven, no model, no network, no cost)
 
 Uses `pipeline_yaah_driven.json` (agent_loop) + `local.json` (fake_tool
@@ -64,7 +67,7 @@ cd examples/coding-agent
 # the hardened tools confine all FS access here and refuse to run without it.
 # scripted tool paths are relative and resolve against this dir — no sed needed.
 export YAAH_CODING_AGENT_WORKDIR="$PWD/fixtures/buggy_code"
-PYTHONPATH=$PWD:../../src python3 -m yaah.runtime local.json
+yaah run local.json
 # verify the fix
 cd fixtures/buggy_code && python3 test_is_fizzbuzz.py
 # reset for the next run
@@ -88,7 +91,7 @@ Claude uses its native tools to fix the file.
 
 ```bash
 cd examples/coding-agent
-PYTHONPATH=../../src python3 -m yaah.runtime claude.json
+yaah run claude.json
 # verify the fix
 cd fixtures/buggy_code && python3 test_is_fizzbuzz.py
 # reset
@@ -124,12 +127,13 @@ to `litellm.json` and replace the provider section:
 ```
 
 Then set the relevant API key in the environment (`OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, etc.) and run `python3 -m yaah.runtime litellm.json`.
+`ANTHROPIC_API_KEY`, etc.) and run `yaah run litellm.json`.
 
 The current `LiteLLMBackend` collapses to a single non-streaming
 `acompletion()` call internally — sufficient for this example's "model
 decides which tool to call" pattern, but real chunk-by-chunk streaming
-is a future upgrade (see `.notes/breaking-changes.md`, B2.5 entry).
+is a future upgrade (see `.notes/breaking-changes.md`, the
+"B2.1–B2.7: ApiProvider migration" entry).
 
 ## What this example proves about the harness
 

@@ -8,7 +8,8 @@ Comms, an HTTP endpoint.
 Why: keep "what to call" a single config string; map args in, result out.
 
 Schemes:
-  fn:module:func   -> call a local callable(args) (sync or async)
+  fn:module:func   -> call a local callable(args) (sync or async); imported
+                      relative to the config's directory (see docs/node-reference.md)
   node:role        -> Comms.request(role, args)
   http(s)://URL    -> POST args as JSON, parse the JSON reply (stdlib urllib)
 

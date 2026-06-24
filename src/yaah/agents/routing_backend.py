@@ -30,17 +30,17 @@ from ..prefix_router import PrefixRouter
 from . import api_provider as _ap
 
 
-# Generic parameter is Any post-B6: the legacy ModelBackend Protocol was
-# removed once every backend implemented ApiProvider natively. Structural
-# duck-typing on `complete` / `turn` / `stream` is what RoutingBackend
-# actually does at dispatch time; the Protocol was a type-only ornament.
+# Generic parameter is Any: leaf backends are structural ApiProviders,
+# duck-typed on `complete` / `turn` / `stream` at dispatch time. That runtime
+# dispatch is the real contract; a static Protocol annotation would only be a
+# type-only ornament over it.
 class RoutingBackend(PrefixRouter[Any]):
     label = "backend"
     prefix = "provider"
 
     def stream(self, context: _ap.Context, **opts: Any) -> AsyncIterator[_ap.StreamEvent]:
         """Forward an ApiProvider.stream call to the selected provider. Every leaf
-        backend implements stream() post-B2; no capability check needed. The
+        backend implements stream() natively; no capability check needed. The
         context's `model` is rewritten to the post-prefix rest so the leaf sees
         the canonical model name, not 'provider:model'."""
         model = context.get("model")
@@ -67,8 +67,8 @@ class RoutingBackend(PrefixRouter[Any]):
 
     def supports_turn(self, model: Optional[str] = None) -> bool:
         """Does the provider SELECTED by `model` implement the tool-loop `turn`?
-        The router itself defines a `turn` method, so a structural ToolBackend
-        isinstance on the ROUTER is true no matter which leaf the model routes
+        The router itself defines a `turn` method, so a structural isinstance
+        on the ROUTER is true no matter which leaf the model routes
         to (assessment H4) — capability must be answered AFTER routing. The
         Agent asks this before choosing tool-loop vs manifest fallback (R11),
         so a claude_cli-routed call renders the manifest instead of crashing

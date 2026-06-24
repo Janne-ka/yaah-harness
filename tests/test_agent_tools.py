@@ -84,7 +84,7 @@ async def scenario_multiturn_wire_shape_and_usage() -> None:
             self.n = 0
 
         async def complete(self, prompt, *, model=None, **opts):
-            return ""                                          # ToolBackend Protocol requires this
+            return ""                                          # tool-less path; loop uses turn()
 
         async def turn(self, messages, tools, *, model=None, **opts):
             self.n += 1
@@ -194,8 +194,8 @@ async def scenario_manifest_empty_when_backend_has_turn() -> None:
 
 async def scenario_manifest_injected_behind_router_without_turn() -> None:
     """H4 regression (assessment 2026-06-10): RoutingBackend defines `turn`
-    itself, so the old isinstance(backend, ToolBackend) check on the ROUTER was
-    always true — a complete-only provider (the claude_cli shape) routed through
+    itself, so a structural isinstance check on the ROUTER would always be
+    true — a complete-only provider (the claude_cli shape) routed through
     it skipped the R11 manifest AND crashed in run_tool_loop with 'does not
     support tool-use'. Capability is now resolved per-route: the manifest
     renders, complete() runs, no crash."""
@@ -323,7 +323,7 @@ async def scenario_tool_loop_survives_raising_tool() -> None:
 # ---- B8: new kwargs on run_tool_loop --------------------------------------
 
 class _RecordingBackend:
-    """A scripted ToolBackend that records every messages list it sees so the
+    """A scripted tool-capable backend that records every messages list it sees so the
     B8 tests can assert on prompt construction. Each turn pops the next
     scripted response; out-of-script returns {} (signals empty_response)."""
 

@@ -1,12 +1,12 @@
 """AgentLoopNode — bounded tool-use loop with author-declared tool catalog.
 
-Used by: yaah.build (the 'agent_loop' node type). Wraps a ToolBackend in a
-turn-by-turn loop where the agent emits tool calls and the harness dispatches
-them via the same `call_target` resolver transforms use.
+Used by: yaah.build (the 'agent_loop' node type). Wraps a tool-capable backend
+in a turn-by-turn loop where the agent emits tool calls and the harness
+dispatches them via the same `call_target` resolver transforms use.
 Where: a stage that needs the harness shape (agent emits tool call → harness
 dispatches → agent observes → loop). Sibling to `agent` (the one-shot stage).
-Why: YAAH had the `ToolBackend.turn(messages, tools)` protocol but no node
-that drove a loop against it. This is the missing primitive. Workers-not-
+Why: a backend can take a turn (`turn(messages, tools)` over its stream), but
+nothing drove a loop against it. This is the missing primitive. Workers-not-
 citizens is preserved: the agent has agency only within the catalog the
 AUTHOR declared, not within whatever the backend or an MCP server might
 expose.
