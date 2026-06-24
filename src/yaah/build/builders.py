@@ -224,12 +224,14 @@ def _build_transform(spec: Dict[str, Any], ctx: BuildContext) -> Node:
 def _build_agent_loop(spec: Dict[str, Any], ctx: BuildContext) -> Node:
     if ctx.backend is None:
         raise ValueError("an 'agent_loop' node needs a model backend; pass backend= to build()")
-    if not hasattr(ctx.backend, "turn"):
+    # The tool loop drives the backend via stream() (preferred) or turn()
+    # (fallback); either is enough. A complete()-only backend can't drive it.
+    if not (hasattr(ctx.backend, "stream") or hasattr(ctx.backend, "turn")):
         raise ValueError(
-            "the configured backend ({!r}) only implements .complete() — agent_loop "
-            "needs a ToolBackend with .turn(messages, tools). Either swap the backend "
-            "or use a plain 'agent' node for one-shot stages."
-            .format(type(ctx.backend).__name__))
+            "the configured backend ({!r}) can't drive an agent_loop — it needs "
+            ".stream(context) or .turn(messages, tools), but has neither (only "
+            ".complete()). Either swap the backend or use a plain 'agent' node "
+            "for one-shot stages.".format(type(ctx.backend).__name__))
     tools = spec.get("tools")
     if not isinstance(tools, dict) or not tools:
         raise ValueError(

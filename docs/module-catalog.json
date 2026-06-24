@@ -59,6 +59,11 @@
       "type": "render",
       "builder": "_build_render",
       "class": "RenderNode"
+    },
+    {
+      "type": "agent_loop",
+      "builder": "_build_agent_loop",
+      "class": "AgentLoopNode"
     }
   ],
   "ports": {
@@ -134,7 +139,8 @@
       "methods": [
         "async emit(span: Span) -> None",
         "async drain(corr: str) -> List[Dict[str, Any]]",
-        "async ingest(records: List[Dict[str, Any]]) -> None"
+        "async ingest(records: List[Dict[str, Any]]) -> None",
+        "last_model_call_span(correlation_id: str) -> Optional[Dict[str, Any]]"
       ]
     },
     "Subscription": {
@@ -160,18 +166,11 @@
         "async apply(value: Any) -> Any"
       ]
     },
-    "ModelBackend": {
-      "module": "src/yaah/agents/model_backend.py",
-      "summary": "ModelBackend / ToolBackend \u2014 the interface an Agent calls to talk to a model.",
+    "ApiProvider": {
+      "module": "src/yaah/agents/api_provider.py",
+      "summary": "ApiProvider \u2014 the streaming model interface (replaced the legacy ModelBackend).",
       "methods": [
-        "async complete(prompt: str) -> str"
-      ]
-    },
-    "ToolBackend": {
-      "module": "src/yaah/agents/model_backend.py",
-      "summary": "ModelBackend / ToolBackend \u2014 the interface an Agent calls to talk to a model.",
-      "methods": [
-        "async turn(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]"
+        "stream(context: Context) -> AsyncIterator[StreamEvent]"
       ]
     }
   },
@@ -474,6 +473,12 @@
             "kwonly": true
           },
           {
+            "name": "connect_timeout",
+            "annotation": "float",
+            "default": "10.0",
+            "kwonly": true
+          },
+          {
             "name": "user",
             "annotation": "Optional[str]",
             "default": "None",
@@ -508,6 +513,12 @@
             "annotation": "Optional[str]",
             "default": "None",
             "kwonly": true
+          },
+          {
+            "name": "tracer",
+            "annotation": "Any",
+            "default": "None",
+            "kwonly": true
           }
         ],
         "args_doc": [],
@@ -518,7 +529,7 @@
       {
         "module": "src/yaah/adapters/backends/claude_cli_backend.py",
         "name": "ClaudeCliBackend",
-        "doc": "ClaudeCliBackend \u2014 a ModelBackend that shells out to the local `claude -p`.",
+        "doc": "ClaudeCliBackend \u2014 an ApiProvider that shells out to the local `claude -p`.",
         "args": [
           {
             "name": "binary",
@@ -557,6 +568,12 @@
             "kwonly": true
           },
           {
+            "name": "allow_dangerous_flags",
+            "annotation": "bool",
+            "default": "False",
+            "kwonly": true
+          },
+          {
             "name": "spawn",
             "annotation": "Optional[Callable[..., Awaitable[Any]]]",
             "default": "None",
@@ -567,9 +584,24 @@
         "method_args_doc": []
       },
       {
+        "module": "src/yaah/adapters/backends/fake_tool_backend.py",
+        "name": "FakeToolBackend",
+        "doc": "FakeToolBackend \u2014 scripted ApiProvider for testing AgentLoopNode without an LLM.",
+        "args": [
+          {
+            "name": "turns",
+            "annotation": "Sequence[Dict[str, Any]]",
+            "default": null,
+            "kwonly": true
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
+      },
+      {
         "module": "src/yaah/adapters/backends/litellm_backend.py",
         "name": "LiteLLMBackend",
-        "doc": "LiteLLMBackend \u2014 a ModelBackend that calls many providers via litellm.",
+        "doc": "LiteLLMBackend \u2014 an ApiProvider that calls many providers via litellm.",
         "args": [
           {
             "name": "acompletion",
@@ -675,69 +707,59 @@
       }
     ]
   },
-  "validators": [
-    {
-      "name": "JsonObjectValidator",
-      "doc": "Passes if payload[key] parses as a JSON object with the required keys.",
-      "args": [
-        {
-          "name": "required",
-          "annotation": "Optional[List[str]]",
-          "default": "None",
-          "kwonly": false
-        },
-        {
-          "name": "key",
-          "annotation": "str",
-          "default": "'raw'",
-          "kwonly": true
-        }
-      ],
-      "args_doc": [],
-      "method_args_doc": []
-    },
-    {
-      "name": "JsonSchemaValidator",
-      "doc": "Passes if payload[key] parses as JSON matching a JSON-Schema SUBSET.",
-      "args": [
-        {
-          "name": "schema",
-          "annotation": "Dict[str, Any]",
-          "default": null,
-          "kwonly": false
-        },
-        {
-          "name": "key",
-          "annotation": "str",
-          "default": "'raw'",
-          "kwonly": true
-        }
-      ],
-      "args_doc": [],
-      "method_args_doc": []
-    },
-    {
-      "name": "ExpectField",
-      "doc": "Passes if the prior node's output payload[key] equals an expected value.",
-      "args": [
-        {
-          "name": "key",
-          "annotation": "str",
-          "default": null,
-          "kwonly": false
-        },
-        {
-          "name": "equals",
-          "annotation": "object",
-          "default": null,
-          "kwonly": false
-        }
-      ],
-      "args_doc": [],
-      "method_args_doc": []
-    }
-  ],
+  "validators": [],
   "node_impls": [
+    {
+      "module": "src/yaah/nodes/agent_loop_node.py",
+      "name": "AgentLoopNode",
+      "doc": "AgentLoopNode \u2014 bounded tool-use loop with author-declared tool catalog.",
+      "args": [
+        {
+          "name": "backend",
+          "annotation": "Any",
+          "default": null,
+          "kwonly": true
+        },
+        {
+          "name": "tools",
+          "annotation": "Dict[str, Dict[str, Any]]",
+          "default": null,
+          "kwonly": true
+        },
+        {
+          "name": "comms",
+          "annotation": "Any",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "prompt_source",
+          "annotation": "Any",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "max_turns",
+          "annotation": "int",
+          "default": "10",
+          "kwonly": true
+        },
+        {
+          "name": "system_prompt",
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "model",
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kwonly": true
+        }
+      ],
+      "args_doc": [],
+      "method_args_doc": []
+    },
     {
       "module": "src/yaah/nodes/get_node.py",
       "name": "GetNode",
@@ -864,6 +886,12 @@
           "name": "out_path",
           "annotation": "Optional[str]",
           "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "allow_unfilled",
+          "annotation": "bool",
+          "default": "False",
           "kwonly": true
         }
       ],

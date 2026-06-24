@@ -149,9 +149,9 @@ An MCP tool — configure the server in root config, declare the tool:
 
 ## Replaceability — adding a backend
 
-Any class implementing `ApiProvider.stream(context, model=None, **opts)`
+Any class implementing `ApiProvider.stream(context, **opts)`
 becomes a usable backend. The protocol lives in
-[`src/yaah/agents/model_backend.py`](../src/yaah/agents/model_backend.py).
+[`src/yaah/agents/api_provider.py`](../src/yaah/agents/api_provider.py).
 Existing backends:
 
 - `claude_cli` — shells to `claude -p`; returns one big text_delta.
@@ -185,8 +185,8 @@ suite proving them is part of the implementation plan, not shipped.
 
 | Concern | File |
 |---|---|
-| Loop primitive | `src/yaah/adapters/nodes/agent_loop_node.py` |
-| Provider protocol | `src/yaah/agents/model_backend.py` |
+| Loop primitive | `src/yaah/nodes/agent_loop_node.py` |
+| Provider protocol | `src/yaah/agents/api_provider.py` |
 | Tool resolver | `src/yaah/external_call.py` (`call_target`) |
 | MCP adapter | `src/yaah/adapters/nodes/mcp_tool_node.py` *(planned)* |
 | Backend implementations | `src/yaah/adapters/backends/` |

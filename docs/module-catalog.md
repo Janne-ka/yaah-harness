@@ -21,6 +21,7 @@ These are the values valid in a pipeline's `nodes.<role>.type` field, registered
 | `post` | `_build_post` | `PostNode` |
 | `transform` | `_build_transform` | `TransformNode` |
 | `render` | `_build_render` | `RenderNode` |
+| `agent_loop` | `_build_agent_loop` | `AgentLoopNode` |
 
 ## Ports (Protocols)
 
@@ -28,30 +29,30 @@ The structural interfaces the engine depends on. Each port has one or more concr
 
 | Port | Module | Methods |
 |---|---|---|
+| `ApiProvider` | `src/yaah/agents/api_provider.py` | `stream(context: Context) -> AsyncIterator[StreamEvent]` |
 | `Comms` | `src/yaah/comms/comms.py` | `async request(target: str, envelope: Envelope) -> Envelope`<br>`async publish(topic: str, envelope: Envelope) -> None`<br>`async subscribe(topic: str, handler: Handler) -> Subscription` |
 | `CompareAndSet` | `src/yaah/store/store.py` | `async get_rev(key: str) -> Tuple[Optional[bytes], Optional[int]]`<br>`async cas(key: str, value: bytes) -> Optional[int]` |
 | `DataSink` | `src/yaah/data/data_sink.py` | `async store(key: str, value: Any) -> str` |
 | `DataSource` | `src/yaah/data/data_source.py` | `async fetch(key: str) -> str` |
 | `Filter` | `src/yaah/filters/filter.py` | `async apply(value: Any) -> Any` |
 | `McpSource` | `src/yaah/mcp/mcp_source.py` | `async get(key: str) -> Dict[str, Any]` |
-| `ModelBackend` | `src/yaah/agents/model_backend.py` | `async complete(prompt: str) -> str` |
 | `PromptSource` | `src/yaah/prompts/prompt_source.py` | `async get(key: str) -> str` |
 | `Scannable` | `src/yaah/store/store.py` | `scan(prefix: str) -> AsyncIterator[Tuple[str, bytes]]` |
 | `Store` | `src/yaah/store/store.py` | `async get(key: str) -> Optional[bytes]`<br>`async put(key: str, value: bytes) -> None`<br>`async delete(key: str) -> None` |
 | `Subscription` | `src/yaah/comms/comms.py` | `cancel() -> None` |
-| `ToolBackend` | `src/yaah/agents/model_backend.py` | `async turn(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]` |
 | `TraceContributor` | `src/yaah/trace/contributor.py` | `contribute(span: Span) -> Dict[str, Any]` |
 | `TraceSink` | `src/yaah/trace/sink.py` | `async handle(env: Envelope) -> None` |
-| `Tracer` | `src/yaah/trace/tracer.py` | `async emit(span: Span) -> None`<br>`async drain(corr: str) -> List[Dict[str, Any]]`<br>`async ingest(records: List[Dict[str, Any]]) -> None` |
+| `Tracer` | `src/yaah/trace/tracer.py` | `async emit(span: Span) -> None`<br>`async drain(corr: str) -> List[Dict[str, Any]]`<br>`async ingest(records: List[Dict[str, Any]]) -> None`<br>`last_model_call_span(correlation_id: str) -> Optional[Dict[str, Any]]` |
 
 ## Built-in node implementations
 
 | Class | Summary | Constructor |
 |---|---|---|
+| `AgentLoopNode` (src/yaah/nodes/agent_loop_node.py) | AgentLoopNode — bounded tool-use loop with author-declared tool catalog. | `(*, backend: Any, tools: Dict[str, Dict[str, Any]], comms: Any = None, prompt_source: Any = None, max_turns: int = 10, system_prompt: Optional[str] = None, model: Optional[str] = None)` |
 | `GetNode` (src/yaah/nodes/get_node.py) | GetNode — fetch data via a DataSource and add it to the payload. | `(data_source: Any, key: str, *, into: str = 'data', cwd_from: Optional[str] = None, context: Optional[int] = None, paths: Optional[Sequence[str]] = None)` |
 | `OnceNode` (src/yaah/nodes/once_node.py) | OnceNode — wrap a side-effecting node so it runs ONCE per idempotency key. | `(inner: Any, store: Any)` |
 | `PostNode` (src/yaah/nodes/post_node.py) | PostNode — write a payload field out via a DataSink (the 'post' transform). | `(data_sink: Any, key: str, *, field: str = 'data', into: str = 'stored', cwd_from: Optional[str] = None)` |
-| `RenderNode` (src/yaah/nodes/render_node.py) | RenderNode — a worker that fills a {{mustache}} template with the payload. | `(*, template: Optional[str] = None, template_file: Optional[str] = None, out_path: Optional[str] = None)` |
+| `RenderNode` (src/yaah/nodes/render_node.py) | RenderNode — a worker that fills a {{mustache}} template with the payload. | `(*, template: Optional[str] = None, template_file: Optional[str] = None, out_path: Optional[str] = None, allow_unfilled: bool = False)` |
 | `ShellCheck` (src/yaah/nodes/shell_check.py) | ShellCheck — a validator that runs a command and passes on the expected exit. | `(command: Union[str, List[str]], *, expect_exit: int = 0, expect_nonzero: bool = False, cwd: Optional[str] = None, cwd_from: Optional[str] = None, timeout: Optional[float] = None, shell: bool = False)` |
 | `ShellNode` (src/yaah/nodes/shell_node.py) | ShellNode — a worker that runs a fixed command and returns its outcome. | `(command: Union[str, List[str]], *, cwd: Optional[str] = None, cwd_from: Optional[str] = None, timeout: Optional[float] = None, shell: bool = False, tail_only: bool = False, tail: int = 2000, carry: Optional[List[str]] = None)` |
 | `TransformNode` (src/yaah/nodes/transform_node.py) | TransformNode — call an external capability as a transform (tools + mcp). | `(target: str, *, comms: Any = None, args_from: Optional[str] = None, into: str = 'result', call: str = 'args')` |
@@ -62,9 +63,6 @@ The structural interfaces the engine depends on. Each port has one or more concr
 | Class | Summary | Constructor |
 |---|---|---|
 | `PrefixRouter` (src/yaah/prefix_router.py) | PrefixRouter — dispatch a 'name:rest' key to one of several backends. | `(targets: Dict[str, T], *, default: Optional[str] = None)` |
-| `JsonObjectValidator` (src/yaah/validators.py) | Passes if payload[key] parses as a JSON object with the required keys. | `(required: Optional[List[str]] = None, *, key: str = 'raw')` |
-| `JsonSchemaValidator` (src/yaah/validators.py) | Passes if payload[key] parses as JSON matching a JSON-Schema SUBSET. | `(schema: Dict[str, Any], *, key: str = 'raw')` |
-| `ExpectField` (src/yaah/validators.py) | Passes if the prior node's output payload[key] equals an expected value. | `(key: str, equals: object)` |
 
 ## Data adapters (`adapters/data/`)
 
@@ -109,14 +107,15 @@ The structural interfaces the engine depends on. Each port has one or more concr
 | Class | Summary | Constructor |
 |---|---|---|
 | `LocalBus` (src/yaah/adapters/transports/local_bus.py) | LocalBus — an in-process bus that is faithful to the wire. | `(no constructor args)` |
-| `NatsComms` (src/yaah/adapters/transports/nats_comms.py) | NatsComms — the real distributed transport, over a NATS server. | `(servers: str = 'nats://127.0.0.1:4222', *, request_timeout: float = 300.0, user: Optional[str] = None, password: Optional[str] = None, token: Optional[str] = None, creds: Optional[str] = None, tls: Any = None, tls_hostname: Optional[str] = None)` |
+| `NatsComms` (src/yaah/adapters/transports/nats_comms.py) | NatsComms — the real distributed transport, over a NATS server. | `(servers: str = 'nats://127.0.0.1:4222', *, request_timeout: float = 300.0, connect_timeout: float = 10.0, user: Optional[str] = None, password: Optional[str] = None, token: Optional[str] = None, creds: Optional[str] = None, tls: Any = None, tls_hostname: Optional[str] = None, tracer: Any = None)` |
 
 ## Model-backend adapters (`adapters/backends/`)
 
 | Class | Summary | Constructor |
 |---|---|---|
-| `ClaudeCliBackend` (src/yaah/adapters/backends/claude_cli_backend.py) | ClaudeCliBackend — a ModelBackend that shells out to the local `claude -p`. | `(*, binary: str = 'claude', extra_args: Optional[Sequence[str]] = None, strip_mcp: bool = True, timeout: Optional[float] = None, permission_mode: Optional[str] = None, allowed_tools: Optional[Sequence[str]] = None, spawn: Optional[Callable[..., Awaitable[Any]]] = None)` |
-| `LiteLLMBackend` (src/yaah/adapters/backends/litellm_backend.py) | LiteLLMBackend — a ModelBackend that calls many providers via litellm. | `(*, acompletion: Optional[Callable[..., Awaitable[Any]]] = None)` |
+| `ClaudeCliBackend` (src/yaah/adapters/backends/claude_cli_backend.py) | ClaudeCliBackend — an ApiProvider that shells out to the local `claude -p`. | `(*, binary: str = 'claude', extra_args: Optional[Sequence[str]] = None, strip_mcp: bool = True, timeout: Optional[float] = None, permission_mode: Optional[str] = None, allowed_tools: Optional[Sequence[str]] = None, allow_dangerous_flags: bool = False, spawn: Optional[Callable[..., Awaitable[Any]]] = None)` |
+| `FakeToolBackend` (src/yaah/adapters/backends/fake_tool_backend.py) | FakeToolBackend — scripted ApiProvider for testing AgentLoopNode without an LLM. | `(*, turns: Sequence[Dict[str, Any]])` |
+| `LiteLLMBackend` (src/yaah/adapters/backends/litellm_backend.py) | LiteLLMBackend — an ApiProvider that calls many providers via litellm. | `(*, acompletion: Optional[Callable[..., Awaitable[Any]]] = None)` |
 
 ## Filter adapters (`adapters/filters/`)
 

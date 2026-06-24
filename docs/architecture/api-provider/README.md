@@ -36,11 +36,13 @@ node-level architecture see [`../agent-loop/`](../agent-loop/).
 
 ## Where it lives in the tree
 
-- `src/yaah/agents/api_provider.py` — the protocol + adapter + helpers (NEW, B1)
-- `src/yaah/agents/model_backend.py` — the legacy `ModelBackend` /
-  `ToolBackend` Protocols (KEPT through Phase 1b; removed in B6 cleanup)
+- `src/yaah/agents/api_provider.py` — the protocol + helpers (the
+  `LegacyBackendAdapter` was removed in MED-001; see the status note above)
+- `src/yaah/agents/model_backend.py` — **removed in B6.** Held the legacy
+  `ModelBackend` / `ToolBackend` Protocols; gone now that every backend
+  implements `ApiProvider` natively.
 - Each backend in `src/yaah/agents/` and `src/yaah/adapters/backends/` —
-  gains a native `stream()` method one at a time (B2)
+  implements a native `stream()` method (migrated one at a time in B2)
 
 ## Migration order (B2)
 

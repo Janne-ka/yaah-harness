@@ -112,7 +112,9 @@ they ship later if measurement shows they help:
   — `_build_agent_loop` (the config-to-node builder)
 - [`src/yaah/external_call.py`](../../../src/yaah/external_call.py)
   — `call_target` (the dispatch resolver shared with transforms)
-- [`src/yaah/agents/model_backend.py`](../../../src/yaah/agents/model_backend.py)
-  — `ToolBackend.turn(messages, tools)` (the replaceable seam)
+- [`src/yaah/agents/api_provider.py`](../../../src/yaah/agents/api_provider.py)
+  — `ApiProvider.stream(context)` (the replaceable backend seam)
+- [`src/yaah/agents/tool_loop.py`](../../../src/yaah/agents/tool_loop.py)
+  — `run_tool_loop` (the canonical loop AgentLoopNode delegates to)
 - [`tests/test_agent_loop.py`](../../../tests/test_agent_loop.py)
   — end-to-end behavior coverage

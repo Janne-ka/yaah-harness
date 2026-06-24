@@ -105,19 +105,40 @@ def test_max_turns_exhausted():
     assert result.payload["answer"] == ""
 
 
-def test_backend_without_turn_method_rejected_at_construction():
-    class BadBackend:
+def test_complete_only_backend_rejected_at_construction():
+    # A backend with neither turn() nor stream() can't drive the loop.
+    class CompleteOnly:
         async def complete(self, prompt, **kw):
             return "irrelevant"
 
     try:
-        _make(BadBackend(), tools={
+        _make(CompleteOnly(), tools={
             "x": {"description": "", "input_schema": {}, "dispatch": "fn:x:y"},
         })
     except TypeError as e:
-        assert "ToolBackend" in str(e), e
+        assert "stream" in str(e) or "turn" in str(e), e
         return
-    raise AssertionError("expected TypeError for backend without .turn()")
+    raise AssertionError("expected TypeError for backend without turn()/stream()")
+
+
+def test_stream_only_backend_accepted_at_construction():
+    # Post-MED-002 the loop consumes backend.stream() (falling back to turn()),
+    # so a stream-only backend (no turn) CAN drive it — the gate must accept it.
+    # The old gate rejected anything lacking .turn(), which became stricter than
+    # the loop's actual contract once run_tool_loop preferred stream() (engine
+    # pre-PR review). A direct stream-only backend must not be rejected.
+    class StreamOnly:
+        def stream(self, context, **opts):
+            async def _it():
+                yield {"type": "start"}
+                yield {"type": "text_delta", "delta": "ok"}
+                yield {"type": "done", "stop_reason": "end_turn"}
+            return _it()
+
+    node = _make(StreamOnly(), tools={
+        "x": {"description": "", "input_schema": {}, "dispatch": "fn:x:y"},
+    })
+    assert node is not None  # constructed without raising
 
 
 def test_tool_spec_missing_dispatch_rejected_at_construction():
@@ -226,7 +247,8 @@ if __name__ == "__main__":
     test_tool_error_flows_back_as_observation()
     test_unknown_tool_is_an_error_observation_not_a_crash()
     test_max_turns_exhausted()
-    test_backend_without_turn_method_rejected_at_construction()
+    test_complete_only_backend_rejected_at_construction()
+    test_stream_only_backend_accepted_at_construction()
     test_tool_spec_missing_dispatch_rejected_at_construction()
     test_b8_dict_catalog_converts_to_tool_instances_at_construction()
     test_b8_dispatch_validation_precedes_tool_conversion()

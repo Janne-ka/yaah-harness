@@ -55,11 +55,15 @@ class AgentLoopNode:
         system_prompt: Optional[str] = None,
         model: Optional[str] = None,
     ) -> None:
-        if not hasattr(backend, "turn"):
+        # The loop drives the backend via stream() (preferred) or turn()
+        # (fallback) — see run_tool_loop._fetch_turn. Either capability is
+        # enough; a complete()-only backend can't drive a tool loop.
+        if not (hasattr(backend, "stream") or hasattr(backend, "turn")):
             raise TypeError(
-                "AgentLoopNode requires a ToolBackend (one with `.turn(messages, tools)`). "
-                "Got {!r}, which only has .complete(). Either swap the backend or use a "
-                "plain `agent` node for one-shot stages.".format(type(backend).__name__))
+                "AgentLoopNode needs a backend the tool loop can drive — one with "
+                "`.stream(context)` or `.turn(messages, tools)`. Got {!r}, which has "
+                "neither (only .complete()). Either swap the backend or use a plain "
+                "`agent` node for one-shot stages.".format(type(backend).__name__))
         # Validate dispatch BEFORE the Tool-comprehension below, so a missing
         # 'dispatch' surfaces as ValueError (the documented contract) instead
         # of a KeyError on `spec["dispatch"]`.

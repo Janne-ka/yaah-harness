@@ -124,12 +124,13 @@ specific consumers demand them:
 ## Where to read the code
 
 - [`src/yaah/agents/api_provider.py`](../../../src/yaah/agents/api_provider.py)
-  — protocol, content blocks, helpers, adapter (one file, ~280 lines)
+  — protocol, content blocks, helpers (one file; the `LegacyBackendAdapter`
+  shown above was removed in MED-001)
 - [`src/yaah/agents/fake_backend.py`](../../../src/yaah/agents/fake_backend.py)
   — first backend migrated to native `stream()` (B2.1)
 - [`tests/test_api_provider.py`](../../../tests/test_api_provider.py)
-  — adapter + helpers + assembly coverage (9 cases)
-- [`src/yaah/agents/model_backend.py`](../../../src/yaah/agents/model_backend.py)
-  — legacy Protocols (kept through B5; removed in B6)
+  — helpers + assembly coverage
+- `src/yaah/agents/model_backend.py` — **removed in B6** (held the legacy
+  Protocols; the adapter-bridge sections above are historical)
 - [`.notes/phase-1-resume-context.md`](../../../.notes/phase-1-resume-context.md)
   — migration order, decision gate criteria, B2–B6 plan
