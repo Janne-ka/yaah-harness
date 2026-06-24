@@ -229,6 +229,69 @@ def _validate_pipeline_extension_smoke() -> None:
         assert "root + pipeline" in out and "ok.pipeline.json" in out, out
 
 
+def _fn_module_resolves_from_config_dir() -> None:
+    """A console-script `yaah run` resolves an example-local `fn:module:func`
+    target relative to the CONFIG FILE's directory — not the cwd. This is the
+    real-world bug: `python3 -m yaah.runtime` only worked because `-m` puts the
+    cwd on sys.path; the installed `yaah` entry point doesn't, so an
+    example-local `transforms.py` died with ModuleNotFoundError.
+
+    We reproduce the console-script environment exactly: a temp dir holding
+    `transforms.py` + a minimal `fn:transforms:*` pipeline, invoked via
+    cli.main() with the temp dir NOT on sys.path and NOT as cwd. Before the fix
+    the run dies in the transform stage with `No module named 'transforms'`;
+    after, the engine front-inserts the config dir and the module resolves."""
+    import json
+    import os
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        with open(os.path.join(td, "transforms.py"), "w") as f:
+            f.write("def stamp(envelope, config):\n    return {'ok': True}\n")
+        pl = os.path.join(td, "p.pipeline.json")
+        with open(pl, "w") as f:
+            json.dump({"nodes": {"t": {"type": "transform",
+                                       "target": "fn:transforms:stamp",
+                                       "call": "envelope"}},
+                       "graph": {"start": "s", "stages": {"s": {"node": "t"}}}}, f)
+        inp = os.path.join(td, "input.json")
+        with open(inp, "w") as f:
+            json.dump({}, f)
+        root = os.path.join(td, "r.root.json")
+        with open(root, "w") as f:
+            json.dump({"transport": {"type": "inproc"},
+                       "state": {"type": "memory"},
+                       "pipeline": "p.pipeline.json",
+                       "input": "input.json",
+                       "run": True}, f)
+
+        # Guard against false negatives: the config dir must NOT already be
+        # reachable (no cwd shortcut, no leftover sys.path entry).
+        assert td not in sys.path, td
+        assert os.getcwd() != td, td
+
+        old_argv, old_out, old_err = sys.argv, sys.stdout, sys.stderr
+        sys.argv = ["yaah", "run", root]
+        sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
+        try:
+            try:
+                cli_main()
+                code = 0
+            except SystemExit as e:
+                code = 0 if e.code is None else int(e.code)
+            err = sys.stdout.getvalue() + sys.stderr.getvalue()
+        finally:
+            sys.argv, sys.stdout, sys.stderr = old_argv, old_out, old_err
+            # The production guard dedupes, but a test must not leak global state.
+            # (line 270 asserted td wasn't on the path, so we own every entry.)
+            while td in sys.path:
+                sys.path.remove(td)
+        # Pre-fix this is the exact failure: the run dies because the engine
+        # never put the config dir on sys.path. Post-fix the module resolves.
+        assert "No module named 'transforms'" not in err, err
+        assert code == 0, (code, err)
+
+
 def _expect(spec: dict, **want) -> None:
     for k, v in want.items():
         assert spec.get(k) == v, "{}: got {!r}, want {!r} (spec={})".format(k, spec.get(k), v, spec)
@@ -327,6 +390,9 @@ def main() -> None:
 
     # Coverage for dispatch arms cli.py owns (doctor, scaffold, trace flag matrix).
     _cli_dispatch_path_coverage()
+
+    # `fn:` modules resolve relative to the config dir (console-script parity).
+    _fn_module_resolves_from_config_dir()
 
     print("PASS yaah subcommands map correctly; legacy form intact; bad input exits 2; --version / bare-yaah affordances")
 

@@ -512,6 +512,18 @@ def _dispatch(spec: Dict[str, Any]) -> None:
     if spec.get("fake"):
         root = _apply_fake_overlay(root)
     base = os.path.dirname(os.path.abspath(spec["root"]))
+    # `fn:` modules resolve relative to the config file's directory — the same
+    # mental model as running a script from that dir, which is what `python -m
+    # yaah.runtime` gave us implicitly via cwd. The installed console script
+    # doesn't add cwd, so front-insert `base` here (config dir wins over stdlib /
+    # site-packages, matching `-m` semantics). The guard avoids duplicate path
+    # entries across runs. Caveat for long-lived hosts that dispatch many configs
+    # in ONE process: Python caches imports by top-level name in `sys.modules`, so
+    # two configs that each ship a `transforms.py` collide on the first one loaded.
+    # That's inherent to flat module names — the durable fix for shared code is to
+    # package it and use a dotted `fn:pkg.mod:func` path (see docs/node-reference).
+    if base not in sys.path:
+        sys.path.insert(0, base)
     if action == "explain":
         # `explain_root` runs `validate_root` itself with extra provenance
         # context, so it has to bypass the orchestrator's validate call.
