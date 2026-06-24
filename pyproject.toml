@@ -34,7 +34,7 @@ all = ["litellm", "nats-py", "langfuse>=4", "httpx"]
 dev = ["coverage[toml]"]   # run_tests.py enforces the fail_under floor when present
 
 [project.scripts]
-yaah = "yaah.runtime:main"
+yaah = "yaah.cli:main"
 
 [build-system]
 requires = ["setuptools>=61"]

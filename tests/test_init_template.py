@@ -17,8 +17,8 @@ import os
 import shutil
 import tempfile
 
-from yaah.init_template import STARTER_TEMPLATE, scaffold
-from yaah.validate import validate_root
+from yaah.init_template import ARCHETYPES, STARTER_TEMPLATE, scaffold
+from yaah.validate import validate_root, validate_pipeline
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -75,5 +75,70 @@ def main() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def scenario_scaffold_every_archetype() -> None:
+    """Each registered archetype must scaffold cleanly: every declared file
+    lands on disk, the produced starter root + pipeline validate, and no
+    archetype shares its target directory with another (the FileExistsError
+    refusal still bites the second scaffold)."""
+    for name, template in ARCHETYPES.items():
+        tmp = tempfile.mkdtemp(prefix="yaah-arch-{}-".format(name))
+        try:
+            target = os.path.join(tmp, "p")
+            n = scaffold(target, name)
+            assert n == len(template), (name, n, len(template))
+
+            # every declared file landed on disk with its declared content
+            for rel, expected in template.items():
+                got = _read(os.path.join(target, rel))
+                assert got == expected, "scaffold corrupted {} in {}".format(rel, name)
+
+            # the produced root + pipeline both validate — proves the embed
+            # isn't lying about shape (caught at scaffold time, not by a
+            # confused user running it for the first time)
+            root_path = os.path.join(target, "starter.local.json")
+            with open(root_path, "r") as f:
+                root = json.load(f)
+            validate_root(root)
+            pipeline_path = os.path.join(target, root["pipeline"])
+            with open(pipeline_path, "r") as f:
+                pipeline = json.load(f)
+            validate_pipeline(pipeline)
+
+            # second scaffold into the same non-empty dir must refuse
+            try:
+                scaffold(target, name)
+            except FileExistsError:
+                pass
+            else:
+                raise AssertionError(
+                    "{}: scaffold must refuse a non-empty target dir".format(name))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+    print("PASS every archetype ({}) scaffolds + validates".format(
+        ", ".join(sorted(ARCHETYPES))))
+
+
+def scenario_scaffold_unknown_archetype() -> None:
+    """An unknown archetype raises ValueError with an actionable message
+    that lists the known names (per the error-voice rule)."""
+    tmp = tempfile.mkdtemp(prefix="yaah-arch-unknown-")
+    try:
+        target = os.path.join(tmp, "p")
+        try:
+            scaffold(target, "no-such-archetype")
+        except ValueError as e:
+            msg = str(e)
+            assert "no-such-archetype" in msg, msg
+            assert "linear" in msg, msg  # the list of known names is shown
+            assert "docs/archetypes.md" in msg, msg  # pointer to the deeper doc
+        else:
+            raise AssertionError("scaffold should refuse an unknown archetype")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("PASS scaffold rejects unknown archetypes with an actionable message")
+
+
 if __name__ == "__main__":
     main()
+    scenario_scaffold_every_archetype()
+    scenario_scaffold_unknown_archetype()

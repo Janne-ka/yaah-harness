@@ -1,0 +1,100 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Generated from src/yaah/validate.py + src/yaah/build/registry.py by scripts/build_schemas.py. Do not edit by hand \u2014 re-run the generator after touching the engine.",
+  "patternProperties": {
+    "^_": {}
+  },
+  "properties": {
+    "graph": {
+      "additionalProperties": false,
+      "patternProperties": {
+        "^_": {}
+      },
+      "properties": {
+        "constraints": {},
+        "note": {},
+        "stages": {
+          "additionalProperties": {
+            "additionalProperties": false,
+            "patternProperties": {
+              "^_": {}
+            },
+            "properties": {
+              "branch": {},
+              "clearable": {},
+              "clears": {},
+              "concerns_from": {},
+              "concerns_into": {},
+              "escalate": {},
+              "fanin": {},
+              "fanout": {},
+              "feedback": {},
+              "fork": {},
+              "id": {},
+              "max_attempts": {},
+              "node": {},
+              "note": {},
+              "on_error": {},
+              "then": {},
+              "validators": {},
+              "wait": {}
+            },
+            "type": "object"
+          },
+          "type": "object"
+        },
+        "start": {
+          "type": "string"
+        },
+        "sticky": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "start",
+        "stages"
+      ],
+      "type": "object"
+    },
+    "nodes": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "properties": {
+          "type": {
+            "enum": [
+              "agent",
+              "expect_field",
+              "get",
+              "human_gate",
+              "json_object",
+              "json_schema",
+              "post",
+              "render",
+              "shell",
+              "shell_check",
+              "transform",
+              "worktree"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "type": "object"
+    }
+  },
+  "required": [
+    "nodes",
+    "graph"
+  ],
+  "title": "YAAH pipeline config",
+  "type": "object"
+}

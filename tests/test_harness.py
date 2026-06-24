@@ -172,8 +172,13 @@ async def scenario_baton_eviction() -> None:
     try:
         await h3.resume(susp.baton_id, Envelope("result", {"ok": True}))
         raise AssertionError("expected KeyError resuming a finished baton")
-    except KeyError:
-        pass
+    except KeyError as e:
+        # the error message must name the next diagnostic the operator should
+        # run (`yaah list`) — Y3: was previously "(it finished, expired, or
+        # never existed)" which collapsed three causes into one cryptic guess
+        msg = str(e)
+        assert "yaah list" in msg, msg
+        assert "single-shot" in msg, msg
 
 
 async def scenario_baton_ttl() -> None:

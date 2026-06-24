@@ -45,7 +45,7 @@ async def main() -> None:
     # Serve nodes over NATS (in a real deployment these run in worker processes).
     await comms.serve_node(
         "role:spec",
-        Agent(backend, "Task: {{task}}", events=comms, stage="spec"),
+        Agent(backend, "Task: {{task}}", events=comms, stage="spec", parse=False),
         NodeConfig(model="fake:spec"),
     )
     await comms.serve_node("role:json", JsonObjectValidator(required=["summary", "items"]))

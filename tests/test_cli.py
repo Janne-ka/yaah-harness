@@ -55,8 +55,16 @@ def main() -> None:
             trace_path="t.jsonl", price_map=None)
     _expect(_parse_subcommand(["trace", "t.jsonl", "prices.json"]), action="trace",
             trace_path="t.jsonl", price_map="prices.json")
-    _expect(_parse_subcommand(["init", "mypipeline"]), action="init",
-            target_dir="mypipeline")
+    # init is a back-compat alias for `scaffold linear` — same action.
+    _expect(_parse_subcommand(["init", "mypipeline"]), action="scaffold",
+            target_dir="mypipeline", archetype="linear")
+    # scaffold takes an explicit archetype name first.
+    _expect(_parse_subcommand(["scaffold", "linear", "mypipeline"]),
+            action="scaffold", target_dir="mypipeline", archetype="linear")
+    _expect(_parse_subcommand(["scaffold", "branch-with-gate", "mypipeline"]),
+            action="scaffold", target_dir="mypipeline", archetype="branch-with-gate")
+    _expect(_parse_subcommand(["scaffold", "fork-fanin", "mypipeline"]),
+            action="scaffold", target_dir="mypipeline", archetype="fork-fanin")
     _expect(_parse_subcommand(["baton-schema", R, "b1"]), action="baton-schema",
             root=R, baton_id="b1")
 
@@ -69,6 +77,8 @@ def main() -> None:
     # unknown verb / missing args exit non-zero
     for bad in (["bogus", R], ["resume", R], ["list"], ["trace"],
                 ["init"], ["init", "a", "b"],
+                ["scaffold"], ["scaffold", "linear"],
+                ["scaffold", "linear", "a", "b"],
                 ["baton-schema"], ["baton-schema", R], ["baton-schema", R, "b1", "extra"]):
         try:
             _parse_subcommand(bad)

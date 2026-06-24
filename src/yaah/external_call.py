@@ -39,7 +39,9 @@ async def call_target(target: str, args: Any, *, comms: Any = None,
         return await _call_node(rest, args, comms, reply_to)
     if scheme in ("http", "https"):
         return await _call_http(target, args, timeout)
-    raise ValueError("target scheme {!r} not supported".format(scheme))
+    raise ValueError(
+        "target scheme {!r} not supported — use one of: 'fn:module:func', "
+        "'node:role', 'http://...', 'https://...'".format(scheme))
 
 
 def import_callable(path: str) -> Any:
@@ -61,7 +63,9 @@ async def _call_fn(path: str, args: Any) -> Any:
 
 async def _call_node(role: str, args: Any, comms: Any, reply_to: Optional[Envelope]) -> Any:
     if comms is None:
-        raise ValueError("a 'node:' target needs comms")
+        raise ValueError(
+            "a 'node:' target needs comms — pass comms= when calling "
+            "call_target(); only fn:/http(s): targets work without it")
     # reply_with (dict payload), NOT reply(**args): a forwarded payload may contain
     # a `sender` key that would collide with reply()'s keyword arg (bug review M4).
     if isinstance(args, dict):

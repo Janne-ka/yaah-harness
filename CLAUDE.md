@@ -9,6 +9,7 @@ tests). It's the cross-tool source of truth.
 **Claude Code also has richer structured skills** in [`.claude/skills/`](.claude/skills/):
 - `yaah-pipeline-authoring` — author/modify a pipeline config (`*-pipeline.json` + `*.local.json`).
 - `yaah-extending` — write/modify engine code under `src/` or `tests/`.
+- `yaah-driving` — operate a running pipeline (mailbox flow: `yaah list` → `baton-schema` → `decision.json` → `resume`).
 - `yaah-reviewing` — audit/review engine code across its clusters.
 - `yaah-review-my-pr` — pre-PR self-review against the three values + ADR-0001 invariants.
 

@@ -159,7 +159,11 @@ async def scenario_expired_gate_resume_fails_cleanly() -> None:
     try:
         await h.resume(out.baton_id, Envelope("result", {"decision": "approve"}))
     except KeyError as e:
-        assert "expired" in str(e), e
+        # Y3: the error message now names the diagnostic to run + the two
+        # reasons (single-shot OR TTL) instead of the old three-state guess.
+        msg = str(e)
+        assert "yaah list" in msg, msg
+        assert "TTL" in msg, msg
         return
     raise AssertionError("resume of an expired baton should raise KeyError")
 

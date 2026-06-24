@@ -12,19 +12,22 @@ The system has three concepts:
 
 Workers do not address each other; the harness routes between them. Parts are loosely coupled and replaceable. YAAH runs locally, in the cloud, or split across both; placement is configuration, not code.
 
+YAAH is a coding harness used **on top of** coding — the process layer around the inner loop. Tools like Cline / Aider / Cursor are great at "write the code"; the wider process (evals, multi-stage review, human gates, parallel branches, durable state, cost/usage instrumentation) is what YAAH covers and what most coding harnesses do lightly or partially.
+
 ## Getting started
 
 ```bash
-pip install -e .                       # zero-dep core (add ".[all]" for every adapter)
-cd examples/hello-yaah && python3 -m yaah.runtime starter.local.json
+pip install -e .                                       # zero-dep core (add ".[all]" for every adapter)
+yaah scaffold linear my-pipeline                       # write a runnable starter
+cd my-pipeline && yaah run starter.local.json          # 2-stage agent → render on a fake backend; no API key
 ```
 
-That runs a real `agent → validate → parse → render` pipeline on a **fake** model
-backend — free, deterministic, no API key. Then:
+The scaffold writes a 2-stage `agent → render` pipeline (parse-by-default per [ADR-0004](docs/decisions/0004-parse-by-default.md); the explicit validate+parse middle stages are no longer needed). Then:
 
+- **[docs/archetypes.md](docs/archetypes.md)** — the five pipeline shapes; pick the nearest one to your problem and scaffold it (`yaah scaffold <archetype> <dir>`).
 - **[docs/quickstart.md](docs/quickstart.md)** — the 5-minute version, explained.
 - **[docs/tutorial.md](docs/tutorial.md)** — **how to build a pipeline for your own task** (a 5-step recipe up front), then each concept explained: validators & retry, branching, a human gate with durable suspend/resume, fork/fan-in, going real, tracing.
-- **[examples/](examples/)** — runnable: `hello-yaah`, `review-pipeline` (branch + human gate), `fork-join` (parallel + reduce).
+- **[examples/](examples/)** — runnable: `hello-yaah` (linear), `review-pipeline` (branch + human gate), `fork-join` (parallel + reduce), `arch-drift` (instrumented, A/B + cost attacher), `config-flow` (meta-tool — visualize any YAAH config).
 
 **Building with an AI assistant?** This repo ships agent helpers — point your tool
 (Codex, Cursor, Copilot, Claude Code) at **[AGENTS.md](AGENTS.md)** and describe the
@@ -36,10 +39,13 @@ contract, and the guardrails, and will draft the JSON for you to verify offline.
 **Working and proven**, pre-1.0 (error handling is deliberately not hardened yet). What exists today:
 
 - **Harness** — graph runner with a validator retry-with-feedback loop, fan-out, conditional branching, and durable **suspend/resume** for human gates. Baton lifecycle is bounded (evict on terminal outcome + TTL sweep).
+- **Parse-by-default agents** ([ADR-0004](docs/decisions/0004-parse-by-default.md)) — agents auto-merge their JSON output onto the payload; the data-flow contract is enforced at load time.
 - **Pluggable layers, all on one `source:key` pattern** — prompts, data **get/post**, **MCP**, and a model-backend router (`provider:model`).
-- **Node library** — `agent`, `get`, `post`, `transform` (fn/node/http), plus `shell`, `shell_check`, `render`, `python`, `worktree`, `once`, and validators.
-- **Agent capability triad** — prompt + tools (LiteLLM loop & Claude-native) + MCP.
+- **Node library** — `agent`, `get`, `post`, `transform` (fn/node/http), plus `shell`, `shell_check`, `render`, `worktree`, and validators.
+- **Agent capability triad** — prompt + tools (LiteLLM loop & Claude-native) + MCP. Plus the [attacher port](docs/decisions/0003-attacher-port.md) for surfacing per-call cost/usage onto the payload.
 - **Distribution** — multi-process over NATS with auth + TLS + subject scoping + queue-group shared pools. `LocalBus` is the offline, wire-faithful proof; `InProcessComms` is the zero-infra default.
+- **Form + ergonomics** — five named [pipeline archetypes](docs/archetypes.md) + `yaah scaffold <archetype>` CLI + one-page [shape-grammar card](docs/shape-grammar.md) + IDE-ready [JSON Schemas](schemas/) + copy-paste [cookbook recipes](docs/cookbook/).
+- **AI-assistant skills** — five structured [skills](.claude/skills/) for authoring (`yaah-pipeline-authoring`), extending the engine (`yaah-extending`), operating a running pipeline (`yaah-driving`), reviewing (`yaah-reviewing`), and pre-submission self-review (`yaah-review-my-pr`).
 - Real end-to-end runs with `claude -p`, including a repo-bound worktree→RED→code→GREEN→diff→review pipeline.
 
 Test suite is green (in-process/local) plus real-NATS tests under a venv. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's next.
@@ -48,23 +54,25 @@ Test suite is green (in-process/local) plus real-NATS tests under a venv. See [`
 
 The folder structure makes the swap layer visible (see [`docs/design.md`](docs/design.md) §2):
 
-- **Engine** — `core/ comms/ harness/ agents/ nodes/ build/ runtime.py`, plus the port + zero-config default for each pluggable layer (`prompts/ data/ mcp/ store/`).
+- **Engine** — `core/ comms/ harness/ agents/ nodes/ build/ runtime.py cli.py validators/`, plus the port + zero-config default for each pluggable layer (`prompts/ data/ mcp/ store/`).
 - **Adapters** (`adapters/{transports,backends,prompts,data,mcp,stores}/`) — every implementation that binds to an outside system (NATS, `claude`/LiteLLM, file/HTTP/Langfuse, git, file store). Adapters import the engine, never the reverse.
 
 ## Run
 
 ```bash
-# Run a pipeline from a root/deployment config (transport, providers, prompt
-# sources, which pipeline, which roles this host serves, optional input):
-python3 -m yaah.runtime <root-config.json>
-
-# Inspect parked human gates, and deliver a decision to resume a suspended run:
-python3 -m yaah.runtime <root-config.json> --list
-python3 -m yaah.runtime <root-config.json> --resume <baton_id> [decision.json]
+yaah scaffold <archetype> <dir>       # scaffold a starter (linear / branch-with-gate / fork-fanin)
+yaah run <root>                       # run the configured pipeline (the default; `yaah <root>` also works)
+yaah list <root> [--json]             # mailbox view: every suspended baton
+yaah baton-schema <root> <id>         # surface the parked gate's decision form
+yaah resume <root> <id> [decision]    # deliver a decision + drive to next gate / completion
+yaah validate <root>                  # validate + exit; no run
+yaah explain <root>                   # print the EFFECTIVE config (post-_extends/_fake)
 ```
 
+Full verb list + per-key reference: [`docs/shape-grammar.md`](docs/shape-grammar.md). Legacy `python3 -m yaah.runtime <root> [--list | --resume …]` still works.
+
 Targets Python 3.9+. See `examples/` for runnable configs and **[`docs/`](docs/README.md)** for everything else —
-[`architecture.md`](docs/architecture.md) (layers + node mapping), [`node-reference.md`](docs/node-reference.md) + [`root-config-reference.md`](docs/root-config-reference.md) (config keys), [`design.md`](docs/design.md) (rationale/decisions), [`agent-tools.md`](docs/agent-tools.md) (tools/MCP), [`durable-state.md`](docs/durable-state.md) (baton/idempotency/memory). Full index: **[`docs/README.md`](docs/README.md)**.
+[`archetypes.md`](docs/archetypes.md) (pipeline shapes), [`shape-grammar.md`](docs/shape-grammar.md) (the one-page card), [`architecture.md`](docs/architecture.md) (layers + node mapping), [`node-reference.md`](docs/node-reference.md) + [`root-config-reference.md`](docs/root-config-reference.md) (config keys), [`design.md`](docs/design.md) (rationale/decisions), [`agent-tools.md`](docs/agent-tools.md) (tools/MCP), [`durable-state.md`](docs/durable-state.md) (baton/idempotency/memory), [`cookbook/`](docs/cookbook/) (copy-paste recipes), [`decisions/`](docs/decisions/) (ADRs). Full index: **[`docs/README.md`](docs/README.md)**.
 
 ## Environments & dependency hardening (pixi)
 

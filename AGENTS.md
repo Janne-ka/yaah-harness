@@ -3,7 +3,7 @@
 Guidance for AI coding assistants (Codex, Cursor, Copilot, Claude Code, …) working
 in this repo. It's portable — the essentials are inline here. **Claude Code** users
 also have richer structured skills in [`.claude/skills/`](.claude/skills/)
-(`yaah-pipeline-authoring`, `yaah-extending`, `yaah-reviewing`); this file is the
+(`yaah-pipeline-authoring`, `yaah-extending`, `yaah-driving`, `yaah-reviewing`, `yaah-review-my-pr`); this file is the
 distilled cross-tool version.
 
 ## What YAAH is
@@ -14,13 +14,38 @@ interchangeable. It runs in-process, over a local bus, or distributed over NATS 
 placement is configuration, not code. The core has **zero runtime dependencies**;
 every third-party library is an opt-in adapter.
 
+## Authoring a pipeline? Start here
+
+If a user asks you to author or modify a YAAH pipeline, the workflow
+is deterministic — DO NOT design from first principles:
+
+1. Read **[docs/archetypes.md](docs/archetypes.md)**. Five shapes;
+   almost every pipeline is one of them: `linear`, `branch-with-gate`,
+   `fork-fanin`, `instrumented`, `meta-tool`.
+2. Match the user's request against the **"Reach for this when…"**
+   lines in each archetype. Pick the nearest one.
+3. Open the named **Reference example** and copy from there. Adapt
+   stage names, prompts, transforms — keep the shape.
+4. If the user's idea doesn't fit any archetype, re-read once. Most
+   "doesn't fit" cases are the pipeline doing too much; split into
+   two simpler pipelines that each match an archetype.
+
+The archetype map exists so you don't have to invent. The examples
+are battle-tested in ways a fresh design isn't.
+
 ## Get oriented first
 
+- **[docs/archetypes.md](docs/archetypes.md)** — the five pipeline
+  shapes + reference examples (read FIRST when authoring).
 - **[docs/quickstart.md](docs/quickstart.md)** — run a pipeline in 5 minutes.
 - **[docs/tutorial.md](docs/tutorial.md)** — every core concept, progressively.
-- **[examples/](examples/)** — runnable: `hello-yaah` (linear), `review-pipeline`
-  (branch + human gate), `fork-join` (parallel + reduce).
+- **[examples/](examples/)** — runnable: `hello-yaah` (linear),
+  `review-pipeline` (branch + human gate), `fork-join`
+  (parallel + reduce), `arch-drift` (instrumented),
+  `config-flow` (meta-tool).
 - **[docs/node-reference.md](docs/node-reference.md)** + **[docs/root-config-reference.md](docs/root-config-reference.md)** — every node type and config key (single source of truth: `docs/module-catalog.md`, generated from the code).
+- **[docs/cookbook/](docs/cookbook/)** — non-importable reference
+  recipes; copy-paste into your own project.
 - **[docs/design.md](docs/design.md)** / **[docs/why-yaah.md](docs/why-yaah.md)** — architecture + rationale.
 
 ## Mental model
@@ -34,13 +59,17 @@ every third-party library is an opt-in adapter.
 
 ## Authoring a pipeline (the rules that bite)
 
-- **The data-flow contract.** An agent's reply is a STRING in `payload["raw"]`. A
-  `json_object` validator only *checks* it; a `transform` with `call:"envelope"`
-  (`fn(envelope, config) -> dict`, returned dict spreads onto the payload) is what
-  merges it. Every `agent → render`/`branch` edge needs a parse step, or `render`
-  fails (`render_unfilled_placeholders`) pointing at the missing parse — it no
-  longer ships a literal `{{placeholder}}` at exit 0. (`allow_unfilled: true` opts
-  a render out, for intentionally-optional fields.)
+- **Agent output: parse-by-default** (ADR-0004). An `agent` node returns its
+  model text in `payload["raw"]` AND auto-merges the parsed JSON keys onto
+  the payload (`extract_json`-tolerant of markdown fences). So
+  `{"summary": "..."}` from the model becomes `payload["summary"]` directly
+  — downstream `render` / `branch` find the keys they need without an
+  intermediate `transform`. On parse failure the agent emits a failed
+  verdict that the harness's retry+feedback loop catches the same way a
+  `json_object` validator would. Opt out with `"parse": false` on the
+  agent node for streaming/raw-only cases; the load-time graph linter
+  will then require a `transform` between the agent and any
+  render/branch.
 - **A human gate must `branch` on `decision`** — a gate with only `then` is a pause,
   not a gate; the human's reject is ignored.
 - **Compose, don't invent.** `fork`+`fanin`+`transform` express most things; a new
@@ -53,20 +82,48 @@ every third-party library is an opt-in adapter.
   block shapes, enum values, every `then`/`branch`/`fanin` target resolves) before
   handing it over. Don't ship a draft you haven't checked.
 
-## Editing the engine (`src/yaah/`) — invariants, enforced
+## Editing the engine (`src/yaah/`) — invariants
 
-- **Domain-free.** Nothing in `src/yaah/` may name a stage, tenant field, test
-  runner, or anything app-specific. Adaptation lives in the consuming app's config.
-- **One class per file**, filename = class, with a top docstring stating **who calls
-  it, where, why** (the use case). No docstring → reviewer rejects.
-- **Hug-the-world ports.** Extend an existing port (`routing_*` multiplexer + a
-  `file_*`/`http_*` adapter) before inventing a new one.
-- **Agent isolation.** Each stage is a fresh agent; never feed an agent its own
-  critic's output. Counterfactual critics cold-read, never see the author's reasoning.
-- **Minimal first.** In-memory before durable, in-process before distributed; no
-  premature abstraction. Delete an unused capability the day you notice it.
-- **No comments stating WHAT** (names do that) and no error handling for impossible
-  internal cases — validate only at boundaries.
+Two tiers: **enforced at LOAD time** by `validate.py` / `build/`, and
+**convention** maintained by author discipline + the pre-submission
+rubric (`docs/contributor/pre-submission-check.md`). Be honest about
+which is which.
+
+**Load-enforced (the runtime rejects violations):**
+
+- **Domain-free top-level keys** — `validate.py` checks every root key
+  against `_ROOT_KEYS` with did-you-mean.
+- **Pipeline shape** — every `then`/`branch`/`fork`/`fanin` target
+  resolves; every `node`/`validators[*]` reference resolves; unknown
+  stage / node keys rejected; data-flow contract (agent → render /
+  branch needs a parse transform between) checked.
+- **Trace + transport + state enums** — `validate.py` covers these.
+
+**Convention (author discipline + pre-submission rubric checks):**
+
+- **Domain-free engine prose.** Nothing in `src/yaah/` may *name* a
+  stage, tenant field, test runner, or anything app-specific.
+  Caught by `scripts/review_my_pr.py`'s grep checks, not by runtime.
+- **One class per file**, filename = class, with a top docstring
+  stating **who calls it, where, why**. Caught by code review.
+- **Hug-the-world ports.** Extend an existing port (`routing_*`
+  multiplexer + a `file_*`/`http_*` adapter) before inventing one.
+  Caught by review.
+- **Agent isolation.** Each stage is a fresh agent; never feed an
+  agent its own critic's output. Counterfactual critics cold-read,
+  never see the author's reasoning. **Not runtime-checked** — author
+  discipline + the pre-submission rubric's "agent isolation" item.
+- **Minimal first.** In-memory before durable, in-process before
+  distributed; no premature abstraction. Delete an unused capability
+  the day you notice it. Cultural rule; review catches deviations.
+- **No comments stating WHAT** (names do that) and no error handling
+  for impossible internal cases — validate only at boundaries.
+  Cultural rule; review catches.
+
+The honest framing matters: load-enforced rules are runtime-correct
+even when the author misses them; convention rules survive only as
+long as the author/reviewer pair holds. Don't claim convention is
+enforcement — readers spot it and the credibility cost compounds.
 
 ## Engine boundary — what `{base_dir}` is, what yaah does NOT own
 
@@ -158,11 +215,11 @@ checks in one screen:
    and append the pack after the VERDICT line. CHECK 7b never blocks. Full
    spec in
    [`docs/contributor/pre-submission-check.md`](docs/contributor/pre-submission-check.md).
-8. **The data-flow footgun** — for every pipeline JSON in the diff
-   (`examples/`, `tests/`), every edge `agent → render` or `agent → branch`
-   has a `transform` with `call: "envelope"` in between. Without it the render
-   fails (`render_unfilled_placeholders`) — formerly silent `{{placeholder}}` at
-   exit 0.
+8. **The data-flow footgun** — agents are parse-by-default (ADR-0004), so
+   the common shape `agent → render`/`branch` works without a parse step.
+   The pre-submission check fires only when `"parse": false` is set on an
+   agent flowing into a render/branch with no transform between; `validate.py`
+   catches it at LOAD time with the actionable message.
 9. **Tests for behavior** — behavior change in `src/yaah/` requires a
    `tests/test_*.py` change. Refactor-only PRs get a pass here.
 

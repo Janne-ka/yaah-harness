@@ -11,7 +11,8 @@ cheaper?".
 Run directly: `python -m yaah.recall baseline.json candidate.json [--key id]
 [--where verdict=REAL_BUG]`.
 Where: the engine stdlib — PURE set comparison (no I/O except the thin CLI), so it
-serves any "dataset -> graph -> diff" eval pattern, not just review findings.
+serves any "dataset -> graph -> diff" eval pattern: matched-set membership and
+shape comparison, generic over the items being scored.
 Why: A/B = "run variant arms in parallel + a scorer". The run-in-parallel is already
 the harness fan-out; this is the missing scorer. Recall = did the candidate find what
 the baseline did; precision = how much of what it found was in the baseline.
@@ -27,14 +28,14 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 
 def by_field(name: str) -> Callable[[Dict[str, Any]], Any]:
-    """A key function selecting one field — the usual way to identify a finding
+    """A key function selecting one field — the usual way to identify an item
     (e.g. its `id`, or a `file:line` location)."""
     return lambda item: item.get(name)
 
 
 def field_equals(name: str, value: Any) -> Callable[[Dict[str, Any]], bool]:
-    """A predicate keeping only items whose field equals a value — e.g. score recall
-    over `verdict == "REAL_BUG"` so false positives don't count."""
+    """A predicate keeping only items whose field equals a value — e.g. score
+    recall only over items tagged as ground truth."""
     return lambda item: item.get(name) == value
 
 
@@ -42,12 +43,12 @@ _WHERE_RE = re.compile(r"^(.+?):(\d+)(?:[-,:].*)?$")
 
 
 def parse_where(s: Any) -> Tuple[Optional[str], Optional[int]]:
-    """Parse a finding's `where` location into (file_basename, line_or_None).
-    Tolerant of the shapes review prompts produce: `src/bank.py:42` →
+    """Parse an item's `where` location into (file_basename, line_or_None).
+    Tolerant of the shapes free-form locations take: `src/bank.py:42` →
     (`bank.py`, 42); `bank.py:5-7` → (`bank.py`, 5); `bank.py:5: KeyError` →
     (`bank.py`, 5); `bank.py` → (`bank.py`, None); empty/non-string → (None,
-    None). Path is reduced to basename so an arm that names `src/bank.py` and
-    another naming `app/src/bank.py` still match — bug LOCATIONS are what we're
+    None). Path is reduced to basename so an item naming `src/bank.py` and
+    another naming `app/src/bank.py` still match — LOCATIONS are what we are
     keying on, not paths."""
     if not isinstance(s, str) or not s.strip():
         return (None, None)

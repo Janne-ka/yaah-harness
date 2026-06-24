@@ -1,8 +1,8 @@
 """GetNode — fetch data via a DataSource and add it to the payload.
 
-Used by: yaah.build (the 'get' node type). In a repo-bound pipeline it sits
-between code and review/eval: fetch the worktree diff (changed lines ± N) into
-payload['diff'], then the reviewers read that.
+Used by: yaah.build (the 'get' node type). Typical use: pull a slice of data
+(a file, an HTTP response, a configured fixture) into a payload key so a
+downstream stage can read it without doing its own I/O.
 Where: any stage that needs to pull a slice of data into the flow.
 Why: keep "what data, how much, from where" as config (source key + fetch opts),
 not as bespoke code in each stage — the data counterpart to an Agent fetching

@@ -11,6 +11,8 @@ description: Use when writing or modifying code under src/ or tests/. Not for a 
 
 YAAH's value is its **discipline**: a domain-free engine, hug-the-world ports, file-based state, agent isolation, scripted gates. Most "improvements" that add a concept *delete* this value. Default to **composing existing primitives** over inventing new ones, and **delete** when an unused capability is found — see commit `b744de7` for the `SubpipelineNode` retirement: 10-file change removing a node `fanout`+`fanin` already composed.
 
+**Before writing code, hold the form in your head.** Read [`docs/archetypes.md`](../../../docs/archetypes.md) (five pipeline shapes — what the engine is *for*) and [`docs/shape-grammar.md`](../../../docs/shape-grammar.md) (the one-page card — every root key, node type, graph construct). Engine changes that would break either are usually wrong.
+
 ## When to Use
 
 - Adding a node type, port, adapter, builder, transform
@@ -21,12 +23,17 @@ YAAH's value is its **discipline**: a domain-free engine, hug-the-world ports, f
 
 ## The invariants you MUST preserve
 
+- **Three concepts only.** Envelope, Node, Comms ([ADR-0001](../../../docs/decisions/0001-three-concepts.md)). A fourth top-level concept requires an ADR discussion first, not just an implementation.
 - **Domain-free engine.** Nothing in `src/` may name a stage, tenant field, test runner, or anything else specific to a host project. If you're tempted to add an `if stage.name == "code"`, stop.
 - **One class per file.** Filename matches the class. Top-of-file docstring states **who calls it, where, and why** (use case). Skip the docstring → reviewer rejects.
 - **Hug-the-world ports.** Extend an existing port before inventing a new one. The pattern is *port + `routing_*` multiplexer + concrete `file_*`/`http_*` adapter*. Match the existing triad.
 - **Trust boundary is implicit.** `fn:module:func` in config is RCE; payload-derived paths reach `shutil.rmtree`. Never let a payload value reach a shell command, FS path, URL, or `importlib`. If you must, sanitize at the seam and document why.
 - **Agent isolation.** Each stage = fresh agent, named `carry` keys only. Never feed an agent its own critic's output.
 - **Hard human gates branch on `decision`.** A `human_gate` with only `then` is a pause, not a gate.
+- **Engine ships zero attachers** ([ADR-0003](../../../docs/decisions/0003-attacher-port.md)). New attachers go in CONSUMER code, never `src/yaah/`. Canonical references live at `docs/cookbook/attachers/` (non-importable, copy-paste).
+- **Decision-forms catalog stays generic** ([ADR-0002](../../../docs/decisions/0002-decision-forms.md)). The `FORMS` dict in `src/yaah/harness/decision_forms.py` holds shape-only entries (`approve`, `approve_or_revise`, `free_text`, `json_schema`). A domain-specific form name (`code_review`, `legal_review`) is a domain leak; consumers extend via the `json_schema` escape hatch.
+- **Error messages name the next move.** Every `raise` in `src/yaah/` follows "what went wrong + what to do next" — the rule that lets agents and tired humans self-correct in one read. If a message only states the problem, rewrite it.
+- **Parse agent output with `extract_json`, never strict `json.loads`.** Real sonnet/haiku wrap JSON in markdown fences. `yaah.jsonio.extract_json` is the engine helper; the built-in `JsonObjectValidator` already uses it.
 - **Minimal first.** In-memory before durable, in-process before distributed, no premature abstraction (memory: *minimal-first-extend-on-need*).
 
 ## Decision: new concept vs compose existing?
@@ -63,7 +70,7 @@ class WidgetNode:
     async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope: ...
 ```
 
-Then: register in `nodes/__init__.py`, builder in `build/builders.py` (`_build_widget` + `r.register("widget", _build_widget)`), test in `tests/test_widget.py`, row in `docs/architecture.md` node-types table. **All in one change.** Retiring a node uses the same checklist in reverse — see `b744de7` (SubpipelineNode retirement, 10 files, one commit) for the worked example.
+Then: register in `nodes/__init__.py`, builder in `build/builders.py` (`_build_widget` + `r.register("widget", _build_widget)`), test in `tests/test_widget.py`, rows in [`docs/node-reference.md`](../../../docs/node-reference.md) AND [`docs/shape-grammar.md`](../../../docs/shape-grammar.md)'s Node types table. **All in one change.** Retiring a node uses the same checklist in reverse — see `b744de7` (SubpipelineNode retirement, 10 files, one commit) for the worked example. The auto-generated [`docs/module-catalog.md`](../../../docs/module-catalog.md) regenerates from the code (`python3 scripts/build_catalog.py`); don't edit it by hand.
 
 ## Common mistakes
 
@@ -76,13 +83,22 @@ Then: register in `nodes/__init__.py`, builder in `build/builders.py` (`_build_w
 | Adding "for safety" error handling at internal seams | Hides the real failure. Trust the contract. |
 | Doing a separate "clean up later" pass | Build well now. Flag big cross-cutting refactors as backlog, don't do them inline as a phase (memory: *elegance-is-focus-not-a-phase*). |
 | Committing without explicit user ask | Standing rule (memory: *ask-before-committing*). |
+| Adding `raise ValueError(...)` that states the problem with no fix | Every error in `src/yaah/` should name what to do next. Rewrite to "<what> — <how to fix>" before moving on. The Y3 baton-resume rewrite is the reference shape. |
+| Using `json.loads` to parse agent output in a new transform / validator | Real sonnet/haiku fence their JSON. Use `from yaah.jsonio import extract_json`; the built-in `JsonObjectValidator` already does. |
+| Adding a new attacher under `src/yaah/agents/` | ADR-0003 rule: engine ships ZERO attachers. Add it to `docs/cookbook/attachers/` as a non-importable reference, OR keep it in the consumer's transforms.py. Never both. |
+| Adding a new entry to `harness/decision_forms.py` for a domain-specific case | The catalog is generic by design (ADR-0002). Use the `json_schema` escape hatch for one-off shapes; don't pollute the catalog. |
 
 ## After the change
 
-Verify with the script-style suite:
+Verify with the script-style suite (runner is `scripts/run_tests.py` — one process per `tests/test_*.py`, enforces coverage floor):
 ```bash
-cd yaah; PY="${PY:-$([ -x .venv/bin/python ] && echo .venv/bin/python || echo python3)}"
-for f in tests/test_*.py; do PYTHONPATH=src "$PY" "$f" >/tmp/o 2>&1 && p=$((p+1)) || { f2=$((f2+1)); fl="$fl $f"; }; done
-echo "PASS=$p FAIL=$f2$fl"
+python3 scripts/run_tests.py
+# single test in isolation: PYTHONPATH=src python3 tests/test_widget.py
 ```
 A failing test should distinguish missing infra (NATS server) from real defect. Update `docs/ROADMAP.md` for follow-ups.
+
+Then run the pre-submission rubric:
+```bash
+python3 scripts/review_my_pr.py    # deterministic checks 2/3/4
+# then read `.claude/skills/yaah-review-my-pr/SKILL.md` for the semantic checks
+```

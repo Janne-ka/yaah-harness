@@ -149,7 +149,7 @@ async def scenario_tool_loop_calls_broker() -> None:
     ])})
     agent = Agent(backend, template="review the diff", stage="rev",
                   events=comms, expose={"payload": ["diff"]},
-                  broker="role:broker")
+                  broker="role:broker", parse=False)
     out = await agent.invoke(
         Envelope(Kind.TASK, {"diff": "huge"}, {"correlation_id": "R"}),
         NodeConfig(model="tool:x"))

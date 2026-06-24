@@ -91,4 +91,7 @@ async def run_tool_loop(backend: Any, prompt: str, tools: List[Tool], *, comms: 
             messages.append({"role": "tool", "tool_call_id": call.get("id", call["name"]),
                              "name": call["name"],
                              "content": result if isinstance(result, str) else json.dumps(result)})
-    raise RuntimeError("tool loop exceeded max_iters ({})".format(max_iters))
+    raise RuntimeError(
+        "tool loop exceeded max_iters ({}) — raise max_iters in the agent "
+        "config, or check whether the agent is calling the same tool "
+        "repeatedly without converging on a final answer".format(max_iters))

@@ -7,9 +7,15 @@ description: Use when the user wants a new or modified YAAH pipeline config — 
 
 **Standing rule:** never commit unless explicitly asked.
 
+## Step 0 — pick an archetype (read this BEFORE asking the user anything)
+
+Open [`docs/archetypes.md`](../../../docs/archetypes.md). Match the user's request against the **"Reach for this when…"** lines of the five archetypes (`linear`, `branch-with-gate`, `fork-fanin`, `instrumented`, `meta-tool`). The match dictates the reference example to copy from. **Don't design from first principles** — the archetype map exists precisely so you don't have to, and the named examples are battle-tested.
+
+If no archetype obviously fits, re-read once. Most "doesn't fit" cases are the user describing a pipeline that's doing too much; split into two simpler pipelines that each match an archetype, then ask the user which one to build first.
+
 ## Overview
 
-A YAAH pipeline is two JSONs: a **pipeline** (`nodes` + `graph` of stages) and a **root** (`providers`, `transport`, `state`, `pipeline:`, `input:`, `run:`). Most authoring failures come from inventing concepts that existing primitives compose. **Drive a short Q&A**, propose the smallest config that fits, then ship a canonical `.json` + a thin `_extends`-based `.fake.json` overlay so it's testable without LLM cost.
+A YAAH pipeline is two JSONs: a **pipeline** (`nodes` + `graph` of stages) and a **root** (`providers`, `transport`, `state`, `pipeline:`, `input:`, `run:`). Most authoring failures come from inventing concepts that existing primitives compose. **Pick the archetype (Step 0), drive a short Q&A** on the variation points the archetype calls out, propose the smallest config that fits, then ship a canonical `.json` + a thin `_extends`-based `.fake.json` overlay so it's testable without LLM cost.
 
 ## When to Use
 
@@ -45,28 +51,33 @@ A full minimal root looks like:
 ```
 The skill's procedure is **pick a seed → diff to intent → emit overlay → validate → repair → explain**, not author every key by hand.
 
-## Turn 1 — offer the QUICK START first
+## Turn 1 — offer to scaffold first
 
-Most devs want to copy a working thing first, customize second. **Open with the QUICK START** — a 5-minute, no-LLM-cost scaffold that proves the harness works end-to-end. Only fall into Q&A if they decline or ask for something it doesn't cover.
+Most devs want to copy a working thing first, customize second. After Step 0 named the archetype, **offer to run `yaah scaffold <archetype> <dir>`** — the runtime CLI now writes a working starter from any of three archetypes (`linear`, `branch-with-gate`, `fork-fanin`; `instrumented` and `meta-tool` templates are queued but not yet shipped — for those, copy from `examples/arch-drift/` and `examples/config-flow/` respectively). Only fall into Q&A if the scaffold doesn't cover the user's intent.
 
-> "Want the QUICK START (3-stage linear, fake backend, runs in 5 min) as a starting point, or shall I drive a Q&A for a custom shape?"
+> "I'll scaffold the `<archetype>` starter: `yaah scaffold <archetype> <dir>` writes a runnable shape you can adapt. Want that, or shall I drive a Q&A for a custom shape first?"
 
-If they accept, **read [`quickstart.md`](quickstart.md)** in this skill dir and write the `hello-yaah/` scaffold verbatim — it's the runnable starter (a *running* concern, kept out of this file so the authoring scope stays sharp). The data-flow contract it teaches (agent output is a STRING in `payload["raw"]`; every agent→render/branch edge needs a parse transform) is the #1 authoring trap — it's also the first row of Common mistakes below.
+If the user accepts, run the command (or have them run it), then **drive the Q&A only on the variation points** the archetype calls out in `docs/archetypes.md` (e.g. for `branch-with-gate`: gate stage name, decision form, branch routes; for `fork-fanin`: number and names of the lenses, reduce strategy). Don't re-ask for things the scaffold already wrote.
+
+If the archetype is `instrumented` or `meta-tool` and no template ships yet, fall through to the Q&A and copy from the reference example listed in `docs/archetypes.md`.
+
+Agents are parse-by-default ([ADR-0004](../../../docs/decisions/0004-parse-by-default.md)). The model's JSON output is auto-merged onto the payload — `render` and `branch` find the keys they need without an intermediate `transform`. The data-flow footgun is gone for the common case; it fires only when the user opts out via `"parse": false`, and `validate.py` catches THAT at load time.
 
 ## The Q&A (in order — **skip what the user already specified**)
 
 The user has often given the shape ("a spec→code pipeline that…"). Don't re-ask what they answered; only ask the open holes. Propose defaults out loud ("I'll use `inproc` unless you need NATS") rather than asking permission for every choice.
 
-1. **Shape?** Linear / fan-out barrier / **fork**+fan-in (asymmetric branches) / validator-retry loop / human-gate suspend. *Suggest:* linear unless they describe parallel work or a decision the agent must defer to a human.
+1. **Archetype?** (decided in Step 0, but re-confirm if drift): `linear` / `branch-with-gate` / `fork-fanin` / `instrumented` / `meta-tool`. Picking the archetype dictates the reference example. See [`docs/archetypes.md`](../../../docs/archetypes.md) for the "Reach for this when" lines.
 2. **Stages?** Name each. *Suggest:* lower-kebab, ≤3 words. One role per stage.
 3. **Per stage: which node type?** Pick from `module-catalog.md`'s **Node types** table (12 today: `agent`, `transform`, `human_gate`, `shell`, `shell_check`, `expect_field`, `json_object`, `json_schema`, `worktree`, `get`, `post`, `render`). *Suggest:* `agent` for thinking; `transform` (with `call: "envelope"`) for deterministic Python; `human_gate` for decisions; `json_object` validator after every agent.
 4. **Providers?** *Suggest:* `claude_cli` for real, `fake_scripted` for the fake overlay. Always build both. Other backends in `adapters/backends/` (catalog).
 5. **Transport?** *Suggest:* `inproc` (default → seed **`local.base.json`**). `nats` if distributed across machines or workers (→ seed **`nats.base.json`**). `localbus` rarely. Picking a transport = picking a seed; the seed prefills compatible state/trace too.
 6. **State?** *Suggest:* `memory` if you picked the `local` seed (default). `file` if you picked the `nats` seed (prefilled). Override only if you want cross-host KV or NATS JetStream — out of seed scope.
 7. **Validators per stage?** Severity `hard` (blocks) or `soft` (concerns + continues)? *Suggest:* `hard` json_object on every agent output; `max_attempts:3, feedback:true` for refix loops. If the agent needs to forward payload keys across attempts (dialogue, refix), add `carry: ["key1", "key2"]`.
-8. **Human gates?** Where; `ask:` text; what decisions? *Suggest:* if the gate is hard, `branch` on `decision` (don't leave only `then` — see Common mistakes). For unattended / CI runs, set `decisions: {<gate>: "approve"}` in the root config.
+8. **Human gates?** Where; `ask:` text; **which decision form?** ([ADR-0002](../../../docs/decisions/0002-decision-forms.md) catalogs four generic shapes: `approve`, `approve_or_revise`, `free_text`, `json_schema` escape hatch). *Suggest:* `approve_or_revise` for review/edit loops, `approve` for go/no-go gates, `free_text` for open-ended editing, `json_schema` only when the four don't fit. Set `form: "..."` so `yaah baton-schema <id>` can surface the decision shape to a driver skill (otherwise `baton-schema` exits with "no form declared"). If the gate is hard, `branch` on `decision` (don't leave only `then`). For unattended/CI runs, set `decisions: {<gate>: {auto: "approve"}}` in the root.
 9. **Asymmetric arm with a slim view?** *Suggest:* configure the agent's `expose:`/`max_chars:` (the model fetches allow-listed envelope fields on demand — R9 `envelope_get`), `broker:` (the model asks a cheap broker node for relevant slices — R12 `context_broker`), and `filters:` (named `Filter` adapters that the model invokes by name with allowed params — R10; see the Filter adapters table in the catalog). **Security knob — read the guardrails table below before answering.**
 10. **Tracing?** *Suggest:* console is **default-on** (the harness adds a `ConsoleTraceSink` when no `trace` block is given). Add `{"type": "file", "path": "..."}` for persistent JSONL, `progress_file`/`stats_file` for live waterfall, `{"type": "langfuse"}` for managed dashboards. `trace: {sink: []}` to opt out entirely. See the Trace-sink adapters table in the catalog.
+11. **Attachers?** ([ADR-0003](../../../docs/decisions/0003-attacher-port.md)). For `instrumented` archetype pipelines, an agent's `attach: ["fn:transforms:UsageAttacher"]` surfaces per-call cost/tokens into the payload — the load-bearing piece for "this run cost $X" answers. The engine ships ZERO built-in attachers; copy [`docs/cookbook/attachers/usage.py`](../../../docs/cookbook/attachers/usage.py) into the consumer's transforms file (NOT importable). Attachers also require `trace.capture: ["cost"]` at the root — the builder rejects at LOAD if the capture is missing.
 
 ## Security guardrails — the IaC `0.0.0.0/0` analogues
 
@@ -88,15 +99,25 @@ Then **draft, show, ask "what to adjust"**, write.
 
 ## Quick reference
 
-Concrete shapes to adapt — smallest-viable linear, fork (asymmetric A/B), fanout barrier, the root-config template, and the three fake-mode shapes — live in [`pipeline-reference.md`](pipeline-reference.md). Read it when you need a template to copy; the judgment for *which* shape is the Q&A above. Two rules that travel with every template: the parse stage between an agent and any render/branch is **not optional**, and `fn:` targets in config are **trusted code** — never point one at anything payload-derived.
+Concrete shapes to adapt — smallest-viable linear, fork (asymmetric A/B), fanout barrier, the root-config template, and the three fake-mode shapes — live in [`pipeline-reference.md`](pipeline-reference.md). Read it when you need a template to copy; the judgment for *which* shape is Step 0 (archetype) + the Q&A above.
+
+**Two extra reference assets the user / you can also load:**
+
+- [`docs/shape-grammar.md`](../../../docs/shape-grammar.md) — one-page card listing every root key, every node type, every graph construct, every CLI verb. The card that fits in working memory.
+- [`docs/cookbook/`](../../../docs/cookbook/) — non-importable reference recipes for consumer code (currently: `attachers/usage.py`, the canonical `UsageAttacher`). Copy these into the consumer's `transforms.py` rather than importing — per ADR-0003.
+
+Two rules that travel with every template: the parse stage between an agent and any render/branch is **not optional**, and `fn:` targets in config are **trusted code** — never point one at anything payload-derived.
 
 ## Common mistakes
 
 | Mistake | Reality |
 |---|---|
-| Agent → render/branch with no parse stage between | Agent output is a STRING in `payload["raw"]`; `json_object` validates, never merges. Render now FAILS (`render_unfilled_placeholders`) pointing at the missing parse — it no longer ships literal `{{placeholders}}` at exit 0. Add the parse transform (or `allow_unfilled:true` for genuinely optional fields). |
+| Adding `json_object` + explicit `transform` parse between an agent and render/branch | Agents are parse-by-default (ADR-0004) — they `extract_json` their own output and emit a failed verdict on bad JSON (which the retry+feedback loop catches). Drop the extra stages; the pipeline is shorter and the data-flow contract is automatic. The validator+parse pattern still works (the inner parse is a no-op merge) but it's noise. |
+| Setting `"parse": false` on an agent that flows into render/branch | The data-flow graph linter rejects this at load time with the exact fix. If you actually want raw text downstream, add an explicit `transform` with `call: "envelope"` to merge. If you want render to render `{{raw}}` literally, set `allow_unfilled: true` on the render node. |
 | Expecting a `by_model` string to script multiple attempts | A bare string = ONE reply (then exhaustion → default `""`). To script a refix loop, use a list — one entry per attempt. |
 | `call: "envelope"` fn with the wrong signature | It's `fn(envelope, config) -> dict` (dict spreads over payload). `fn(payload)` dies with a raw `TypeError` traceback, not a friendly message. |
+| Parse transform using `json.loads` on agent output | Real `sonnet`/`haiku` wrap JSON in markdown fences; strict `json.loads` breaks on the first real-model run. Use `from yaah.jsonio import extract_json` and `extract_json(envelope.payload.get("raw", "{}"))` — the engine's `JsonObjectValidator` already does this; examples should match. |
+| Transform with `call: "envelope"` returning `{key: val}` without spreading | Transforms with `call: "envelope"` REPLACE the payload by default. Use `return {**envelope.payload, "key": val}` to enrich. The dropped keys footgun is the silent kind — downstream stages see `{{placeholders}}` they can't fill. |
 | Inventing a new node type to "encapsulate" a sub-graph | `fork` + `fanin` + `transform` likely compose it. `subpipeline` was added and retired in 24h for this reason. |
 | `human_gate` with only `then`, no `branch` on `decision` | It's a pause, not a gate. Human's reject is ignored. |
 | Validators with `max_attempts: 0` or no `feedback` | No retry / no refix loop. The agent gets one shot. |

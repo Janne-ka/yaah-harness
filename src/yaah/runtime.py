@@ -265,6 +265,11 @@ async def resume_gate(root: Dict[str, Any], base: str, baton_id: str,
     possibly in a different process than the one that suspended it (the durable
     store is the rendezvous). `--resume` entrypoint."""
     harness = await _assemble_harness(root, base)
+    # The originally-detached engine has exited at the park; THIS process
+    # now runs the engine in-process until the next gate or completion.
+    # Banner sets expectations (was previously silently blocking).
+    print("[yaah resume] engine running in this process until next gate or completion",
+          file=sys.stderr)
     out = await harness.resume(baton_id, Envelope(Kind.RESUME, decision))
     if isinstance(out, Suspended):  # hit the next gate
         print("GATE baton_id={} awaiting={} concerns={}".format(
@@ -443,257 +448,27 @@ def _print_blast_radius(nodes: Dict[str, Any]) -> None:
         print("  {:<28} {:<14} {}".format(role, kind, detail))
 
 
-_USAGE = """\
-yaah <command> [args]
-
-Commands:
-  init <dir>                    scaffold a starter pipeline (runs on fake providers, no API key)
-  run <root>                    run the configured pipeline (the default)
-  list <root> [--json]          show parked gates (the mailbox view; --json for a parseable shape)
-  resume <root> ID [FILE]       deliver a decision (optionally from FILE) to a parked gate
-  clear <root>                  graceful reset: broadcast clear + flush parked + drop batons
-  validate <root>               validate the config and exit (no run)
-  explain <root>                print the EFFECTIVE config (post-_extends/_fake + defaults)
-  trace <trace.jsonl> [PRICES]  summarize a run's trace (cost / latency / retries / model mix)
-  baton-schema <root> <id>      print the JSON Schema of decision.json for one parked baton
-
-Options (on run/list/resume/clear/validate/explain):
-  --fake     merge the root's `_fake` block over the top level (sidecar fake providers/state)
-  --debug    full tracebacks on errors (default: message + exit 2 config / 1 run)
-  -h --help  show this message
-
-Legacy form (still supported): yaah <root> [--list | --resume ID [FILE] | --clear | --explain | --lint-overlay]
-(equivalent: `python -m yaah.runtime …` when not installed)"""
+# CLI plumbing — parsers, dispatch, USAGE, main — lives in src/yaah/cli.py
+# since 2026-06-20 (B3.1b refactor). This module is now assembly + action
+# functions only. `main()` below is a thin shim so `python -m yaah.runtime`
+# keeps working for examples and ad-hoc scripts.
 
 
-def _usage_exit(msg: str = "") -> None:
-    if msg:
-        print("error: " + msg, file=sys.stderr)
-    print("usage: " + _USAGE, file=sys.stderr)
-    raise SystemExit(2)
-
-
-def _parse_cli(argv: list) -> dict:
-    """Parse the CLI into an action descriptor. Elegance #4 (assessment): the
-    hand-rolled `args[0]` / `rest[:1]` parser silently fell through to "run"
-    on any unknown flag — typos caught only by behavior. Now: unknown flags
-    error out, `-h/--help` is documented, exclusivity is enforced. (argparse
-    fights the optional-with-trailing-positional shape `--resume ID FILE`, so
-    a tight ~30-line hand-parser is the cleaner answer here.)"""
-    if not argv:
-        _usage_exit("missing root config")
-    if argv[0] in ("-h", "--help"):
-        print("usage: " + _USAGE)
-        raise SystemExit(0)
-    root, rest = argv[0], list(argv[1:])
-    fake = False
-    if "--fake" in rest:
-        fake = True
-        rest.remove("--fake")
-    debug = False
-    if "--debug" in rest:  # global like --fake: full tracebacks instead of the
-        debug = True       # message-only error boundary in main()
-        rest.remove("--debug")
-    as_json = False
-    if "--json" in rest:   # scoped to --list (machine-readable mailbox view);
-        as_json = True     # noise on any other action triggers the unknown-arg path below
-        rest.remove("--json")
-    if not rest:
-        if as_json:
-            _usage_exit("--json is only valid with --list")
-        return {"action": "run", "root": root, "fake": fake, "debug": debug}
-    cmd = rest[0]
-    if cmd in ("-h", "--help"):
-        print("usage: " + _USAGE)
-        raise SystemExit(0)
-    if cmd == "--list":
-        if len(rest) > 1:
-            _usage_exit("--list takes no extra arguments")
-        return {"action": "list", "root": root, "fake": fake, "debug": debug,
-                "json": as_json}
-    if as_json:
-        _usage_exit("--json is only valid with --list")
-    if cmd == "--clear":
-        if len(rest) > 1:
-            _usage_exit("--clear takes no extra arguments")
-        return {"action": "clear", "root": root, "fake": fake, "debug": debug}
-    if cmd == "--explain":
-        if len(rest) > 1:
-            _usage_exit("--explain takes no extra arguments")
-        return {"action": "explain", "root": root, "fake": fake, "debug": debug}
-    if cmd == "--lint-overlay":
-        # here the positional file IS the overlay (not a root config)
-        if len(rest) > 1:
-            _usage_exit("--lint-overlay takes no extra arguments")
-        return {"action": "lint-overlay", "root": root, "fake": fake, "debug": debug}
-    if cmd == "--resume":
-        if len(rest) < 2:
-            _usage_exit("--resume needs a baton id")
-        if len(rest) > 3:
-            _usage_exit("--resume takes a baton id and an optional decision file")
-        return {"action": "resume", "root": root, "fake": fake, "debug": debug,
-                "baton_id": rest[1],
-                "decision_file": rest[2] if len(rest) == 3 else None}
-    _usage_exit("unknown argument {!r}".format(cmd))
-    return {}  # unreachable; satisfies type checkers
-
-
-# Git-style subcommands (usability-gaps #1): the surface users expect, on top of
-# the legacy `yaah <root> --flag` parser (kept working). Pipeline verbs translate
-# to the same action spec _parse_cli produces; `validate`/`trace` add two actions.
-_SUBCOMMANDS = ("init", "run", "list", "resume", "clear", "explain", "validate",
-                "trace", "baton-schema")
-_VERB_FLAG = {"list": "--list", "clear": "--clear", "explain": "--explain"}
-
-
-def _parse_subcommand(argv: list) -> dict:
-    verb, rest = argv[0], list(argv[1:])
-    if verb == "init":
-        if not rest:
-            _usage_exit("init needs a target directory")
-        if len(rest) > 1:
-            _usage_exit("init takes one argument (the target directory)")
-        return {"action": "init", "target_dir": rest[0]}
-    if verb == "run":
-        return _parse_cli(rest) if rest else _usage_exit("run needs a root config")
-    if verb in _VERB_FLAG:
-        if not rest:
-            _usage_exit("{} needs a root config".format(verb))
-        return _parse_cli([rest[0], _VERB_FLAG[verb]] + rest[1:])
-    if verb == "resume":
-        if len(rest) < 2:
-            _usage_exit("resume needs a root config and a baton id")
-        return _parse_cli([rest[0], "--resume", rest[1]] + rest[2:])
-    if verb == "validate":
-        if not rest:
-            _usage_exit("validate needs a root config")
-        spec = _parse_cli(rest)        # parse root + --fake/--debug, then
-        spec["action"] = "validate"    # check-only (never runs the pipeline)
-        return spec
-    if verb == "trace":
-        files = [a for a in rest if a != "--debug"]
-        if not files:
-            _usage_exit("trace needs a trace.jsonl path")
-        return {"action": "trace", "trace_path": files[0],
-                "price_map": files[1] if len(files) > 1 else None,
-                "debug": "--debug" in rest}
-    if verb == "baton-schema":
-        # surface the decision-form shape of one parked baton so a driver skill
-        # can compose decision.json mechanically. Needs a durable state: to see
-        # batons parked by other processes.
-        if len(rest) < 2:
-            _usage_exit("baton-schema needs a root config and a baton id")
-        if len(rest) > 2:
-            _usage_exit("baton-schema takes one root config and one baton id")
-        return {"action": "baton-schema", "root": rest[0], "baton_id": rest[1],
-                "fake": False, "debug": False}
-    _usage_exit("unknown command {!r}".format(verb))
-    return {}  # unreachable
-
-
-def _apply_fake_overlay(root: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge the root's `_fake` block over the top level (shallow). The `_fake`
-    key is a `_`-prefixed comment ignored by `validate_root`; when `--fake` is
-    on the CLI, its contents replace the matching top-level keys (typically
-    `providers` / `default_provider`, sometimes `state` / `prompt_sources`).
-    Lets one root file carry both a real config and its testable fake overlay
-    so the dev doesn't maintain two near-duplicate roots."""
-    overlay = root.pop("_fake", None)
-    if not overlay:
-        return root
-    if not isinstance(overlay, dict):
-        raise ValueError("root `_fake` must be a dict (got {})".format(type(overlay).__name__))
-    out = dict(root)
-    out.update(overlay)
-    return out
-
-
-def _dispatch(spec: Dict[str, Any]) -> None:
-    """Execute one parsed CLI action. Split from main() so the error boundary
-    there wraps EVERYTHING that can raise a config/run error — load, _fake
-    overlay, validate, assembly, and the run itself."""
-    if spec["action"] == "lint-overlay":
-        # the positional file is an OVERLAY, not a root — lint and exit
-        from .overlay_lint import lint_overlay
-        problems = lint_overlay(spec["root"])
-        if problems:
-            print("overlay rejected ({} problem{}):".format(
-                len(problems), "s" if len(problems) != 1 else ""))
-            for p in problems:
-                print("  - " + p)
-            raise SystemExit(1)
-        print("overlay ok — within the AI-mutable surface")
-        return
-    if spec["action"] == "trace":
-        # summarize a run's trace JSONL — no root config involved
-        from .trace.aggregate import aggregate, load_jsonl
-        records = load_jsonl(spec["trace_path"])
-        price_map = _read_json(spec["price_map"]) if spec.get("price_map") else None
-        print(json.dumps(aggregate(records, price_map=price_map), indent=2))
-        return
-    if spec["action"] == "init":
-        # scaffold the embedded hello-yaah template into target_dir
-        from .init_template import scaffold
-        target = spec["target_dir"]
-        try:
-            n = scaffold(target)
-        except FileExistsError as e:
-            print("error: " + str(e), file=sys.stderr)
-            raise SystemExit(2)
-        print("Created {} files in {}/".format(n, target))
-        print("Next: yaah run {}/starter.local.json".format(target))
-        return
-    root = _read_json(spec["root"])
-    if spec.get("fake"):
-        root = _apply_fake_overlay(root)
-    base = os.path.dirname(os.path.abspath(spec["root"]))
-    action = spec["action"]
-    if action == "explain":
-        # R13: print effective config + provenance and exit. explain_root runs
-        # validate_root itself so config errors surface here too.
-        with open(spec["root"], "r", encoding="utf-8") as f:
-            raw_user = json.load(f)
-        explain_root(raw_user, root, base, root_path=spec["root"], fake=spec.get("fake", False))
-        return
-    validate_root(root)  # R15: one entry — unknown-key, shape, enum, cross-field
-    if action == "validate":
-        print("ok: {} is a valid root config".format(spec["root"]))
-        return
-    if action == "baton-schema":
-        asyncio.run(baton_schema(root, base, spec["baton_id"]))
-        return
-    if action == "list":
-        asyncio.run(list_gates(root, base, as_json=bool(spec.get("json"))))
-    elif action == "clear":
-        asyncio.run(clear_state(root, base))
-    elif action == "resume":
-        decision = _read_json(spec["decision_file"]) if spec["decision_file"] else {}
-        asyncio.run(resume_gate(root, base, spec["baton_id"], decision))
-    else:
-        asyncio.run(run_root(root, base))
-
-
-def main() -> None:
-    argv = sys.argv[1:]
-    spec = _parse_subcommand(argv) if (argv and argv[0] in _SUBCOMMANDS) else _parse_cli(argv)
-    try:
-        _dispatch(spec)
-    except StageFailed as e:
-        # the run failed a hard gate: the message names the stage + failures
-        # (stage_failed.py carries the verdict) — that's the operator's answer;
-        # the traceback is engine internals, shown only under --debug.
-        if spec.get("debug"):
-            raise
-        print("pipeline failed: {}".format(e), file=sys.stderr)
-        raise SystemExit(1) from None
-    except (ValueError, OSError) as e:
-        # config-class errors (missing file, bad JSON, failed validation,
-        # unknown type mid-build): the message IS the fix; a 40-line traceback
-        # into the factory buries it (assessment DX). --debug restores it.
-        if spec.get("debug"):
-            raise
-        print("error: {}".format(e), file=sys.stderr)
-        raise SystemExit(2) from None
+# Back-compat re-exports — the CLI plumbing moved to yaah.cli in B3.1b
+# (2026-06-20). Tests / external callers still reaching for these names on
+# the runtime namespace keep working. New code should import from yaah.cli
+# directly.
+from .cli import (  # noqa: E402, F401
+    _SUBCOMMANDS,
+    _USAGE,
+    _VERB_FLAG,
+    _apply_fake_overlay,
+    _dispatch,
+    _parse_cli,
+    _parse_subcommand,
+    _usage_exit,
+    main,
+)
 
 
 if __name__ == "__main__":

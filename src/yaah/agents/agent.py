@@ -18,8 +18,9 @@ import time
 from typing import Any, Optional
 
 from ..comms import Comms
-from ..core import Envelope, NodeConfig
+from ..core import Envelope, Failure, NodeConfig, Verdict
 from ..cwd import carry_cwd, resolve_cwd
+from ..jsonio import extract_json
 from ..trace import NullTracer, Span
 from .model_backend import ModelBackend
 from .tool import Tool
@@ -96,6 +97,7 @@ class Agent:
         envelope_filters: Optional[dict] = None,  # name -> callable(value, **params) filters for envelope_get
         max_chars: int = 20000,                # hard cap on an envelope_get pull
         broker: Optional[str] = None,          # R12: node role for the fuzzy context broker (e.g. "role:context-broker")
+        parse: bool = True,                    # ADR-0004: agent extract_json + merges parsed keys onto reply (default True)
     ) -> None:
         """Construct an Agent. See the module docstring for the design contract;
         most kwargs are routine wiring. The security-relevant ones are documented
@@ -122,7 +124,17 @@ class Agent:
         if template is None and prompt_key is None:
             raise ValueError("Agent needs either template= or prompt_key= (+ prompt_source=)")
         if prompt_key is not None and prompt_source is None:
-            raise ValueError("Agent given prompt_key but no prompt_source")
+            raise ValueError(
+                "Agent given prompt_key={!r} but no prompt_source — pass "
+                "prompt_source= alongside prompt_key=, or switch to inline "
+                "template= instead".format(prompt_key))
+        # parse=True (the default per ADR-0004) makes the agent itself run
+        # extract_json on its model output and merge the parsed keys onto the
+        # reply, in addition to leaving `raw` intact. Removes the explicit
+        # json_object+transform parse stage from 90% of pipelines. Opt out
+        # with parse=False for streaming/raw-only use cases (the data-flow
+        # graph linter will then require an explicit transform downstream).
+        self._parse = parse
         self._backend = backend
         self._template = template
         self._prompt_source = prompt_source
@@ -274,12 +286,33 @@ class Agent:
         extra.update({k: input.payload[k] for k in self._carry if k in input.payload})
         for reserved in _RESERVED_REPLY_KWARGS:
             extra.pop(reserved, None)
+        # ADR-0004 (parse-by-default Shape A): when self._parse is True the
+        # agent runs extract_json + merges the parsed keys onto the reply
+        # (in addition to `raw`). On parse failure / non-object JSON, emit a
+        # validator-shape failed Verdict so the harness's retry+feedback loop
+        # catches it cleanly — same shape json_object would have produced.
+        # Parsed keys override `extra` (carry/cwd) on conflict: the agent
+        # just produced the key, that wins over what was carried.
+        parsed: dict = {}
+        if self._parse:
+            try:
+                obj = extract_json(text)
+            except json.JSONDecodeError as e:
+                await self._emit("parse failed: {}".format(e))
+                return Verdict.failed(Failure(
+                    "not_json", "agent output is not valid JSON: {}".format(e),
+                    "return a single JSON object")).to_envelope(input)
+            if not isinstance(obj, dict):
+                return Verdict.failed(Failure(
+                    "not_object", "agent output top-level is not a JSON object",
+                    "return a JSON object (not a list/scalar)")).to_envelope(input)
+            parsed = obj
         # R6 envelope carriage: the drain does NOT happen here. It lives at the
         # serve boundary (CarriageBoundaryNode, applied by build._wrap_node) —
         # draining inside the agent body lost spans whenever a NESTED agent
         # shared the tracer and corr (the R12 broker case) and skipped non-agent
         # nodes entirely (assessment #6).
-        return input.reply("result", raw=text, **extra)
+        return input.reply_with("result", {"raw": text, **extra, **parsed})
 
     async def _resolve_mcp(self) -> Any:
         # a 'source:key' string is fetched via the McpSource (governed/per-env);

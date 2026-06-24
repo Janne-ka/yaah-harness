@@ -287,6 +287,15 @@ def render_mermaid(envelope, config) -> Dict[str, Any]:
     `MERMAID_RENDERER=:canned` returns a fixed canned SVG for offline tests."""
     renderer = os.environ.get("MERMAID_RENDERER", "mmdc")
     if renderer == ":canned":
+        # The canned renderer returns ONE fixed SVG regardless of the mermaid
+        # input — it's an offline placeholder, not a lighter real renderer.
+        # Print to stderr so a user who set this env var sees they did NOT get
+        # a real render of their diagram. (Quiet `or "1"` env opts out.)
+        if os.environ.get("YAAH_CANNED_QUIET", "") != "1":
+            sys.stderr.write(
+                "[config-flow] WARNING: MERMAID_RENDERER=:canned — returning a "
+                "fixed placeholder SVG that does NOT reflect the agent's mermaid "
+                "output. For real artifacts, unset the env var and install mmdc.\n")
         return {**envelope.payload, "new_svg": _CANNED_SVG}
     if shutil.which(renderer) is None:
         raise RuntimeError(
@@ -337,14 +346,14 @@ def noop_done(envelope, config) -> Dict[str, Any]:
 
 
 # ---------- A/B variant: usage attacher + fanin reducer + per-candidate ops --
-# Copied from examples/arch-drift/transforms.py (each example owns its own
-# transforms — see ADR-0003 rationale). If a third example needs the same
-# triad, factor a yaah-transforms-cookbook helper module then.
 
+# Source: docs/cookbook/attachers/usage.py
+# Copy-paste reference per ADR-0003 (engine ships zero attachers). See the
+# canonical file for the full docstring + design rationale; we keep the class
+# terse here to read smoothly inside the example.
 class UsageAttacher(Attacher):
-    """Reference `usage` attacher: surfaces tokens + model under payload `usage`
-    from the tracer's last model_call span. Dollar cost NOT here — yaah keeps
-    pricing in the aggregator's price-map so history can be re-priced."""
+    """`usage` attacher — tokens + model from the last model_call span."""
+
     name = "usage"
     requires_capture = ("cost",)
 

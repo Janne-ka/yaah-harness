@@ -1,0 +1,295 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "description": "Generated from src/yaah/validate.py + src/yaah/runtime_factories.py by scripts/build_schemas.py. Do not edit by hand \u2014 re-run the generator after changing the engine's key tables.",
+  "patternProperties": {
+    "^_": {}
+  },
+  "properties": {
+    "_extends": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      ]
+    },
+    "baton_ttl": {
+      "minimum": 0,
+      "type": "number"
+    },
+    "data_sinks": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "properties": {
+          "type": {
+            "enum": [
+              "file"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "data_sources": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "properties": {
+          "type": {
+            "enum": [
+              "file",
+              "git_diff"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "decisions": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "default_data_sink": {
+      "type": "string"
+    },
+    "default_data_source": {
+      "type": "string"
+    },
+    "default_mcp_source": {
+      "type": "string"
+    },
+    "default_prompt_source": {
+      "type": "string"
+    },
+    "default_provider": {
+      "type": "string"
+    },
+    "input": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object"
+        }
+      ]
+    },
+    "interactive": {
+      "type": "boolean"
+    },
+    "live_config": {
+      "type": "boolean"
+    },
+    "mcp_sources": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "properties": {
+          "type": {
+            "enum": [
+              "file",
+              "static"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "pipeline": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object"
+        }
+      ]
+    },
+    "prompt_sources": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "properties": {
+          "type": {
+            "enum": [
+              "file",
+              "http",
+              "langfuse",
+              "static"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "providers": {
+      "additionalProperties": {
+        "additionalProperties": true,
+        "properties": {
+          "type": {
+            "enum": [
+              "claude_cli",
+              "fake",
+              "fake_scripted",
+              "litellm"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "type": "object"
+    },
+    "run": {
+      "type": "boolean"
+    },
+    "serve": {
+      "oneOf": [
+        {
+          "enum": [
+            "all"
+          ],
+          "type": "string"
+        },
+        {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "placement": {
+              "enum": [
+                "local",
+                "cloud",
+                "either"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      ]
+    },
+    "state": {
+      "additionalProperties": true,
+      "properties": {
+        "type": {
+          "enum": [
+            "file",
+            "memory"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "trace": {
+      "additionalProperties": true,
+      "properties": {
+        "buffer_max": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "capture": {
+          "items": {
+            "enum": [
+              "cost",
+              "phase",
+              "tools"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mode": {
+          "enum": [
+            "none",
+            "tracer",
+            "envelope"
+          ],
+          "type": "string"
+        },
+        "sinks": {
+          "items": {
+            "additionalProperties": true,
+            "properties": {
+              "type": {
+                "enum": [
+                  "console",
+                  "file",
+                  "langfuse",
+                  "progress_file",
+                  "stats_file"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "topic": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "transport": {
+      "additionalProperties": true,
+      "properties": {
+        "type": {
+          "enum": [
+            "inproc",
+            "localbus",
+            "nats"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    }
+  },
+  "title": "YAAH root config",
+  "type": "object"
+}
