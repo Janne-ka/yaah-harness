@@ -347,6 +347,13 @@ class UsageAttacher(Attacher):
     requires_capture = ("cost",)
 
     def attach(self, envelope, span):
+        """You never call this — the ENGINE does, on its own, after every model
+        call on a stage you've tagged with `attach: [...UsageAttacher]` (here the
+        two extract agents). You return a small dict; the engine MERGES it onto
+        the run's data as `usage` and carries it downstream like any other field
+        — so the report stage can read it and show "sonnet cost X, haiku cost Y."
+        Measuring cost per model is the point of this example.
+        (`span` = the finished call's token stats, or None if no model ran.)"""
         if not span:
             return {}
         return {"usage": {
@@ -357,12 +364,12 @@ class UsageAttacher(Attacher):
 
 
 def merge_candidates(arrived: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
-    """Fanin reducer for the A/B fork. `arrived` is `{branch_id: payload}`
-    keyed by the FORK BRANCH NAMES (not the last-stage names) — for our
-    pipeline that's `extract-a` and `extract-b`. Builds a sorted
-    `candidates` list with the per-branch facts (label, mermaid, notes,
-    usage, new_svg) and carries the shared state (committed_svg, repo_path,
-    etc.) forward by lifting it from the first arrived payload."""
+    """The ENGINE calls this once both fork branches have finished, to fold them
+    back into one run (a fan-in "reducer"). `arrived` hands you each branch's
+    result, keyed by the FORK name — `extract-a` and `extract-b` (NOT the last
+    stage in the branch; a common mix-up). It builds one `candidates` list (each
+    model's label + mermaid + notes + cost + svg) and carries the shared state
+    forward, so the next stages can show the two side by side."""
     candidates: List[Dict[str, Any]] = []
     shared: Dict[str, Any] = {}
     per_branch_keys = {"mermaid", "notes", "usage", "new_svg", "raw"}
@@ -467,6 +474,10 @@ def revise_exit(envelope, config) -> Dict[str, Any]:
 # ---------- small private helpers --------------------------------------------
 
 def _top_level_packages(src_dir: str) -> List[str]:
+    """Helper for `snapshot_imports`: the project's own importable packages —
+    immediate subdirs of `src_dir` that have an `__init__.py`, skipping hidden /
+    build / vendored dirs. These become the top-level headings of the snapshot
+    (and the set `_internal_imports` filters against)."""
     if not os.path.isdir(src_dir):
         return []
     return [name for name in os.listdir(src_dir)
@@ -476,6 +487,9 @@ def _top_level_packages(src_dir: str) -> List[str]:
 
 
 def _python_files(pkg_dir: str) -> List[str]:
+    """Helper for `snapshot_imports`: every non-private `.py` module under a
+    package (recursive; skips dunder / hidden / `__pycache__` dirs). One bullet
+    per module in the snapshot."""
     out: List[str] = []
     for root, dirs, files in os.walk(pkg_dir):
         dirs[:] = [d for d in dirs if not d.startswith((".", "_", "__pycache__"))]
@@ -489,6 +503,10 @@ _DOC_RE = re.compile(r'^\s*"""(.+?)"""', re.DOTALL)
 
 
 def _module_docstring(path: str) -> str:
+    """Helper for `snapshot_imports`: the module-level docstring (reads only the
+    first 2000 bytes — we want the header, not the whole file). This is the
+    'what this module is' line that gives the architecture agent its labels.
+    Returns '' if absent or unreadable."""
     try:
         with open(path, "r", encoding="utf-8") as f:
             head = f.read(2000)
@@ -499,6 +517,9 @@ def _module_docstring(path: str) -> str:
 
 
 def _first_sentence(text: str) -> str:
+    """Helper for `snapshot_imports`: collapse a module docstring to its first
+    line, capped at 200 chars — keeps each module's entry to one compact line so
+    a large repo still fits the prompt budget."""
     line = text.strip().splitlines()[0] if text.strip() else ""
     return line[:200]
 
