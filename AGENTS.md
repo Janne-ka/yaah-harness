@@ -51,6 +51,8 @@ are battle-tested in ways a fresh design isn't.
 ## Mental model
 
 - **Envelope** — one message shape; a run is one envelope flowing stage → stage.
+  Its `correlation_id` names the whole run; the trace layer keys it as the
+  short `corr` (same value, two spellings — `corr` is the JSONL span key).
 - **Node** — `invoke(input, config) → output`. Pick a built-in type; rarely write one.
 - **Comms** — the harness routes between nodes; workers never address each other.
 - A **pipeline** is JSON: `nodes` (id → type + config) + `graph` (stages wired with
