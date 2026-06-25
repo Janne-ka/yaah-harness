@@ -71,6 +71,13 @@ def scenario_rejections() -> None:
         ({"nodes": {"role:route": {"config": {"force": True}}}}, "boolean"),
         ({"nodes": {"role:route": {"config": {"out": "/etc/x"}}}}, "non-numeric"),
         ({"nodes": {"role:think": {"timeout": 120}}}, "raised 60 -> 120"),
+        # a numeric bound ABSENT from base has no ceiling to tighten against, so
+        # introducing one must be deny-by-default (else the gate fails open: an
+        # AI overlay could set an arbitrarily large timeout/retries on any node
+        # whose base happened to leave the bound unset).
+        ({"nodes": {"role:route": {"timeout": 5}}}, "absent from base"),
+        ({"nodes": {"role:gate": {"retries": 99}}}, "absent from base"),
+        ({"nodes": {"role:route": {"temperature": 0.1}}}, "absent from base"),
         ({"nodes": {"role:think": {"timeout": "9000"}}}, "must be a number"),
         ({"nodes": {"role:think": {"effort": 3}}}, "must be a string"),
     ]

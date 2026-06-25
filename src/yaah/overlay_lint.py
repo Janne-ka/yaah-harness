@@ -108,7 +108,16 @@ def lint_overlay(path: str) -> List[str]:
                 base_v = (base_nodes[role] or {}).get(k)
                 if not isinstance(v, (int, float)) or isinstance(v, bool):
                     errs.append("node {!r}: {} must be a number".format(role, k))
-                elif isinstance(base_v, (int, float)) and v > base_v:
+                elif not isinstance(base_v, (int, float)) or isinstance(base_v, bool):
+                    # the base node has no numeric bound here — so there is no
+                    # ceiling to tighten against. Deny by default: a NEW bound
+                    # could be arbitrarily large (the gate would otherwise fail
+                    # open for every key the base left unset). Mirrors the config
+                    # sub-surface, which already rejects a key absent from base.
+                    errs.append("node {!r}: {} introduces a bound absent from base "
+                                "({}) — only an existing bound may be tightened; "
+                                "promote a base bound first".format(role, k, v))
+                elif v > base_v:
                     errs.append("node {!r}: {} raised {} -> {} — bounds may only "
                                 "tighten (a raise widens retries/timeouts/cost)".format(
                                     role, k, base_v, v))

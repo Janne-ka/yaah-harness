@@ -179,6 +179,25 @@ repo-bound nodes point `cwd_from` at `workdir`. Output (`remove`):
 For the heavier factory documents the app uses `transform` +
 `call: "envelope"` into a Python renderer instead (`render_report.py` etc.).
 
+## `agent_loop` — bounded, model-driven tool-use loop
+
+A loop where the **model** drives: it emits tool calls, the harness dispatches
+them, feeds the results back, and repeats until the model stops or `max_turns`
+is hit. The model-driven counterpart to the author-static `fork`/`fanin`/
+`transform` — reach for it when the number and order of tool calls is the
+model's decision, not the pipeline's.
+
+`tools` (required) — a non-empty dict `{name: {description, input_schema,
+dispatch}}`; each tool's `dispatch` is an `fn:` / `node:` / `http:` target (a
+`node:` tool needs `comms`). `max_turns` (default `10`), `system_prompt` (a
+literal string or a `file:` reference resolved via the prompt source), `model`
+(optional override). Needs a backend with `.stream()` (preferred) or `.turn()`
+— a `complete()`-only backend can't drive it; use a plain `agent` for one-shot
+stages. Tool specs are validated at BUILD time (a missing `dispatch` fails the
+load, not turn N). Reads the task from payload `goal` (or `input`).
+Output: `answer` (the final assistant text), `turns` (the count), and
+`outcome` ∈ {`completed`, `empty_response`, `max_turns_exhausted`}.
+
 ---
 
 ## Choosing between them

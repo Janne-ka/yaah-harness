@@ -77,16 +77,17 @@ This file is the compressed essence, not the source of truth.
 |---|---|---|
 | `agent`        | render prompt → call model → return raw text | `template:` OR `prompt:`; `model:` |
 | `transform`    | run an `fn:` function on the envelope (the deterministic workhorse) | `target: "fn:module:func"`; `call: "envelope" \| "args"` |
-| `human_gate`   | suspend; deliver to operator; resume with their decision | `form: "..."` OR `decision_schema: {...}`; `ask:` |
+| `human_gate`   | suspend; deliver to operator; resume with their decision | `form: "..."`; `ask:` (`decision_schema:` only with `form: "json_schema"`) |
 | `json_object`  | validator — payload[key] parses as a JSON object with required keys | `required: [...]` (optional); `key: "raw"` |
 | `json_schema`  | validator — payload[key] matches a JSON-Schema subset | `schema: {...}`; `key: "raw"` |
 | `expect_field` | validator — payload[key] == value | `key:`, `equals:` |
-| `render`       | format a template against the payload → put result on a key | `template:` OR `template_file:`; `out_key:` |
+| `render`       | fill a template against the payload → write to a file | `template_text:` OR `template_file:`; `out:` (path) |
 | `get`          | read from a configured `data_source` → payload | `source: "<name>:<key>"` |
 | `post`         | write payload field to a configured `data_sink` | `sink: "<name>:<key>"`; `field:` |
 | `shell`        | run a command (full output → payload) | `command:` |
 | `shell_check`  | run a command (pass iff exit 0; output ignored) | `command:` |
 | `worktree`     | check out a fresh worktree of the source repo → payload `workdir` | `repo:` |
+| `agent_loop`   | bounded tool-use loop: model emits tool calls, harness dispatches, repeat until done or `max_turns` | `tools: {name: {description, input_schema, dispatch}}`; `model:` |
 
 Common keys on EVERY node spec: `model`, `effort`, `temperature`,
 `timeout`, `retries`, `config:`, `idempotency_key:`, `idempotent:`,
@@ -133,6 +134,7 @@ yaah trace <jsonl> [<price-map>]           # post-hoc aggregate over a JSONL tra
   --cost            compact per-model cost rollup (with PRICES for $)
   --last N          filter to the most recent N runs
 yaah doctor                                # diagnose install: Python, optional deps, packaged bases
+yaah completion <bash|zsh>                 # emit a shell tab-completion script
 yaah --version                             # print the installed yaah version
 ```
 
