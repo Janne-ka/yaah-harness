@@ -41,6 +41,42 @@ def main() -> None:
     inside = '{"text": "it\'s fine", "n": 3}'
     assert extract_json(inside) == {"text": "it's fine", "n": 3}
 
+    # weak-model JSON: single-quoted / Python-dict style (claude-haiku, BUG-697
+    # 2026-06-25). Strict json.loads rejects single quotes; a guarded
+    # ast.literal_eval FINAL fallback recovers the object.
+    assert extract_json("{'a': 1, 'b': 'two'}") == {"a": 1, "b": "two"}
+    # prose around it + a Python bool (literal_eval handles True/False/None)
+    assert extract_json("Result: {'lens': 'security', 'ok': True}") == {
+        "lens": "security", "ok": True}
+    # single-quoted inside a fence
+    assert extract_json("```json\n{'k': 'v'}\n```") == {"k": "v"}
+    # single-quoted list
+    assert extract_json("['a', 'b']") == ["a", "b"]
+
+    # boundary — the fallback is literals-only: JS `true/false/null` and
+    # UNQUOTED keys are NOT recovered (both invalid Python too). They still
+    # raise, so the limit is explicit (a future change here is deliberate).
+    for bad in ("{'k': true}", "{k: 1}"):
+        try:
+            extract_json(bad)
+            raise AssertionError("expected JSONDecodeError for " + bad)
+        except json.JSONDecodeError:
+            pass
+    # the fallback accepts only a dict/list, never a bare single-quoted string
+    try:
+        extract_json("'just a string'")
+        raise AssertionError("expected JSONDecodeError for a bare string")
+    except json.JSONDecodeError:
+        pass
+    # a recovered dict/list must still be JSON-representable: Python-only shapes
+    # (set/tuple/bytes values) raise JSONDecodeError here, not a later TypeError
+    # when the payload is serialized.
+    try:
+        extract_json("{'a': {1, 2}}")
+        raise AssertionError("expected JSONDecodeError for a set value")
+    except json.JSONDecodeError:
+        pass
+
     # nothing parseable -> raises
     try:
         extract_json("no json here at all")
