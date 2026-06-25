@@ -1,4 +1,4 @@
-"""yaah.completion: shell completion scripts for bash + zsh.
+"""yaah.shell_completion: shell completion scripts for bash + zsh.
 
 What it proves: the rendered scripts contain every verb cli._SUBCOMMANDS
 exposes (no drift between what the user can run and what tab-complete
@@ -6,12 +6,12 @@ suggests); both shells share the same archetype list; an unknown shell
 raises with the supported set named; the script-level shape is wired
 correctly (bash uses `complete -F`, zsh uses `#compdef`).
 
-Run: cd yaah && PYTHONPATH=src python3 tests/test_completion.py
+Run: cd yaah && PYTHONPATH=src python3 tests/test_shell_completion.py
 """
 from __future__ import annotations
 
 from yaah.cli import _SUBCOMMANDS
-from yaah.completion import bash_completion, render, zsh_completion
+from yaah.shell_completion import bash_completion, render, zsh_completion
 
 
 def scenario_no_verb_drift() -> None:

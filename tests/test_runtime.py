@@ -105,7 +105,7 @@ def scenario_trace_file_sink() -> None:
     # the stage + model_call records (the runtime wired the tracer end to end).
     with tempfile.TemporaryDirectory() as d:
         pipeline = {
-            "nodes": {"echo": {"type": "agent", "template": "hi", "model": "fake:x"}},
+            "nodes": {"echo": {"type": "agent", "template": "hi", "model": "fake:x", "parse": False}},
             "graph": {"start": "s", "stages": {"s": {"node": "echo"}}},
         }
         with open(os.path.join(d, "pipe.json"), "w") as f:

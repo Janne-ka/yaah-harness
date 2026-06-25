@@ -287,6 +287,10 @@ If your real pipeline doesn't fit any of the five:
   (variation of the `instrumented` archetype).
 - [`docs/node-reference.md`](node-reference.md) — every node type
   and its config.
+- [`docs/module-catalog.md`](module-catalog.md) — the full
+  machine-readable index (node types, ports, adapters, validators),
+  auto-generated from the code. Reach here when you need the exact
+  surface, not the prose.
 - [`docs/root-config-reference.md`](root-config-reference.md) —
   every root / deployment-config key.
 - [`docs/decisions/`](decisions/) — ADRs explaining *why* the shape

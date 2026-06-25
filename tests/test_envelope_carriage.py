@@ -25,7 +25,7 @@ class _UsageBackend:
 
 
 CONFIG = {
-    "nodes": {"echo": {"type": "agent", "template": "hi {{x}}", "model": "m"}},
+    "nodes": {"echo": {"type": "agent", "template": "hi {{x}}", "model": "m", "parse": False}},
     "graph": {"start": "s", "stages": {"s": {"node": "echo"}}},
 }
 

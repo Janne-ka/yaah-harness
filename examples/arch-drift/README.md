@@ -35,11 +35,11 @@ fixtures/input-self.json               ← target (a) — yaah as a black box
 ## What it does, stage by stage
 
 ```
-snapshot → read-svg → extract → parse → render-svg → diff
-                       (agent +                         │
-                        validator                       │
-                        + retry-with-feedback)          │
-                                                        ▼
+snapshot → read-svg → extract → render-svg → diff
+                      (agent + validator           │
+                       + retry-with-feedback,      │
+                       parse-by-default)           │
+                                                   ▼
                                                  changed?
                                                 "no"     "yes"
                                                  │         │
@@ -59,8 +59,9 @@ snapshot → read-svg → extract → parse → render-svg → diff
   empty string on first run; the diff stage treats empty as "drift = yes").
 - **extract** — agent prompted with the snapshot + any prior human feedback,
   outputs `{mermaid, notes}` JSON. Validator (`json_object`, required keys =
-  `["mermaid"]`) + retry-with-feedback handles malformed replies.
-- **parse** — merges `mermaid` and `notes` onto the payload.
+  `["mermaid"]`) + retry-with-feedback handles malformed replies. The agent is
+  parse-by-default (ADR-0004), so `mermaid` and `notes` land on the payload
+  directly — no separate parse stage.
 - **render-svg** — `transforms.render_mermaid` shells out to `mmdc`
   (mermaid-cli). When `MERMAID_RENDERER=:canned` is set in the environment,
   returns a pre-baked SVG — used by the local/fake config so the example

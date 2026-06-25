@@ -584,6 +584,16 @@ class Harness:
         await self._ingest_remote_trace(out)
         if out.kind == Kind.ERROR:  # remote handler raised — fail, don't validate as success
             return out, self._error_verdict(stage.node or stage.name, out)
+        if out.kind == Kind.VERDICT:  # a node RETURNED a verdict as its output
+            # (e.g. WorktreeNode's dirty-guard refusal). A FAILED one on a
+            # validator-less stage would otherwise validate as passed and sail
+            # onward, dropping the artifact downstream nodes need (H3 class, the
+            # VERDICT variant of the ERROR convergence above). Route it into the
+            # SAME retry/escalate/StageFailed path so the failure surfaces HERE,
+            # named, instead of as a cryptic error two stages later.
+            node_verdict = Verdict.from_envelope(out)
+            if not node_verdict.ok:
+                return out, node_verdict
         if out.kind == Kind.AWAIT:  # a node (e.g. UI/gate) chose to suspend
             # Park the artifact that flowed INTO the gate (resume merges the human's
             # decision onto it — early_review #18) AUGMENTED with what the gate

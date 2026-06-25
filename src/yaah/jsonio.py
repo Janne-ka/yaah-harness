@@ -14,6 +14,7 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
 from typing import Any
@@ -45,6 +46,31 @@ def extract_json(text: str) -> Any:
             return json.loads(cand)
         except json.JSONDecodeError as e:
             last_err = e
+
+    # Last resort: a weak executor emitted Python-dict / single-quoted style
+    # (`{'k': 'v'}`) — strict JSON rejects the single quotes, but the object is
+    # recoverable. ast.literal_eval is SAFE (literals only, never code) and
+    # handles single-quoted strings + Python True/False/None + trailing commas.
+    # Accept ONLY a dict/list (we want the object, not a stray quoted scalar).
+    # Deliberately does NOT cover JS `true/false/null` or unquoted keys (both
+    # invalid Python too) — those still raise below.
+    for cand in candidates:
+        if not cand:
+            continue
+        try:
+            obj = ast.literal_eval(cand)
+        except (ValueError, SyntaxError):
+            continue
+        if isinstance(obj, (dict, list)):
+            try:
+                # Reject Python-only shapes JSON can't represent (tuple keys,
+                # set/bytes values) so they fall into the clean JSONDecodeError
+                # retry path here, not an uncaught TypeError when the payload is
+                # later json.dumps'd (trace / NATS).
+                json.dumps(obj)
+            except TypeError:
+                continue
+            return obj
     raise last_err or json.JSONDecodeError("no JSON found", text, 0)
 
 

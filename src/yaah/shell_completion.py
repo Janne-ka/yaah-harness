@@ -1,4 +1,4 @@
-"""completion — emit shell completion scripts for the `yaah` CLI.
+"""shell_completion — emit shell completion scripts for the `yaah` CLI.
 
 Used by: the `yaah completion <shell>` subcommand. The user pipes the output
 into their shell config (`yaah completion bash >> ~/.bash_completion`, or

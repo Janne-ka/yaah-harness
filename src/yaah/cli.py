@@ -293,7 +293,7 @@ _VERB_PARSERS: Dict[str, Callable[[list], dict]] = {
     "baton-schema":  _parse_baton_schema,
 }
 
-# Tuple form kept for the test in test_completion.py (asserts no drift between
+# Tuple form kept for the test in test_shell_completion.py (asserts no drift between
 # the parser surface and the shell-completion script's verb list).
 _SUBCOMMANDS = tuple(_VERB_PARSERS.keys())
 
@@ -352,7 +352,7 @@ def _dispatch_doctor(spec: Dict[str, Any]) -> None:
 
 
 def _dispatch_completion(spec: Dict[str, Any]) -> None:
-    from .completion import render
+    from .shell_completion import render
     print(render(spec["shell"]))
 
 

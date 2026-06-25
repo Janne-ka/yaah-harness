@@ -324,7 +324,7 @@ async def scenario_langfuse_v4_mapping() -> None:
 async def scenario_emit_through_harness() -> None:
     # a one-stage agent pipeline, traced with phase+cost via build(tracer=)
     config = {
-        "nodes": {"echo": {"type": "agent", "template": "hi {{x}}", "model": "m"}},
+        "nodes": {"echo": {"type": "agent", "template": "hi {{x}}", "model": "m", "parse": False}},
         "graph": {"start": "s", "stages": {"s": {"node": "echo"}}},
     }
     tr = RecordingTracer([PhaseContributor(), CostContributor()])
@@ -352,7 +352,7 @@ async def scenario_bad_sink_doesnt_abort_run() -> None:
     await comms.subscribe("trace", boom)
     tracer = BusTracer(comms, contributors=[PhaseContributor()])
     config = {
-        "nodes": {"echo": {"type": "agent", "template": "x", "model": "m"}},
+        "nodes": {"echo": {"type": "agent", "template": "x", "model": "m", "parse": False}},
         "graph": {"start": "s", "stages": {"s": {"node": "echo"}}},
     }
     h = build(config, comms=comms, backend=_UsageBackend(), tracer=tracer)
@@ -370,7 +370,7 @@ async def scenario_cost_off_skips_gathering() -> None:
             return "done"
 
     config = {
-        "nodes": {"echo": {"type": "agent", "template": "x", "model": "m"}},
+        "nodes": {"echo": {"type": "agent", "template": "x", "model": "m", "parse": False}},
         "graph": {"start": "s", "stages": {"s": {"node": "echo"}}},
     }
     tr = RecordingTracer([PhaseContributor()])  # cost OFF
