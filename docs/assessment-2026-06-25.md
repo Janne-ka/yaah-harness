@@ -23,6 +23,9 @@ Phase 1b merge** — the `agent_loop` node shipped but is undocumented in the tw
 files an author reads first; (3) low-severity concurrency/edge-case hardening
 and example hygiene.
 
+**Status (updated):** the HIGH and the doc-drift MEDs are resolved in PR #5 — see
+*Resolved in PR #5* below; the two latent-engine MEDs and the LOW list remain open.
+
 ## Ground truth
 
 - `python3 scripts/run_tests.py` → **PASS=75, FAIL=0, coverage 89%** (re-run
@@ -41,37 +44,20 @@ and example hygiene.
 | 6. Examples (`examples/`) | 4 | 4 | 5 | 5 | All five archetypes run offline; hardening holds; doc drift + one unconfined PoC tool. |
 | 7. Docs (`AGENTS.md`, `docs/`, skills) | accurate 3 | complete 3 | non-redundant 5 | navigable 5 | `agent_loop` undocumented; `render: out_key:` fabricated; catalog generator glitch. |
 
-## Prioritized fix list
+## Resolved in PR #5
 
-### HIGH — fix before relying on AI overlays
+- **HIGH** `overlay_lint.py` fail-open — deny-by-default for a numeric bound
+  absent from base (+ regression test).
+- `agent_loop` documented (`node-reference.md` section + `shape-grammar.md` row).
+- `shape-grammar.md` render keys (`out_key`→`out`, `template`→`template_text`),
+  added `completion` verb, fixed `human_gate` `decision_schema` wording.
+- `arch-drift/README.md` nonexistent `parse` stage removed.
+- `cli.py:296` stale `test_completion.py` comment.
 
-1. **`overlay_lint.py` (node-level numeric bound fails open).** The widen-check
-   at line 111 only fires when `base_v` is already numeric; if the base node
-   never set `timeout`/`retries`/`temperature`, an AI overlay can introduce an
-   arbitrarily large bound and the gate returns `[]`. **Reproduced:** base node
-   with no `timeout` accepted overlay `timeout: 99999, retries: 50` with zero
-   errors. The `config` sub-surface (`_lint_config`, line 136) already does
-   deny-by-default for absent keys — this is an inconsistency between the two
-   numeric surfaces. **Fix:** when `base_v is None` and the value is numeric,
-   reject ("introduces a bound absent from base — only existing bounds may be
-   tightened"), mirroring `_lint_config`. Add a regression test pinning the
-   absent-in-base case.
+## Open findings
 
-### MED — doc drift from the merge (form-consistency violations) + latent engine
+### MED — latent engine
 
-2. **`agent_loop` is undocumented.** Registered in `builders.py` default_registry
-   (13th type) but absent from `docs/node-reference.md` (which promises "every
-   built-in `type:`") and `docs/shape-grammar.md`. Add a node-reference section
-   (`tools` dict shape, `max_turns` default 10, `system_prompt`, `model`,
-   turn/stream-backend requirement) and a shape-grammar row. *An author reading
-   either file concludes no tool-loop node exists and hand-rolls a worse one.*
-3. **`docs/shape-grammar.md`: `render` config shows `out_key:`** — no such key;
-   the builder reads `out`. An author copying the card writes a render that
-   outputs nowhere. Change `out_key:` → `out:`.
-4. **`examples/arch-drift/README.md` documents a nonexistent `parse` stage**
-   (diagram + line 63). Stale from before ADR-0004 parse-by-default; the
-   pipeline has no `parse` stage. Remove the box + bullet (the JSON `_doc` is
-   already correct).
 5. **`harness/fork_coordinator.py`: branch-level `clears` not ordered vs fan-in
    completion** (latent). A fast sibling can meet the join policy and reduce
    before a slow branch publishes its `clears`, delivering to a torn-down
@@ -121,11 +107,6 @@ and example hygiene.
     `decision_schema` framing implies it's valid without `form: "json_schema"`.
 22. `docs/module-catalog.md` — `_build_agent` "Constructs" column shows `s`
     (generator glitch in `scripts/build_catalog.py`, not a hand-edit).
-
-### Already fixed this session
-
-- `cli.py:296` stale comment referencing `test_completion.py` →
-  `test_shell_completion.py` (flagged by the fix-diff reviewer + cluster 7).
 
 ## Security notes (by design — document, don't "fix")
 
