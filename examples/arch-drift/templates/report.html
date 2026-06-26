@@ -36,9 +36,11 @@
     <strong>Notes from the extractor:</strong> {{notes}}
   </div>
 
-  <p>To approve and land the new SVG, resume the parked baton with
-     <code>{"decision":"approve"}</code>. To revise, send
-     <code>{"decision":"revise","feedback":"..."}</code> and the next attempt
-     will incorporate the feedback.</p>
+  <p><strong>To continue — run this in the terminal where you launched the run:</strong><br>
+     <code>echo '{"decision":"approve"}' &gt; decision.json</code> &nbsp;(or <code>revise</code>)<br>
+     <code>yaah resume &lt;your-root.json&gt; &lt;baton_id&gt; decision.json</code>
+     &nbsp;— the <code>baton_id</code> is printed in that terminal, just above the prompt.<br><br>
+     <strong>Decisions:</strong> <code>{"decision":"approve"}</code> lands the new SVG &middot;
+     <code>{"decision":"revise","feedback":"..."}</code> re-runs with your feedback applied.</p>
 </body>
 </html>

@@ -144,6 +144,51 @@ def snapshot_pipeline_json(envelope, config) -> Dict[str, Any]:
     return {**envelope.payload, "snapshot": "\n".join(lines), "feedback": ""}
 
 
+def snapshot_rails(envelope, config) -> Dict[str, Any]:
+    """Snapshot strategy for Rails / Ruby apps — selected when the input sets
+    `snapshot_strategy: "rails"`. Same job as `snapshot_imports`, but Ruby has no
+    `__init__.py` packages to walk, so it reads the architecture the Rails way:
+    the `app/` layers (models, controllers, services, jobs, …) with each file's
+    `class`/`module` line, plus the route namespaces from `config/routes.rb`.
+    Bounded per layer to fit a prompt budget. It exists to make the point of
+    pluggable strategies concrete: supporting a different *language* is a new
+    ~30-line function here, not an engine change. Seeds `feedback: ""` like the
+    others so the prompt's `{{feedback}}` resolves on the first pass."""
+    repo = os.path.abspath(envelope.payload.get("repo_path", "."))
+    app = os.path.join(repo, "app")
+    lines: List[str] = ["# Repo snapshot for architecture extraction",
+                        "# root: {}".format(os.path.basename(repo)),
+                        "# strategy: rails", ""]
+    if os.path.isdir(app):
+        for layer in sorted(os.listdir(app)):              # the architectural layers
+            ld = os.path.join(app, layer)
+            if not os.path.isdir(ld):
+                continue
+            rb = [os.path.join(r, f) for r, _d, fs in os.walk(ld)
+                  for f in fs if f.endswith(".rb")]
+            if not rb:
+                continue
+            lines.append("## app/{} ({} files)".format(layer, len(rb)))
+            for f in sorted(rb)[:12]:                       # cap: 12 files/layer
+                decl = _ruby_decl(f)
+                lines.append("- {}{}".format(os.path.relpath(f, ld),
+                                             "  ({})".format(decl) if decl else ""))
+            lines.append("")
+    routes = os.path.join(repo, "config", "routes.rb")     # can be huge; just scan it
+    if os.path.isfile(routes):
+        try:
+            with open(routes, "r", encoding="utf-8", errors="ignore") as f:
+                txt = f.read(200_000)
+        except OSError:
+            txt = ""
+        ns = sorted(set(re.findall(r"namespace\s+[:'\"]([a-z_0-9]+)", txt)))[:30]
+        res = sorted(set(re.findall(r"resources?\s+[:'\"]([a-z_0-9]+)", txt)))[:40]
+        lines += ["## config/routes.rb",
+                  "  namespaces: {}".format(", ".join(ns) or "(none)"),
+                  "  resources: {}".format(", ".join(res) or "(none)"), ""]
+    return {**envelope.payload, "snapshot": "\n".join(lines), "feedback": ""}
+
+
 # Strategy dispatcher: the pipeline's snapshot stage points here; the fixture
 # selects the strategy via the `snapshot_strategy` payload key (default:
 # "imports"). One pipeline, multiple targets via input.json — no second
@@ -151,6 +196,7 @@ def snapshot_pipeline_json(envelope, config) -> Dict[str, Any]:
 _SNAPSHOT_STRATEGIES = {
     "imports": snapshot_imports,
     "pipeline_json": snapshot_pipeline_json,
+    "rails": snapshot_rails,
 }
 
 
@@ -325,6 +371,61 @@ def write_versioned(envelope, config) -> Dict[str, Any]:
         latest, versioned, next_step), file=sys.stderr)
     return {"written": True, "versioned_path": versioned, "latest_path": latest,
             "next_step": next_step}
+
+
+def write_both_candidates(envelope, config) -> Dict[str, Any]:
+    """Before the gate, write BOTH candidate SVGs to ./diagrams/ as real files
+    (one per label, `candidate-a-<model>.svg` etc. + a per-label `latest`), so you
+    can open each FULL-SIZE while deciding — the inline report previews are cramped
+    by design. Only the candidate you approve becomes the committed architecture
+    SVG (write_candidate, after the gate); these are just the side-by-side to look
+    at. Prints the paths. (Offline/canned mode writes identical placeholder SVGs;
+    real per-model SVGs need `mmdc`.)"""
+    candidates = envelope.payload.get("candidates", [])
+    # next to this example's report (transforms.py sits in the example dir), so it
+    # lands in examples/arch-drift/diagrams/ no matter where you run yaah from —
+    # matching where the render node writes the report.
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diagrams")
+    os.makedirs(out_dir, exist_ok=True)
+    stamp = _utc_stamp(envelope)
+    written: List[Dict[str, str]] = []
+    for c in candidates:
+        which = c["label"]
+        model = ((c.get("usage") or {}).get("model") or "model").rsplit(":", 1)[-1].replace("/", "-")
+        svg = c.get("new_svg", "")
+        versioned = os.path.join(out_dir, "candidate-{}-{}-{}.svg".format(which, model, stamp))
+        latest = os.path.join(out_dir, "candidate-{}.svg".format(which))
+        for p in (versioned, latest):
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(svg)
+        written.append({"label": which, "model": model, "latest": latest})
+    if written:
+        print("\nBoth candidates written (open full-size to compare):", file=sys.stderr)
+        for w in written:
+            print("  {} ({}): {}".format(w["label"], w["model"], w["latest"]), file=sys.stderr)
+        if len(written) >= 2:
+            print("  e.g.  open {} {}".format(written[0]["latest"], written[1]["latest"]),
+                  file=sys.stderr)
+    return {**envelope.payload, "candidate_files": [w["latest"] for w in written]}
+
+
+def stamp_report(envelope, config) -> Dict[str, Any]:
+    """Runs right after the report `render`. The render always overwrites a FIXED
+    file (`diagrams/arch-report*.html`), so that file is only ever the latest —
+    and a run that skips the report (or a different run) leaves a stale one you
+    might open by mistake. This copies the just-written report to a timestamped
+    sibling so every run's report is preserved and unambiguous, and PRINTS both
+    paths so you don't hunt. Mirrors the versioned-SVG pattern. Reads `path` (the
+    render node puts the file it wrote there)."""
+    src = envelope.payload.get("path")
+    if not src or not os.path.isfile(src):
+        return dict(envelope.payload)
+    base, ext = os.path.splitext(src)
+    versioned = "{}-{}{}".format(base, _utc_stamp(envelope), ext)
+    shutil.copyfile(src, versioned)
+    print("\nReport (latest): {}\n  this run:       {}".format(src, versioned),
+          file=sys.stderr)
+    return {**envelope.payload, "report_latest": src, "report_versioned": versioned}
 
 
 def noop_done(envelope, config) -> Dict[str, Any]:
@@ -522,6 +623,19 @@ def _first_sentence(text: str) -> str:
     a large repo still fits the prompt budget."""
     line = text.strip().splitlines()[0] if text.strip() else ""
     return line[:200]
+
+
+def _ruby_decl(path: str) -> str:
+    """Helper for `snapshot_rails`: the leading `class X < Y` / `module X` line of
+    a Ruby file — the one line that says what it is. '' if absent/unreadable."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(2000)
+    except OSError:
+        return ""
+    m = re.search(r"^\s*(?:class|module)\s+[A-Za-z0-9_:]+(?:\s*<\s*[A-Za-z0-9_:]+)?",
+                  head, re.MULTILINE)
+    return m.group(0).strip() if m else ""
 
 
 _IMPORT_RE = re.compile(r"^\s*(?:from\s+(\S+)\s+import|import\s+(\S+))", re.MULTILINE)
