@@ -105,6 +105,7 @@ Common keys on EVERY node spec: `model`, `effort`, `temperature`,
 | `mcp:` | inline MCP server map, or `"source:key"` |
 | `expose:` / `filters:` / `max_chars:` / `broker:` | R9–R12 envelope access controls |
 | `attach: ["fn:module:Cls", ...]` | post-invoke wrappers ([ADR-0003](decisions/0003-attacher-port.md)) — each is a subclass of `Attacher`, returns dict merged onto reply |
+| `strict_render: true` | fail the stage (`render_unfilled_placeholders`) on a `{{placeholder}}` with no value in payload ∪ extras, instead of leaving the literal `{{name}}` (default `false`); engine-injected keys + present-but-empty values never trip it |
 
 ## Trace block
 

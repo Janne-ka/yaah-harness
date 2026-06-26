@@ -39,6 +39,12 @@ REPLACE the payload otherwise; prefer graph `sticky` for run-wide keys),
 `parse` (bool, default `true` — [ADR-0004](decisions/0004-parse-by-default.md):
 agent runs `extract_json` on its output and merges the parsed keys onto the
 reply; opt out with `parse: false` for streaming/raw-only cases),
+`strict_render` (bool, default `false` — when `true`, a `{{placeholder}}` with no
+value in payload ∪ `config` extras FAILS the stage loud with
+`render_unfilled_placeholders` naming the key + stage, instead of leaving the
+literal `{{name}}` in the prompt; engine-injected keys like `tool_manifest` and
+present-but-empty values never trip it. Catches the stage-local unfilled-placeholder
+class no static lint can),
 `tools` (model-initiated, needs a turn-capable backend), `allowed_tools` +
 `permission_mode` (claude-native), `mcp` (inline servers or `"source:key"`),
 `expose`/`filters`/`max_chars`/`broker` (R9–R12 envelope access), `attach`

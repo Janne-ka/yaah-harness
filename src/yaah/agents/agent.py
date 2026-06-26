@@ -29,14 +29,37 @@ from ..trace import NullTracer, Span
 from .tool import Tool
 from .tool_loop import run_tool_loop
 
-# Prompt placeholders are {{name}} (mustache-style), so prompts can contain
-# literal JSON braces safely. Unknown placeholders are left untouched. A `!`
-# prefix — {{!name}} — marks the value as UNTRUSTED (repo/model-controlled text,
-# e.g. a git diff): it is fenced as data with an unguessable per-render token so
-# a crafted value can't forge the closing fence and break out into instructions.
-# The ENGINE only provides the mechanism; the prompt author (app) declares which
-# fields are untrusted — the engine stays domain-free.
+# Prompt placeholders are {{name}} (mustache-style); single-brace JSON `{...}` is NOT
+# matched, so prompts hold literal JSON safely. Unknown {{name}} placeholders are left
+# untouched BY DEFAULT (unlike RenderNode, which fails) for two reasons: the retry-loop
+# convention key `{{feedback}}` is absent on the first pass, so a strict default would
+# brick every feedback loop; and an agent prompt is trusted author text consumed by a
+# tolerant model (vs a RenderNode's human-facing document, where a stray `{{name}}`
+# ships a broken artifact). Opt into `strict_render=True` and an unknown key FAILS the
+# stage loud (render_unfilled_placeholders) instead — the one check that catches a
+# stage-local unfilled placeholder (e.g. {{context}} that exists globally but not at
+# THIS node), which no static lint can. A `!` prefix — {{!name}} — marks value UNTRUSTED
+# (repo/model-controlled text, e.g. a git diff): it is fenced as data with an
+# unguessable per-render token so a crafted value can't forge the closing fence and
+# break out into instructions. The ENGINE only provides the mechanism; the prompt
+# author (app) declares which fields are untrusted — the engine stays domain-free.
 _PLACEHOLDER = re.compile(r"{{\s*(!?)\s*(\w+)\s*}}")
+
+# Keys the ENGINE manages (injects or special-cases), so strict_render must NEVER fault
+# on them even when absent: `tool_manifest` is injected (empty when a backend has
+# function-calling), and `feedback` is the retry-loop convention key — absent on the
+# first attempt and appended by _render only once a reject sets it, so a prompt with
+# `{{feedback}}` in its body must not fail on pass 1. Explicit + greppable, not magic.
+_ENGINE_INJECTED = frozenset({"tool_manifest", "feedback"})
+
+
+class _UnfilledPlaceholder(Exception):
+    """Raised inside _render under strict_render when one or more {{placeholders}}
+    have no value in payload ∪ extras. Caught in invoke() and turned into a
+    render_unfilled_placeholders failure verdict. Carries the missing key names."""
+    def __init__(self, keys: list) -> None:
+        self.keys = keys
+        super().__init__(", ".join(keys))
 
 
 def _frame_untrusted(key: str, value: str, token: str) -> str:
@@ -101,6 +124,7 @@ class Agent:
         max_chars: int = 20000,                # hard cap on an envelope_get pull
         broker: Optional[str] = None,          # R12: node role for the fuzzy context broker (e.g. "role:context-broker")
         parse: bool = True,                    # ADR-0004: agent extract_json + merges parsed keys onto reply (default True)
+        strict_render: bool = False,           # Y1: fail loud on an unfilled {{placeholder}} (default off = leave literal)
     ) -> None:
         """Construct an Agent. See the module docstring for the design contract;
         most kwargs are routine wiring. The security-relevant ones are documented
@@ -138,6 +162,7 @@ class Agent:
         # with parse=False for streaming/raw-only use cases (the data-flow
         # graph linter will then require an explicit transform downstream).
         self._parse = parse
+        self._strict_render = strict_render
         self._backend = backend
         self._template = template
         self._prompt_source = prompt_source
@@ -219,7 +244,23 @@ class Agent:
                              + ([envelope_tool] if envelope_tool else [])
                              + ([broker_tool] if broker_tool else []))
             manifest = render_tool_manifest(visible_tools)
-        prompt = self._render(template, input, config, tool_manifest=manifest)
+        try:
+            prompt = self._render(template, input, config, tool_manifest=manifest)
+        except _UnfilledPlaceholder as e:
+            # Y1: strict_render fault — surface it like RenderNode's render_unfilled_
+            # placeholders (a Failure verdict, not a silent literal), naming the key(s)
+            # + stage so the fix is obvious AT THE SEAM rather than as a downstream
+            # not_json minutes later. Same failure shape as not_json, so the harness's
+            # retry/escalate machinery handles it uniformly.
+            return Verdict.failed(Failure(
+                "render_unfilled_placeholders",
+                "no value for placeholder(s) {} at stage '{}'".format(
+                    ", ".join(e.keys), self._stage),
+                "add the key to a 'carry' list from an upstream stage, set it in a "
+                "prior transform, give it an 'extras' default, or remove the "
+                "placeholder (engine-injected keys exempt: {})".format(
+                    ", ".join(sorted(_ENGINE_INJECTED)))
+            )).to_envelope(input)
         opts = dict(config.extras)
         if config.temperature is not None:
             opts["temperature"] = config.temperature
@@ -366,10 +407,16 @@ class Agent:
 
         token = "U" + secrets.token_hex(8)  # one unguessable fence per render
         payload_keys = set(input.payload)  # runtime data; config.extras stays author-trusted
+        missing: list = []  # Y1: keys with no value, collected for a single loud failure
 
         def sub(m: "re.Match") -> str:
             untrusted, key = m.group(1), m.group(2)
             if key not in ns:
+                # Y1: under strict_render an unknown key (other than an engine-injected
+                # one) is a fault — record it; we raise once, after the full pass, so the
+                # error names every missing key. Default stays leave-literal.
+                if self._strict_render and key not in _ENGINE_INJECTED and key not in missing:
+                    missing.append(key)
                 return m.group(0)  # leave unknown {{placeholders}} untouched
             val = ns[key]
             s = val if isinstance(val, str) else json.dumps(val)
@@ -381,6 +428,8 @@ class Agent:
             return s
 
         prompt = _PLACEHOLDER.sub(sub, template)
+        if missing:  # strict_render only: default leaves them literal, missing stays []
+            raise _UnfilledPlaceholder(missing)
         feedback = input.payload.get("feedback")
         if feedback:
             # feedback can quote repo/model text (e.g. a shell tail) — same

@@ -98,14 +98,21 @@ present, names the change to make.
 
 ### `error: pipeline failed: stage 'X' failed: render_unfilled_placeholders`
 
-A `render` node tried to fill a `{{key}}` placeholder that wasn't on the
-envelope payload. The common cause: an `agent` upstream uses `"parse":
-false` (ADR-0004 opt-out) without a `transform` between to merge the parsed
-JSON onto the payload.
+A `{{key}}` placeholder had no value in the payload (∪ the node's `config`
+extras). Two sources:
 
-**Fix**: remove the `"parse": false` to let parse-by-default merge the
-JSON, OR insert a transform stage between the agent and the render.
-`yaah validate` catches the load-time form of this; the run-time form
+- A `render` node. The common cause: an `agent` upstream uses `"parse":
+  false` (ADR-0004 opt-out) without a `transform` between to merge the parsed
+  JSON onto the payload.
+- An `agent` node with `"strict_render": true` — its prompt referenced a
+  `{{key}}` not reachable at that stage (the message names the key + the stage).
+  This is the opt-in guard for the stage-local unfilled-placeholder case.
+
+**Fix**: for the render case, remove the `"parse": false` to let parse-by-default
+merge the JSON, OR insert a transform stage between the agent and the render. For
+the agent `strict_render` case, `carry:` the key from an upstream stage, set it in
+a prior transform, give it an `extras` default, or fix/remove the placeholder.
+`yaah validate` catches the load-time form of the render case; the run-time form
 fires if the agent's reply isn't the shape the renderer expected.
 
 ### `error: node 'X' uses 'prompt' but no prompt_source passed to build()`

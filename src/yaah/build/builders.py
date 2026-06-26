@@ -87,6 +87,7 @@ def _build_agent(spec: Dict[str, Any], ctx: BuildContext) -> Node:
         broker=spec.get("broker"),                    # R12: node role for the fuzzy context broker
         envelope_filters=envelope_filters,             # R10: name->Filter, available via envelope_get's `filter:` arg
         parse=bool(spec.get("parse", True)),          # ADR-0004: parse-by-default; opt out with parse:false
+        strict_render=bool(spec.get("strict_render", False)),  # Y1: fail loud on unfilled {{placeholder}} (node-level; no root default yet)
     )
     # ADR-0003: opt-in `attach: [...]` wraps the agent so attachers can merge
     # post-invoke data (tokens/usage/etc.) from the tracer's last span onto
