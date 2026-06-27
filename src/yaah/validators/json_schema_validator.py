@@ -78,7 +78,10 @@ class JsonSchemaValidator:
     async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
         raw = input.payload.get(self._key, "")
         try:
-            obj = extract_json(raw)
+            # Y4: feed the schema's declared `required` keys as a weak-executor
+            # backstop — recovers a weak executor's unquoted-key output before
+            # validation, bounded to the object span (no fabrication). No-op if absent.
+            obj = extract_json(raw, keys=self._schema.get("required"))
         except json.JSONDecodeError as e:
             return Verdict.failed(Failure(
                 "not_json", "output is not valid JSON: {}".format(e),
