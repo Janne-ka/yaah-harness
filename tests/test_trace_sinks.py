@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import tempfile
+import time
 
 from yaah.core import Envelope, Kind
 from yaah.adapters.trace import ProgressFileSink, StatsFileSink
@@ -88,10 +89,38 @@ async def scenario_progress_file_suspend_shows_awaiting() -> None:
         assert "suspended" in lines[1], lines[1]
 
 
+async def scenario_progress_file_suspend_points_at_artifact() -> None:
+    # Y2: a suspended stage whose parked record carries `artifact` (the render
+    # node's rendered-output basename, projected from the generic `path` key)
+    # appends a `-> open <basename>` hint so the operator tailing progress.log
+    # knows exactly what to open. A suspend WITHOUT an artifact is byte-identical
+    # to the legacy short form.
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "progress.log")
+        sink = ProgressFileSink(path, clock=lambda: 0.0)
+        # with artifact
+        await sink.handle(_rec(name="stage", stage="review", status="suspended",
+                               duration_ms=3.0, awaiting="human:arch-review",
+                               artifact="report.html"))
+        # without artifact (legacy line — must be unchanged)
+        await sink.handle(_rec(name="stage", stage="review", status="suspended",
+                               duration_ms=3.0, awaiting="human:arch-review"))
+        lines = open(path, encoding="utf-8").read().splitlines()
+        assert "-> open report.html" in lines[0], lines[0]
+        assert "awaiting=human:arch-review" in lines[0], lines[0]
+        # the no-artifact line is byte-identical to today's awaiting-only form
+        ts = time.strftime("%H:%M:%S", time.localtime(0.0))
+        legacy = ("{} {:<18} suspended (3ms) awaiting=human:arch-review"
+                  .format(ts, "review"))
+        assert lines[1] == legacy, repr(lines[1])
+        assert "-> open" not in lines[1], lines[1]
+
+
 async def main() -> None:
     await scenario_progress_file()
     await scenario_progress_appends()
     await scenario_progress_file_suspend_shows_awaiting()
+    await scenario_progress_file_suspend_points_at_artifact()
     await scenario_stats_file_rolls_up()
     await scenario_stats_file_overwrites_with_latest()
     print("ok")

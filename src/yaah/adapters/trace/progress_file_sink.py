@@ -45,6 +45,11 @@ class ProgressFileSink:
         awaiting = r.get("awaiting")
         if awaiting:
             line += " awaiting={}".format(awaiting)
+        # A parked stage that rendered an artifact (the generic `path` payload key,
+        # projected to `artifact` on the span) gets an `-> open <basename>` hint so
+        # the operator tailing progress.log knows exactly what to open (Y2).
+        if r.get("artifact"):
+            line += " -> open {}".format(r["artifact"])
         line += "\n"
         with open(self._path, "a", encoding="utf-8") as f:
             f.write(line)

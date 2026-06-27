@@ -17,6 +17,7 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Optional
 
 from ..core import Envelope
@@ -70,6 +71,12 @@ class SpanEmitter:
         # have to `yaah list` to find out what just parked.
         if awaiting is not None:
             attrs["awaiting"] = awaiting
+        # Rendered-artifact pointer: when the stage's output carries the GENERIC
+        # `path` key (the render node's written-file contract), record its
+        # basename so the progress sink can tell an operator what to open — the
+        # suspend-at-a-gate UX win (Y2). Generic key, no app concept named.
+        if output is not None and output.payload.get("path"):
+            attrs["artifact"] = os.path.basename(output.payload["path"])
         await self._tracer.emit(Span.timed(
             "stage", corr=input.correlation_id, parent=input.id,
             t0=t0, t1=self._clock(), status=status, attrs=attrs))

@@ -329,7 +329,11 @@ class Harness:
         # route (it is already in the output payload at emit time) so the trace
         # answers "why did it go there?" without re-deriving from transient payload.
         route = None
-        out = getattr(result, "output", None)
+        # A _Suspend result has no `output` (it parked); its parked payload is on
+        # `last_output`. Fall back to it so the rendered-artifact `path` (Y2) and
+        # any other payload-borne attrs reach the emitter on a suspend too. For a
+        # suspend, stage.branch is absent, so the route logic below is untouched.
+        out = getattr(result, "output", None) or getattr(result, "last_output", None)
         if stage.branch and out is not None:
             on = stage.branch.get("on")
             if on is not None:
@@ -505,7 +509,16 @@ class Harness:
             if attempt >= stage.max_attempts:
                 if stage.escalate == "human":
                     # keep the failed artifact so resume can merge the decision onto
-                    # it, AND surface this stage's own soft concerns at the gate
+                    # it, AND surface this stage's own soft concerns at the gate.
+                    # Fold the failed verdict onto the parked artifact as a GENERIC
+                    # scalar dict (same shape as `concerns`, so it round-trips through
+                    # the baton store) — otherwise the failure that broke the stage is
+                    # thrown away at exactly the moment `yaah list` should show it (Y3).
+                    out.payload["escalation"] = {
+                        "stage": stage.name,
+                        "failures": [{"code": f.code, "message": f.message,
+                                      "fix_hint": f.fix_hint} for f in verdict.failures],
+                    }
                     return _Suspend("human:" + stage.name, out, concerns=soft)
                 # carry the failed artifact on the exception; per-node error-handling
                 # (on_error) runs in _drive, OUTSIDE the clearable race (so a self-clear

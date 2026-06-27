@@ -51,6 +51,35 @@ async def scenario_phase_minimum() -> None:
     assert "tokens_in" not in r and "model" not in r
 
 
+async def scenario_emitter_records_artifact_from_path() -> None:
+    # Y2: when a stage's output payload carries a generic `path` (the render
+    # node's rendered-artifact key), the stage span records `artifact` as the
+    # basename — so the progress sink can point an operator at what to open.
+    from yaah.harness.span_emitter import SpanEmitter
+
+    tr = RecordingTracer([PhaseContributor()])
+    em = SpanEmitter(tr, clock=lambda: 1.0)
+    inp = Envelope("task", {})
+    out = Envelope("task", {"path": "/tmp/runs/report.html"})
+    await em.stage("review", inp, 0.0, status="suspended",
+                   output=out, awaiting="human:gate")
+    span = tr.spans[-1]
+    assert span.attrs["artifact"] == "report.html", span.attrs    # basename only
+    assert span.attrs["awaiting"] == "human:gate", span.attrs     # unperturbed
+    # e2e CONTRACT: the PROJECTED record — what ProgressFileSink actually receives —
+    # must carry awaiting + artifact. The phase contributor must project them, not just
+    # leave them in span.attrs. (This also covers a latent bug: `awaiting` was dropped
+    # by the projection too, so the inline awaiting= feature was dead in real runs.)
+    rec = tr.records[-1]
+    assert rec.get("artifact") == "report.html", rec
+    assert rec.get("awaiting") == "human:gate", rec
+
+    # no `path` in the output -> no artifact attr (byte-identical to today)
+    out2 = Envelope("task", {})
+    await em.stage("review", inp, 0.0, status="ok", output=out2)
+    assert "artifact" not in tr.spans[-1].attrs, tr.spans[-1].attrs
+
+
 async def scenario_cost_is_orthogonal() -> None:
     tr = RecordingTracer([PhaseContributor(), CostContributor()])
     assert tr.captures == frozenset({"phase", "cost"})
@@ -381,6 +410,7 @@ async def scenario_cost_off_skips_gathering() -> None:
 
 async def main() -> None:
     await scenario_phase_minimum()
+    await scenario_emitter_records_artifact_from_path()
     await scenario_cost_is_orthogonal()
     await scenario_tools_capture()
     await scenario_drain_by_corr()

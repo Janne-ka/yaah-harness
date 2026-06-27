@@ -224,12 +224,19 @@ def _print_concerns(concerns: list) -> None:
 def _baton_json(b: "Baton") -> Dict[str, Any]:
     """The mailbox-view JSON shape for one suspended baton. Stable contract for
     driver skills consuming `yaah list --json`: `{id, stage, awaiting, concerns,
-    question}` (question is null when the gate has no `question`/`ask` key)."""
+    escalation, question}` (question is null when the gate has no `question`/`ask`
+    key; escalation is null unless the stage parked by exhausting its attempts —
+    then it carries the failed verdict that broke the stage, Y3)."""
     q = None
+    escalation = None
     if b.pending is not None:
         q = b.pending.payload.get("question") or b.pending.payload.get("ask")
+        # surface the failed verdict that escalated this stage (Y3) — the failure
+        # is in the parked payload so `yaah list` shows WHY the stage broke.
+        escalation = b.pending.payload.get("escalation")
     return {"id": b.id, "stage": b.stage, "awaiting": b.awaiting,
             "concerns": [dict(c) for c in b.concerns],
+            "escalation": escalation,
             "question": q}
 
 
@@ -250,6 +257,11 @@ async def list_gates(root: Dict[str, Any], base: str, *, as_json: bool = False) 
         print("GATE baton_id={} stage={} awaiting={} concerns={}".format(
             b.id, b.stage, b.awaiting, len(b.concerns)))
         _print_concerns(b.concerns)
+        # surface the failed verdict that escalated this stage (Y3) — the failure
+        # that broke the stage, printed at the gate where the human first sees it.
+        if b.pending is not None:
+            for f in (b.pending.payload.get("escalation") or {}).get("failures", []):
+                print("  failed: {}: {}".format(f.get("code", "?"), f.get("message", "")))
         # surface the pending question/ask so the human knows what to answer
         if b.pending is not None:
             q = b.pending.payload.get("question") or b.pending.payload.get("ask")
