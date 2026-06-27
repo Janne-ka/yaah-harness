@@ -1,0 +1,5 @@
+{
+  "_doc": "Real run: swaps the fake_scripted twin for the claude CLI, so claude-haiku-4-5 actually judges the command. Same pipeline, one overlay key — the provider impl changes, the agent's model string does not. Needs the `claude` CLI on PATH.",
+  "_extends": "safety.local.json",
+  "providers": {"claude": {"type": "claude_cli", "by_model": null}}
+}

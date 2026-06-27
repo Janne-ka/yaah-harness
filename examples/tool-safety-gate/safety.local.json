@@ -1,0 +1,13 @@
+{
+  "_doc": "Offline demo (no API key). The `claude` provider is a fake_scripted twin that returns a canned 'UNSAFE' for the haiku model, so the run is deterministic and exercises the BLOCK path. Swap to real haiku with safety.real.json.",
+  "transport": {"type": "inproc"},
+  "providers": {"claude": {"type": "fake_scripted",
+                           "by_model": {"claude-haiku-4-5": ["UNSAFE — rm -rf would destroy the filesystem; do not run."]}}},
+  "default_provider": "claude",
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "memory"},
+  "pipeline": "safety-pipeline.json",
+  "input": "fixtures/input.json",
+  "run": true
+}
