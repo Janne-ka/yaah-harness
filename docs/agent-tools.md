@@ -138,7 +138,7 @@ least-privilege catalogs); it cannot make a hand-written tool safe for you.
 | Backend | How `tools` wire |
 |---|---|
 | **litellm / openai** | implements `turn` via native function-calling; the loop runs *here in YAAH*, and `impl` may be any `fn:`/`node:`/`http:` — full custom-tool support. |
-| **claude CLI** | claude runs its **own** tool-loop natively, so it does **not** implement `turn`. Native tool perms are **per-agent** config: `allowed_tools: [...]` (built-ins: Read/Edit/Write/Bash/Glob/Grep) + `permission_mode` on the agent node → `--allowedTools` / `--permission-mode` (overriding any provider default — a coder gets Edit/Write, a reviewer read-only). MCP servers → `--mcp-config` (planned). A custom `fn:`/`node:` tool isn't callable natively unless bridged as MCP — on claude you lean on native tools + MCP; on litellm you get arbitrary impls. |
+| **claude CLI** | claude runs its **own** tool-loop natively, so it does **not** implement `turn`. Native tool perms are **per-agent** config: `allowed_tools: [...]` (built-ins: Read/Edit/Write/Bash/Glob/Grep) + `permission_mode` on the agent node → `--allowedTools` / `--permission-mode` (overriding any provider default — a coder gets Edit/Write, a reviewer read-only). MCP servers → `--mcp-config` (`--strict-mcp-config`), wired in `claude_cli_backend.py`. A custom `fn:`/`node:` tool isn't callable natively unless bridged as MCP — on claude you lean on native tools + MCP; on litellm you get arbitrary impls. |
 | **fake / scripted** | no `turn` → tools ignored (deterministic tests stay simple). A `ScriptedToolBackend` *does* implement `turn` (canned calls then a final answer) to test the loop offline, no network. |
 
 So **tools are uniform config; execution is per-backend.** The loop, the
