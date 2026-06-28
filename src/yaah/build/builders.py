@@ -88,6 +88,7 @@ def _build_agent(spec: Dict[str, Any], ctx: BuildContext) -> Node:
         envelope_filters=envelope_filters,             # R10: name->Filter, available via envelope_get's `filter:` arg
         parse=bool(spec.get("parse", True)),          # ADR-0004: parse-by-default; opt out with parse:false
         strict_render=bool(spec.get("strict_render", False)),  # Y1: fail loud on unfilled {{placeholder}} (node-level; no root default yet)
+        output_schema=spec.get("output_schema"),       # Y4: declared output contract; `required` gates parse-failure key recovery
     )
     # ADR-0003: opt-in `attach: [...]` wraps the agent so attachers can merge
     # post-invoke data (tokens/usage/etc.) from the tracer's last span onto

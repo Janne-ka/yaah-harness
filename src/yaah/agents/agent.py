@@ -125,6 +125,7 @@ class Agent:
         broker: Optional[str] = None,          # R12: node role for the fuzzy context broker (e.g. "role:context-broker")
         parse: bool = True,                    # ADR-0004: agent extract_json + merges parsed keys onto reply (default True)
         strict_render: bool = False,           # Y1: fail loud on an unfilled {{placeholder}} (default off = leave literal)
+        output_schema: Optional[dict] = None,  # Y4: the agent's declared output contract (json_schema subset); its `required` keys gate parse-failure recovery
     ) -> None:
         """Construct an Agent. See the module docstring for the design contract;
         most kwargs are routine wiring. The security-relevant ones are documented
@@ -163,6 +164,12 @@ class Agent:
         # graph linter will then require an explicit transform downstream).
         self._parse = parse
         self._strict_render = strict_render
+        # Y4: when the agent declares its output keys, a parse:true failure (the model
+        # emitted not-quite-JSON — haiku's habitual unquoted keys etc.) attempts a
+        # bounded key-guided recovery using these `required` keys. None -> no recovery
+        # (byte-identical to before). The schema is the contract; recovery is its first use.
+        self._output_schema = output_schema
+        self._output_required = (output_schema or {}).get("required") or None
         self._backend = backend
         self._template = template
         self._prompt_source = prompt_source
@@ -340,7 +347,7 @@ class Agent:
         parsed: dict = {}
         if self._parse:
             try:
-                obj = extract_json(text)
+                obj = extract_json(text, keys=self._output_required)
             except json.JSONDecodeError as e:
                 await self._emit("parse failed: {}".format(e))
                 return Verdict.failed(Failure(
