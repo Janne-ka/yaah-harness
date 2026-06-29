@@ -558,8 +558,43 @@ def lint_pipeline(config: Dict[str, Any]) -> List[str]:
     correctness, or runtime data values. That's the job of tests, the counterfactual
     agents, and the followability eval, not the linter."""
     warnings: List[str] = []
-    _lint_weak_output_schema(config.get("nodes") or {}, warnings)
+    nodes = config.get("nodes") or {}
+    g = config.get("graph") or {}
+    _lint_weak_output_schema(nodes, warnings)
+    _lint_branch_key_provided(nodes, g.get("stages") or {}, g.get("sticky") or [], warnings)
     return warnings
+
+
+def _lint_branch_key_provided(nodes, stages, sticky, warnings: List[str]) -> None:
+    """1a — edge-soundness, first slice (seam-fix-plan #1a). A stage that branches on a
+    key (`branch.on`) its OWN `parse:true` agent doesn't declare reads a MISSING key at
+    runtime and routes wrong — silently. Sound + config-only (no template files): the
+    branch reads the stage's own output, so the agent's provides are fully known
+    (`output_schema` properties ∪ `required` ∪ `raw` ∪ `carry` ∪ graph `sticky`); no
+    graph traversal, no false positives. Only fires when `output_schema` is declared (no
+    schema -> the weak-output-schema lint nudges declaring it first)."""
+    sticky_keys = set(sticky) if isinstance(sticky, list) else set()
+    for s_name, s in stages.items():
+        branch = s.get("branch") or {}
+        on = branch.get("on")
+        if not isinstance(on, str) or not on:
+            continue
+        node = nodes.get(s.get("node")) or {}
+        if node.get("type") != "agent" or node.get("parse", True) is False:
+            continue
+        schema = node.get("output_schema")
+        if not isinstance(schema, dict):
+            continue
+        provides = (set((schema.get("properties") or {}).keys())
+                    | set(schema.get("required") or [])
+                    | {"raw"} | set(node.get("carry") or []) | sticky_keys)
+        if on not in provides:
+            declared = sorted(provides - {"raw"})
+            warnings.append(
+                "stage {!r}: branches on {!r}, but its agent's output_schema doesn't "
+                "declare it (declares {}). The branch reads a MISSING key and routes wrong "
+                "— add {!r} to the agent's output_schema (or carry/sticky it). "
+                "[lint: branch-key-unprovided]".format(s_name, on, declared, on))
 
 
 def _lint_weak_output_schema(nodes: Dict[str, Any], warnings: List[str]) -> None:

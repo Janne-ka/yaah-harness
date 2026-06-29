@@ -113,6 +113,59 @@ def teeth_strict_passes_on_typed_schema() -> None:
     assert "ok:" in out
 
 
+# ── 1a edge-soundness: branch on a key the agent doesn't provide ─────────────
+
+def _branch_cfg(on, schema=None, parse=True, node_type="agent"):
+    node = {"type": node_type}
+    if parse is not None:
+        node["parse"] = parse
+    if schema is not None:
+        node["output_schema"] = schema
+    return {"nodes": {"j": node},
+            "graph": {"start": "s",
+                      "stages": {"s": {"node": "j", "branch": {"on": on, "routes": {}}}}}}
+
+
+def _has_branch_warn(cfg):
+    return any("branch-key-unprovided" in m for m in lint_pipeline(cfg))
+
+
+def warns_branch_key_not_provided() -> None:
+    cfg = _branch_cfg("verdict", {"properties": {"other": {"type": "string"}}})
+    w = lint_pipeline(cfg)
+    assert any("branch-key-unprovided" in m and "verdict" in m for m in w), w
+
+
+def quiet_branch_key_in_properties() -> None:
+    assert not _has_branch_warn(_branch_cfg("verdict", {"properties": {"verdict": {"enum": ["FIX"]}}}))
+
+
+def quiet_branch_key_in_required() -> None:
+    assert not _has_branch_warn(_branch_cfg("verdict", {"required": ["verdict"]}))
+
+
+def quiet_branch_key_carried() -> None:
+    cfg = _branch_cfg("verdict", {"properties": {}})
+    cfg["nodes"]["j"]["carry"] = ["verdict"]
+    assert not _has_branch_warn(cfg)
+
+
+def quiet_branch_key_sticky() -> None:
+    cfg = _branch_cfg("verdict", {"properties": {}})
+    cfg["graph"]["sticky"] = ["verdict"]
+    assert not _has_branch_warn(cfg)
+
+
+def quiet_branch_on_raw() -> None:
+    assert not _has_branch_warn(_branch_cfg("raw", {"properties": {}}))
+
+
+def quiet_branch_parse_false_or_no_schema_or_non_agent() -> None:
+    assert not _has_branch_warn(_branch_cfg("verdict", {"properties": {}}, parse=False))
+    assert not _has_branch_warn(_branch_cfg("verdict", schema=None))
+    assert not _has_branch_warn(_branch_cfg("verdict", {"properties": {}}, node_type="transform"))
+
+
 def main() -> None:
     warns_on_required_only_schema()
     quiet_on_typed_properties()
@@ -122,6 +175,13 @@ def main() -> None:
     quiet_on_non_agent()
     partial_typing_still_warns_on_the_untyped_key()
     ignores_overlay_keys_and_non_dicts()
+    warns_branch_key_not_provided()
+    quiet_branch_key_in_properties()
+    quiet_branch_key_in_required()
+    quiet_branch_key_carried()
+    quiet_branch_key_sticky()
+    quiet_branch_on_raw()
+    quiet_branch_parse_false_or_no_schema_or_non_agent()
     teeth_default_warns_but_passes()
     teeth_strict_fails_with_exit_2()
     teeth_strict_passes_on_typed_schema()
