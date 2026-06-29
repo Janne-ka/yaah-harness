@@ -544,6 +544,56 @@ def validate_pipeline(config: Dict[str, Any]) -> None:
         raise ValueError("invalid pipeline:\n  - " + "\n  - ".join(errs))
 
 
+def lint_pipeline(config: Dict[str, Any]) -> List[str]:
+    """Advisory lint over a VALID pipeline config — returns WARNINGS, never raises.
+
+    Catches valid-but-RISKY shapes that otherwise bite deep in a run, each rule traced
+    to a real failure (mailbox M5-r). Distinct from `validate_pipeline` (hard errors):
+    a config can be perfectly valid yet weak enough that a run dies far from the cause.
+    Callers surface these (e.g. `yaah validate` prints them) WITHOUT blocking the run;
+    `yaah validate --strict` fails (exit 2) on any warning for CI.
+
+    SCOPE (be honest — a clean lint is NOT "production-safe"): these rules catch CONFIG
+    contract weakness only — they do NOT check transform/agent LOGIC, semantic output
+    correctness, or runtime data values. That's the job of tests, the counterfactual
+    agents, and the followability eval, not the linter."""
+    warnings: List[str] = []
+    _lint_weak_output_schema(config.get("nodes") or {}, warnings)
+    return warnings
+
+
+def _lint_weak_output_schema(nodes: Dict[str, Any], warnings: List[str]) -> None:
+    """Rule `weak-output-schema` (M5-r row 3 — the validation wall in lint form). A
+    `parse:true` agent whose `output_schema` REQUIRES keys but does not TYPE them only
+    checks key PRESENCE, so a parseable-but-WRONG value passes `check_schema` and
+    surfaces as a confusing symptom many stages downstream. Declare `type`/`enum` on
+    each required key so bad output is caught at the stage that produced it.
+
+    Known limit (we can't read intent): a `type: string` field is treated as constrained
+    and does NOT warn — even when an `enum` was meant — because a genuine free-form field
+    (a `reason`) legitimately is `type: string`. The rule flags the unambiguous case (a
+    required key with NO type/enum at all), not weak-but-plausible typing."""
+    for role, node in nodes.items():
+        if role.startswith("_") or not isinstance(node, dict):
+            continue
+        if node.get("type") != "agent" or node.get("parse") is False:
+            continue
+        schema = node.get("output_schema")
+        if not isinstance(schema, dict):
+            continue
+        required = schema.get("required") or []
+        props = schema.get("properties") or {}
+        untyped = [k for k in required
+                   if not isinstance(props.get(k), dict)
+                   or not ("type" in props[k] or "enum" in props[k])]
+        if required and untyped:
+            warnings.append(
+                "node {!r}: output_schema requires {} but leaves {} untyped (no "
+                "type/enum). A parseable-but-wrong value then passes check_schema and "
+                "surfaces far downstream — declare type/enum on each so bad output is "
+                "caught here. [lint: weak-output-schema]".format(role, required, untyped))
+
+
 def _check_data_flow_contract(
     nodes_dict: Dict[str, Any],
     stages: Dict[str, Any],

@@ -209,8 +209,13 @@ def _parse_resume(rest: list) -> dict:
 def _parse_validate(rest: list) -> dict:
     if not rest:
         _usage_exit("validate needs a root config")
+    rest = list(rest)
+    strict = "--strict" in rest
+    if strict:
+        rest.remove("--strict")    # --strict: lint warnings FAIL (exit 2), for CI
     spec = _parse_cli(rest)        # parse root + --fake/--debug, then
     spec["action"] = "validate"    # check-only (never runs the pipeline)
+    spec["strict"] = strict
     return spec
 
 
@@ -445,21 +450,32 @@ def _dispatch_validate(spec: Dict[str, Any], root: Dict[str, Any], base: str) ->
     """Validate root + the referenced pipeline file. Closes the gap where the
     pre-batch `yaah validate` only checked the root and pronounced "ok" while
     the referenced pipeline had unresolved targets or was malformed."""
-    from .validate import validate_pipeline
+    from .validate import validate_pipeline, lint_pipeline
     pipeline_ref = root.get("pipeline")
+    warnings: list = []
     if isinstance(pipeline_ref, str):
         pipeline_cfg = _read_json(_rel(base, pipeline_ref))
         validate_pipeline(pipeline_cfg)
-        print("ok: {} is valid (root + pipeline {})".format(
-            spec["root"], pipeline_ref))
+        warnings = lint_pipeline(pipeline_cfg)
+        ok_msg = "ok: {} is valid (root + pipeline {})".format(spec["root"], pipeline_ref)
     elif isinstance(pipeline_ref, dict):
         validate_pipeline(pipeline_ref)
-        print("ok: {} is valid (root + inline pipeline)".format(spec["root"]))
+        warnings = lint_pipeline(pipeline_ref)
+        ok_msg = "ok: {} is valid (root + inline pipeline)".format(spec["root"])
     else:
         # Root validation already caught the missing/bad-type case above.
-        # If we somehow got here without a `pipeline` field, fall back to the
-        # original message rather than guessing.
-        print("ok: {} is a valid root config".format(spec["root"]))
+        ok_msg = "ok: {} is a valid root config".format(spec["root"])
+    # Advisory lint: print warnings to stderr (stdout stays clean for "ok"). `--strict`
+    # makes ANY warning FAIL with exit code 2 — distinct from the hard-error path (so CI
+    # can tell 'invalid config' from 'valid-but-weak'). Default stays advisory so a
+    # mid-migration pipeline still validates and runs.
+    for w in warnings:
+        print("warning: " + w, file=sys.stderr)
+    if warnings and spec.get("strict"):
+        print("strict: {} lint warning(s) — failing with exit 2 (rerun without --strict "
+              "to treat as advisory)".format(len(warnings)), file=sys.stderr)
+        raise SystemExit(2)
+    print(ok_msg)
 
 
 def _dispatch_baton_schema(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
