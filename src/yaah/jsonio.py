@@ -286,8 +286,15 @@ class UnquotedKeyValue(ParseStrategy):
     injected `Scanner` (field + key:value splitting, bracket- and string-aware) and an
     injected `BareValueResolver` (gate bare-word values). All-or-nothing: any field
     that can't be safely resolved -> None, so the caller falls through rather than
-    accept a partial/fabricated object. Separators are constructor params
-    (`field_seps`, `kv_seps`, `line_sep`) — extend = one entry.
+    accept a partial/fabricated object. Separators + the depth cap are constructor
+    params (`field_seps`, `kv_seps`, `line_sep`, `max_depth`) — extend = one entry.
+
+    NESTED recovery: a bare value the schema declares a nested object/array is recovered
+    RECURSIVELY (schema-guided), up to `max_depth` OBJECT levels (default 2; an array is
+    a transparent container and does not cost a level). The SAME gate applies at every
+    level, so a bare value deep in a `findings[]` element is only accepted if its nested
+    schema makes it an enum member / `type:string` — nothing is fabricated, and one bad
+    field/element fails the whole object/array.
 
     Field boundary: NEWLINE when the text contains one (line protocol — a comma is
     then part of a free-form value), else COMMA (inline `{a: 1, b: 2}` objects, whose
@@ -296,13 +303,15 @@ class UnquotedKeyValue(ParseStrategy):
     field comma is tolerated.
 
     Known limitations (documented, not yet needed — gather evidence before building):
+      - nesting beyond `max_depth` object levels is not recovered (cheap models rarely
+        emit reliable deeper nesting anyway; raise `max_depth` if a stage needs it);
       - a value spanning MULTIPLE lines is split as separate fields and rejected
         (the line protocol is one pair per line);
       - a known property with neither `enum` nor `type: string` rejects a bare word
         (conservative: never coerces a word into a number/bool — see BareValueResolver)."""
 
     def __init__(self, scanner=None, resolver=None,
-                 field_seps=(",",), kv_seps=(":",), line_sep="\n"):
+                 field_seps=(",",), kv_seps=(":",), line_sep="\n", max_depth=2):
         # default scanner honors BOTH quote styles so a single-quoted haiku value
         # ('looks risky') is treated as one string, not split on its inner spaces.
         self._scanner = scanner or Scanner(quotes=('"', "'"))
@@ -310,9 +319,18 @@ class UnquotedKeyValue(ParseStrategy):
         self._field_seps = tuple(field_seps)
         self._kv_seps = tuple(kv_seps)
         self._line_sep = line_sep
+        self._max_depth = max_depth
 
     def parse(self, candidate: str, *, schema=None) -> Any:
-        text = candidate.strip()
+        return self._pluck_object(candidate, schema or {}, 0)
+
+    def _pluck_object(self, text: str, schema, depth: int) -> Any:
+        """Pluck one object's fields against `schema`'s `properties`. A field whose value
+        is a bare nested object/array is recovered recursively (schema-guided), up to
+        `max_depth` OBJECT levels — an array is a transparent container, it does not cost
+        a level. The same no-fabrication gate applies at every level. All-or-nothing:
+        any field that can't be resolved -> None."""
+        text = text.strip()
         if text.startswith("{"):                 # unwrap one outer object pair
             close = self._scanner.match(text, 0)
             if close == len(text) - 1:
@@ -324,6 +342,7 @@ class UnquotedKeyValue(ParseStrategy):
         fields = self._scanner.split_top_level(text, seps)
         if not fields:
             return None
+        props = (schema.get("properties") or {})
         out = {}
         for field in fields:
             kv = self._scanner.split_top_level(field, self._kv_seps, maxsplit=1)
@@ -333,11 +352,30 @@ class UnquotedKeyValue(ParseStrategy):
             raw = kv[1].strip()
             if raw.endswith(","):                 # tolerate a trailing field comma
                 raw = raw[:-1].strip()
-            ok, value = self._coerce(key, raw, schema)
+            ok, value = self._coerce_value(key, raw, props.get(key) or {}, depth)
             if not ok:
                 return None
             out[key] = value
         return out or None
+
+    def _pluck_array(self, text: str, items: dict, depth: int) -> Any:
+        """Recover a bare array's elements against the `items` schema (SAME depth — the
+        array is a transparent container). All-or-nothing: any bad element -> None."""
+        text = text.strip()
+        if text.startswith("["):
+            close = self._scanner.match(text, 0)
+            if close == len(text) - 1:
+                text = text[1:close]
+        elements = self._scanner.split_top_level(text, (",", self._line_sep))
+        if not elements:
+            return None
+        out = []
+        for element in elements:
+            ok, value = self._coerce_value("", element, items, depth)
+            if not ok:
+                return None
+            out.append(value)
+        return out
 
     @staticmethod
     def _unquote(token: str) -> str:
@@ -346,10 +384,12 @@ class UnquotedKeyValue(ParseStrategy):
             return token[1:-1]
         return token
 
-    def _coerce(self, key: str, raw: str, schema) -> tuple:
-        """A value is safe if it parses as a literal (number/bool/null/quoted string,
-        or an already-valid nested object/array), else if it's an enum-permitted bare
-        word. A bare free-form word is NOT safe (returns (False, None))."""
+    def _coerce_value(self, key: str, raw: str, spec: dict, depth: int) -> tuple:
+        """A value is safe if it parses as a literal (number/bool/null/quoted string, or
+        an already-valid nested object/array); else, when the schema declares it a nested
+        object/array and we are under `max_depth`, it is recovered RECURSIVELY (the same
+        gate applies at every level, so nothing is fabricated); else it is an enum member
+        or `type:string` bare word. Anything else -> (False, None)."""
         raw = raw.strip()
         for parse in (json.loads, ast.literal_eval):
             try:
@@ -364,7 +404,17 @@ class UnquotedKeyValue(ParseStrategy):
                     return True, value
                 except TypeError:
                     return False, None
-        return self._resolver.resolve(key, raw, schema)
+        if depth < self._max_depth:
+            kind = spec.get("type")
+            if kind == "object" and raw.startswith("{"):
+                nested = self._pluck_object(raw, spec, depth + 1)
+                if nested is not None:
+                    return True, nested
+            if kind == "array" and raw.startswith("["):
+                arr = self._pluck_array(raw, spec.get("items") or {}, depth)
+                if arr is not None:
+                    return True, arr
+        return self._resolver.resolve(key, raw, {"properties": {key: spec}})
 
 
 class DecoyKeyDetector:

@@ -56,10 +56,16 @@ reason: SQL injection — user_id concatenated directly into the query string
 - **All-or-nothing** — every `required` key must be recovered, or the whole thing raises
   `not_json` (the harness's retry/feedback loop then fires). A half-populated object never
   flows downstream.
-- **Never fabricates** — a value is accepted only when the schema makes it unambiguous:
-  an `enum` member, a `type: string` (the rest of the line *is* the string), or a literal
-  (number/bool/quoted). An off-enum word (`verdict: MAYBE`), a bare word for a numeric
-  field (`confidence: lots`), or an unknown key all FAIL rather than guess.
+- **Never invents a value** — a BARE WORD is accepted only when the schema sanctions it
+  (an `enum` member, or a `type: string` field). An off-enum word (`verdict: MAYBE`), a bare
+  word for a numeric field (`confidence: lots`), or an unknown key all FAIL rather than guess.
+  - *Caveat (be precise):* a valid LITERAL (number/bool/quoted string / valid nested JSON) is
+    recovered **as-is** — the enum/type gate is applied to bare words, NOT to literals. So
+    `severity: 5` (a literal, `5` not in the enum) is recovered as `5`, then **rejected
+    downstream** by the agent's / `json_schema` validator's `check_schema` → `schema_mismatch`
+    → retry. The `parse: true` path always re-validates, so nothing off-contract reaches your
+    stage. If you ever call `extract_json(text, keys, schema)` directly without then running
+    `check_schema`, you get no enum/type enforcement on literals — validate it yourself.
 - **Backward compatible** — `extract_json(text)` with no `keys`/`schema` preserves the
   legacy accept/reject behaviour: the same inputs parse, the same inputs raise (the no-keys
   path scans only the first balanced span, so a later valid object never silently rescues a
@@ -88,8 +94,23 @@ list — relevant when you author prompts:
 - **Truncation signal.** Output cut at `max_tokens` (first `{`/`[` never closes) raises a
   `truncated JSON: …` error — a clear signal for a retry/escalate backstop.
 
+## Nested recovery (arrays of objects — the `findings[]` / `concerns[]` case)
+
+Y5 recovers bare keys/values **inside** nested objects and arrays, schema-guided, up to
+`max_depth` object levels (**default 2**; an array is a transparent container, it doesn't
+cost a level). So `{findings: [{title: SQL injection, severity: high}]}` recovers to a real
+object — *provided* your `findings` property declares `items` with typed `properties`
+(`title: {type: string}`, `severity: {enum: [...]}`). The same rules apply at every level:
+a bare WORD in an element is accepted only if its schema makes it an enum / `type:string`
+(literals still ride the as-is path noted above — re-validated downstream), one bad element
+fails the whole array, and an unknown nested key fails the object. So a `B-rev-*` stage gets
+real recovery now, not just validation — **once its `items` schema is typed.** This is the
+half of the M2 picture that was previously missing.
+
 ## Known limitations (by design — measure before extending)
 
+- Nesting **beyond `max_depth` (2) object levels** is not recovered (cheap models rarely
+  emit reliable deeper nesting; raise `max_depth` on the stage if you truly need it).
 - A value spanning **multiple lines** is treated as separate fields and rejected (the line
   shape is one pair per line).
 - A declared property with **neither `enum` nor `type: string`** rejects a bare word

@@ -183,6 +183,66 @@ def plucker_never_fabricates_free_form() -> None:
     assert UnquotedKeyValue().parse('{notes: looks risky}', schema=_SCH) is None  # unknown key
 
 
+# ── #3c nested recovery — schema-guided, depth-bounded (default max_depth=2) ──
+
+_NEST = {"required": ["findings"], "properties": {
+    "findings": {"type": "array", "items": {"type": "object", "properties": {
+        "title": {"type": "string"}, "severity": {"enum": ["high", "low"]}}}}}}
+
+
+def plucker_recovers_array_of_objects_one_level() -> None:
+    # the real s_factory shape: bare keys AND bare values INSIDE array elements
+    raw = '{findings: [{title: SQL injection, severity: high}]}'
+    assert UnquotedKeyValue().parse(raw, schema=_NEST) == {
+        "findings": [{"title": "SQL injection", "severity": "high"}]}
+
+
+def plucker_recovers_multiple_elements() -> None:
+    raw = '{findings: [{title: a, severity: high}, {title: b, severity: low}]}'
+    assert UnquotedKeyValue().parse(raw, schema=_NEST) == {
+        "findings": [{"title": "a", "severity": "high"},
+                     {"title": "b", "severity": "low"}]}
+
+
+def plucker_recovers_nested_objects_to_depth() -> None:
+    sch = {"properties": {"report": {"type": "object", "properties": {
+        "summary": {"type": "object", "properties": {
+            "score": {"type": "integer"}, "note": {"type": "string"}}}}}}}
+    raw = '{report: {summary: {score: 5, note: looks bad}}}'
+    assert UnquotedKeyValue().parse(raw, schema=sch) == {
+        "report": {"summary": {"score": 5, "note": "looks bad"}}}
+
+
+def plucker_bounds_depth() -> None:
+    # 3 nested object levels; default max_depth=2 can't reach the deepest -> None
+    sch = {"properties": {"a": {"type": "object", "properties": {
+        "b": {"type": "object", "properties": {
+            "c": {"type": "object", "properties": {"d": {"type": "string"}}}}}}}}}
+    raw = '{a: {b: {c: {d: deep}}}}'
+    assert UnquotedKeyValue().parse(raw, schema=sch) is None
+    assert UnquotedKeyValue(max_depth=3).parse(raw, schema=sch) == {
+        "a": {"b": {"c": {"d": "deep"}}}}
+
+
+def plucker_nested_all_or_nothing() -> None:
+    # one element off-contract (severity not in enum) -> whole recovery fails
+    raw = '{findings: [{title: a, severity: high}, {title: b, severity: BOGUS}]}'
+    assert UnquotedKeyValue().parse(raw, schema=_NEST) is None
+
+
+def plucker_nested_rejects_unknown_key() -> None:
+    # a key not in the element schema -> no fabrication -> whole recovery fails
+    raw = '{findings: [{title: a, severity: high, mystery: x}]}'
+    assert UnquotedKeyValue().parse(raw, schema=_NEST) is None
+
+
+def plucker_valid_nested_json_still_passes() -> None:
+    # already-valid nested JSON takes the literal fast path (no recursion needed)
+    raw = '{"findings": [{"title": "x", "severity": "low"}]}'
+    assert UnquotedKeyValue().parse(raw, schema=_NEST) == {
+        "findings": [{"title": "x", "severity": "low"}]}
+
+
 def plucker_uses_injected_dependencies() -> None:
     # composable subclass + injection: swap the resolver policy, behaviour changes
     class AcceptAny(BareValueResolver):
@@ -210,6 +270,13 @@ def main() -> None:
     plucker_value_may_contain_comma_in_line_protocol()
     plucker_tolerates_trailing_commas()
     plucker_never_fabricates_free_form()
+    plucker_recovers_array_of_objects_one_level()
+    plucker_recovers_multiple_elements()
+    plucker_recovers_nested_objects_to_depth()
+    plucker_bounds_depth()
+    plucker_nested_all_or_nothing()
+    plucker_nested_rejects_unknown_key()
+    plucker_valid_nested_json_still_passes()
     plucker_uses_injected_dependencies()
     print("ok")
 
