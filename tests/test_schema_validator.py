@@ -11,7 +11,7 @@ import json
 from yaah import Done, Envelope, NodeConfig
 from yaah.build import build
 from yaah.agents import ScriptedBackend
-from yaah.validators import JsonSchemaValidator, _check_schema
+from yaah.validators import JsonSchemaValidator, check_schema
 
 CFG = NodeConfig()
 
@@ -38,28 +38,28 @@ SCHEMA = {
 
 def scenario_check_schema_pure() -> None:
     ok = {"summary": "s", "findings": [{"id": "F1", "severity": "high"}]}
-    assert _check_schema(ok, SCHEMA, "$") == []
+    assert check_schema(ok, SCHEMA, "$") == []
 
     # wrong type for a nested field
     bad_type = {"summary": "s", "findings": "oops"}
-    errs = _check_schema(bad_type, SCHEMA, "$")
+    errs = check_schema(bad_type, SCHEMA, "$")
     assert any("findings" in e and "expected array" in e for e in errs), errs
 
     # missing required nested key + bad enum, path-qualified to the array index
     bad_item = {"summary": "s", "findings": [{"id": "F1", "severity": "nope"}]}
-    errs = _check_schema(bad_item, SCHEMA, "$")
+    errs = check_schema(bad_item, SCHEMA, "$")
     assert any("findings[0].severity" in e and "enum" in e for e in errs), errs
 
     # missing top-level required key
     assert any("missing required key 'summary'" in e
-               for e in _check_schema({"findings": []}, SCHEMA, "$"))
+               for e in check_schema({"findings": []}, SCHEMA, "$"))
 
     # bool is NOT an integer (Python subclass trap)
-    assert _check_schema(True, {"type": "integer"}, "$") != []
-    assert _check_schema(3, {"type": "integer"}, "$") == []
+    assert check_schema(True, {"type": "integer"}, "$") != []
+    assert check_schema(3, {"type": "integer"}, "$") == []
     # ... but a plain number accepts int and float, not bool
-    assert _check_schema(3.5, {"type": "number"}, "$") == []
-    assert _check_schema(False, {"type": "number"}, "$") != []
+    assert check_schema(3.5, {"type": "number"}, "$") == []
+    assert check_schema(False, {"type": "number"}, "$") != []
 
 
 async def scenario_validator_node() -> None:

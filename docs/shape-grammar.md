@@ -106,6 +106,7 @@ Common keys on EVERY node spec: `model`, `effort`, `temperature`,
 | `expose:` / `filters:` / `max_chars:` / `broker:` | R9–R12 envelope access controls |
 | `attach: ["fn:module:Cls", ...]` | post-invoke wrappers ([ADR-0003](decisions/0003-attacher-port.md)) — each is a subclass of `Attacher`, returns dict merged onto reply |
 | `strict_render: true` | fail the stage (`render_unfilled_placeholders`) on a `{{placeholder}}` with no value in payload ∪ extras, instead of leaving the literal `{{name}}` (default `false`); engine-injected keys + present-but-empty values never trip it |
+| `output_schema: {…}` | the stage's OUTPUT CONTRACT (JSON-Schema subset). Self-validates the parsed reply (`schema_mismatch` on drift) AND its `required` keys guide weak-executor parse recovery; makes a separate `json_schema` validator node redundant on agent outputs. Opt-in (default none) |
 
 ## Trace block
 

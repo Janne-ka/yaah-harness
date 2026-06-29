@@ -14,7 +14,7 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 from yaah.harness.decision_forms import FORMS, lookup
-from yaah.validators import _check_schema
+from yaah.validators import check_schema
 
 
 def main() -> None:
@@ -29,7 +29,7 @@ def main() -> None:
         if name == "json_schema":
             assert entry["schema"] is None, name
             continue
-        errors = _check_schema(entry["example"], entry["schema"], "$")
+        errors = check_schema(entry["example"], entry["schema"], "$")
         assert not errors, "form {!r} example fails own schema: {}".format(name, errors)
 
     # lookup returns the documented shape for built-ins

@@ -21,6 +21,7 @@ from ..comms import Comms
 from ..core import Envelope, Failure, NodeConfig, Verdict
 from ..cwd import carry_cwd, resolve_cwd
 from ..jsonio import extract_json
+from ..jsonschema import check_schema
 from ..trace import NullTracer, Span
 # Backend is typed as Any: it's a structural ApiProvider, duck-typed on
 # `complete` / `turn` at call time. That runtime check is what this Agent
@@ -125,7 +126,7 @@ class Agent:
         broker: Optional[str] = None,          # R12: node role for the fuzzy context broker (e.g. "role:context-broker")
         parse: bool = True,                    # ADR-0004: agent extract_json + merges parsed keys onto reply (default True)
         strict_render: bool = False,           # Y1: fail loud on an unfilled {{placeholder}} (default off = leave literal)
-        output_schema: Optional[dict] = None,  # Y4: the agent's declared output contract (json_schema subset); its `required` keys gate parse-failure recovery
+        output_schema: Optional[dict] = None,  # the agent's declared output CONTRACT (json_schema subset): self-validates the parsed reply + its `required` keys gate parse-failure recovery
     ) -> None:
         """Construct an Agent. See the module docstring for the design contract;
         most kwargs are routine wiring. The security-relevant ones are documented
@@ -164,10 +165,15 @@ class Agent:
         # graph linter will then require an explicit transform downstream).
         self._parse = parse
         self._strict_render = strict_render
-        # Y4: when the agent declares its output keys, a parse:true failure (the model
-        # emitted not-quite-JSON — haiku's habitual unquoted keys etc.) attempts a
-        # bounded key-guided recovery using these `required` keys. None -> no recovery
-        # (byte-identical to before). The schema is the contract; recovery is its first use.
+        # The agent's declared output CONTRACT (an optional, opt-in node component).
+        # Two enforcement beats, both on the parse:true path, both no-ops when absent:
+        #  (1) self-validation — the parsed reply is checked against the full schema
+        #      subset (type/enum/required/properties/items) and fails loud on a
+        #      mismatch, so a stage enforces its own shape without a separate
+        #      json_schema validator node;
+        #  (2) recovery (Y4) — on a parse FAILURE, the schema's `required` keys guide
+        #      a bounded recovery of a weak executor's not-quite-JSON (unquoted keys).
+        # None -> both skipped (byte-identical to before).
         self._output_schema = output_schema
         self._output_required = (output_schema or {}).get("required") or None
         self._backend = backend
@@ -347,7 +353,8 @@ class Agent:
         parsed: dict = {}
         if self._parse:
             try:
-                obj = extract_json(text, keys=self._output_required)
+                obj = extract_json(text, keys=self._output_required,
+                                   schema=self._output_schema)
             except json.JSONDecodeError as e:
                 await self._emit("parse failed: {}".format(e))
                 return Verdict.failed(Failure(
@@ -357,6 +364,21 @@ class Agent:
                 return Verdict.failed(Failure(
                     "not_object", "agent output top-level is not a JSON object",
                     "return a JSON object (not a list/scalar)")).to_envelope(input)
+            # Node contract: when the agent declares output_schema, enforce it on
+            # ITS OWN output here (the same checker the json_schema validator uses,
+            # so the two paths can't diverge). This is the contract's enforcement
+            # beat — recovery (Y4) only ever checked required-key PRESENCE, so a
+            # valid-but-off-contract reply (missing key, wrong type, bad enum) used
+            # to slip through and die confusingly downstream. Caught at the seam,
+            # as the validator-shape `schema_mismatch` so retry+feedback handles it
+            # uniformly. Opt-in: no output_schema -> skipped (byte-identical).
+            if self._output_schema is not None:
+                errors = check_schema(obj, self._output_schema, "$")
+                if errors:
+                    await self._emit("output_schema mismatch: {}".format("; ".join(errors[:3])))
+                    return Verdict.failed(Failure(
+                        "schema_mismatch", "; ".join(errors[:8]),
+                        "match the declared output_schema")).to_envelope(input)
             parsed = obj
         # R6 envelope carriage: the drain does NOT happen here. It lives at the
         # serve boundary (CarriageBoundaryNode, applied by build._wrap_node) —
