@@ -17,8 +17,28 @@ import os
 import shutil
 import tempfile
 
-from yaah.init_template import ARCHETYPES, load_template, scaffold
+from yaah import schema_gen
+from yaah.init_template import ARCHETYPES, load_template, scaffold, _schema_targets
 from yaah.validate import validate_root, validate_pipeline
+
+
+def _assert_scaffolded_matches(target: str, template: dict) -> None:
+    """Every NON-config file lands verbatim; every config file lands verbatim
+    EXCEPT a `$schema` pointer injected as the first key. The generated schemas
+    land under schemas/ and match the engine's own generator (generate-at-scaffold,
+    so the autocomplete always matches the installed engine)."""
+    targets = _schema_targets(template)
+    for rel, expected in template.items():
+        got = _read(os.path.join(target, rel))
+        if rel in targets:
+            assert json.loads(got).get("$schema") == "schemas/" + targets[rel], \
+                "scaffold did not inject the right $schema into {}".format(rel)
+        else:
+            assert got == expected, "scaffold corrupted {}".format(rel)
+    for fname, builder in (("root.schema.json", schema_gen.build_root_schema),
+                           ("pipeline.schema.json", schema_gen.build_pipeline_schema)):
+        on_disk = json.loads(_read(os.path.join(target, "schemas", fname)))
+        assert on_disk == builder(), "scaffolded {} drifted from the generator".format(fname)
 
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -36,14 +56,14 @@ def main() -> None:
     try:
         target = os.path.join(tmp, "my-pipeline")
         n = scaffold(target)
-        assert n == len(linear), (n, len(linear))
+        assert n == len(linear) + 2, (n, len(linear))  # +2 generated schema files
 
-        # every declared file landed on disk with its declared content
-        for rel, expected in linear.items():
-            got = _read(os.path.join(target, rel))
-            assert got == expected, "scaffold corrupted {}".format(rel)
+        # every declared file landed verbatim (config files gain a $schema
+        # pointer); the generated schemas match the engine's own generator
+        _assert_scaffolded_matches(target, linear)
 
-        # the produced root validates — proves the embed isn't lying about shape
+        # the produced root validates — proves the embed isn't lying about shape,
+        # AND that validate_root accepts the injected $schema pointer
         with open(os.path.join(target, "starter.local.json"), "r") as f:
             root = json.load(f)
         validate_root(root)
@@ -88,12 +108,11 @@ def scenario_scaffold_every_archetype() -> None:
         try:
             target = os.path.join(tmp, "p")
             n = scaffold(target, name)
-            assert n == len(template), (name, n, len(template))
+            assert n == len(template) + 2, (name, n, len(template))  # +2 schemas
 
-            # every declared file landed on disk with its declared content
-            for rel, expected in template.items():
-                got = _read(os.path.join(target, rel))
-                assert got == expected, "scaffold corrupted {} in {}".format(rel, name)
+            # every declared file landed (config files gain a $schema pointer);
+            # the generated schemas match the engine's own generator
+            _assert_scaffolded_matches(target, template)
 
             # the produced root + pipeline both validate — proves the embed
             # isn't lying about shape (caught at scaffold time, not by a
@@ -157,8 +176,28 @@ def scenario_archetypes_and_descriptions_in_sync() -> None:
     print("PASS archetypes and --list descriptions are in sync")
 
 
+def scenario_with_schema_ref_guards() -> None:
+    """$schema injection is string-based (preserves formatting), so it must never
+    produce invalid JSON: it injects as the first key of an object and leaves a
+    non-object or empty `{}` untouched (a trailing comma would corrupt them)."""
+    from yaah.init_template import _with_schema_ref
+    out = _with_schema_ref('{\n  "a": 1\n}', "schemas/root.schema.json")
+    assert json.loads(out) == {"$schema": "schemas/root.schema.json", "a": 1}, out
+    assert out.startswith('{\n  "$schema":'), out  # first key, indent preserved
+    assert _with_schema_ref("{}", "x") == "{}"      # empty object: untouched
+    assert _with_schema_ref("[1, 2]", "x") == "[1, 2]"  # non-object: untouched
+    # CRLF line endings: the indent capture must not swallow the \r -> still valid JSON
+    crlf = _with_schema_ref('{\r\n  "a": 1\r\n}', "x")
+    assert json.loads(crlf) == {"$schema": "x", "a": 1}, repr(crlf)
+    # single-line object (no newline before the first key): falls back to 2-space indent
+    one = _with_schema_ref('{"a": 1}', "x")
+    assert json.loads(one) == {"$schema": "x", "a": 1}, repr(one)
+    print("PASS _with_schema_ref injects safely and guards non/empty objects")
+
+
 if __name__ == "__main__":
     main()
     scenario_scaffold_every_archetype()
     scenario_scaffold_unknown_archetype()
     scenario_archetypes_and_descriptions_in_sync()
+    scenario_with_schema_ref_guards()

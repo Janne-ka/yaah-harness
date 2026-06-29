@@ -6,6 +6,9 @@
     "^_": {}
   },
   "properties": {
+    "$schema": {
+      "type": "string"
+    },
     "graph": {
       "additionalProperties": false,
       "patternProperties": {

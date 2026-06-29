@@ -113,7 +113,7 @@ def teeth_strict_passes_on_typed_schema() -> None:
     assert "ok:" in out
 
 
-# ── 1a edge-soundness: branch on a key the agent doesn't provide ─────────────
+# ── 1a contract completeness: branch on a key the agent doesn't DECLARE ──────
 
 def _branch_cfg(on, schema=None, parse=True, node_type="agent"):
     node = {"type": node_type}
@@ -166,6 +166,177 @@ def quiet_branch_parse_false_or_no_schema_or_non_agent() -> None:
     assert not _has_branch_warn(_branch_cfg("verdict", {"properties": {}}, node_type="transform"))
 
 
+# ── 1a-render contract completeness: render needs a key the agent doesn't DECLARE ─
+
+def _render_cfg(template_text=None, template_file=None, schema=None, parse=True,
+                node_type="agent", carry=None, cwd_from=None, sticky=None,
+                allow_unfilled=False, extra_preds=False, via_branch=False):
+    agent = {"type": node_type}
+    if parse is not None:
+        agent["parse"] = parse
+    if schema is not None:
+        agent["output_schema"] = schema
+    if carry is not None:
+        agent["carry"] = carry
+    if cwd_from is not None:
+        agent["cwd_from"] = cwd_from
+    render = {"type": "render", "allow_unfilled": allow_unfilled}
+    if template_text is not None:
+        render["template_text"] = template_text
+    if template_file is not None:
+        render["template_file"] = template_file
+    stages = {"a": {"node": "agent", "then": "r"}, "r": {"node": "render"}}
+    graph = {"start": "a", "stages": stages}
+    if sticky is not None:
+        graph["sticky"] = sticky
+    if via_branch:  # a second stage ALSO routes to r -> multi-path -> not statically sound
+        stages["b"] = {"node": "agent", "branch": {"on": "x", "routes": {"y": "r"}}}
+    if extra_preds:  # two `then` predecessors -> provides aren't a single known set
+        stages["a2"] = {"node": "agent", "then": "r"}
+    return {"nodes": {"agent": agent, "render": render}, "graph": graph}
+
+
+def _has_render_warn(cfg, base_path=None):
+    return any("render-key-unprovided" in m for m in lint_pipeline(cfg, base_path))
+
+
+def warns_render_key_not_provided() -> None:
+    cfg = _render_cfg("Report: {{verdict}}", schema={"properties": {"other": {"type": "string"}}})
+    w = lint_pipeline(cfg)
+    assert any("render-key-unprovided" in m and "verdict" in m for m in w), w
+
+
+def warns_render_names_only_missing_keys() -> None:
+    # {{a}} is provided and {{a}} repeats; only {{b}} is unprovided -> names exactly ['b']
+    cfg = _render_cfg("{{a}} {{b}} {{a}}", schema={"properties": {"a": {"type": "string"}}})
+    w = [m for m in lint_pipeline(cfg) if "render-key-unprovided" in m]
+    assert w and "needs ['b']" in w[0], w
+
+
+def render_warning_is_contract_nudge_not_crash_prediction() -> None:
+    """Falsifies the old 'zero false positives / FAILS at runtime' framing. `check_schema`
+    does NOT enforce additionalProperties (jsonschema.py), so an agent declaring only {a}
+    may still EMIT {a, b} and a {{b}} render would then SUCCEED. The lint counts only
+    DECLARED keys and warns anyway — by design (flag the undeclared dependency) — but the
+    wording must be HONEST: conditional ('on any run where the agent omits them'), not a
+    certain crash. This pins the honest wording so it isn't silently re-broken."""
+    cfg = _render_cfg("{{a}} {{b}}", schema={"properties": {"a": {"type": "string"}}})
+    w = [m for m in lint_pipeline(cfg) if "render-key-unprovided" in m]
+    assert w, w
+    assert "doesn't DECLARE" in w[0] and "omits" in w[0], w[0]   # conditional, not certain
+    assert "FAILS at runtime" not in w[0], w[0]                  # the old overclaim is gone
+
+
+def quiet_render_key_in_properties() -> None:
+    assert not _has_render_warn(_render_cfg("{{verdict}}", schema={"properties": {"verdict": {"type": "string"}}}))
+
+
+def quiet_render_key_in_required() -> None:
+    assert not _has_render_warn(_render_cfg("{{verdict}}", schema={"required": ["verdict"]}))
+
+
+def quiet_render_key_raw() -> None:
+    assert not _has_render_warn(_render_cfg("{{raw}}", schema={"properties": {}}))
+
+
+def quiet_render_key_carried() -> None:
+    assert not _has_render_warn(_render_cfg("{{ctx}}", schema={"properties": {}}, carry=["ctx"]))
+
+
+def quiet_render_key_sticky() -> None:
+    assert not _has_render_warn(_render_cfg("{{run_id}}", schema={"properties": {}}, sticky=["run_id"]))
+
+
+def quiet_render_key_cwd_from() -> None:
+    assert not _has_render_warn(_render_cfg("{{workdir}}", schema={"properties": {}}, cwd_from="workdir"))
+
+
+def quiet_render_allow_unfilled() -> None:
+    assert not _has_render_warn(_render_cfg("{{verdict}}", schema={"properties": {}}, allow_unfilled=True))
+
+
+def quiet_render_via_branch_multipath() -> None:
+    assert not _has_render_warn(_render_cfg("{{verdict}}", schema={"properties": {}}, via_branch=True))
+
+
+def quiet_render_via_branch_default() -> None:
+    # a render reached via a branch DEFAULT is also multi-path -> skip (no false warn)
+    cfg = _render_cfg("{{verdict}}", schema={"properties": {}})
+    cfg["graph"]["stages"]["b"] = {"node": "agent",
+                                   "branch": {"on": "x", "routes": {}, "default": "r"}}
+    assert not _has_render_warn(cfg)
+
+
+def quiet_render_multiple_then_preds() -> None:
+    assert not _has_render_warn(_render_cfg("{{verdict}}", schema={"properties": {}}, extra_preds=True))
+
+
+def quiet_render_pred_not_agent_or_parse_false_or_no_schema() -> None:
+    assert not _has_render_warn(_render_cfg("{{verdict}}", schema={"properties": {}}, parse=False))
+    assert not _has_render_warn(_render_cfg("{{verdict}}", schema=None))
+    assert not _has_render_warn(_render_cfg("{{verdict}}", schema={"properties": {}}, node_type="transform"))
+
+
+def quiet_render_template_file_without_base() -> None:
+    # a template_file but no base_path to resolve it against -> skip, no crash, no warning
+    assert not _has_render_warn(_render_cfg(template_file="t.html", schema={"properties": {}}))
+
+
+def warns_render_template_file_read_from_base() -> None:
+    import os
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "out.html"), "w") as f:
+            f.write("<h1>{{verdict}}</h1>")
+        cfg = _render_cfg(template_file="out.html", schema={"properties": {"other": {"type": "string"}}})
+        assert _has_render_warn(cfg, base_path=d)
+
+
+def quiet_render_template_file_unreadable() -> None:
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        cfg = _render_cfg(template_file="missing.html", schema={"properties": {}})
+        assert not _has_render_warn(cfg, base_path=d)
+
+
+def render_template_file_resolves_against_root_dir() -> None:
+    """Regression: the render lint resolves `template_file` against the ROOT config
+    dir (what the runtime passes as base_dir), NOT the pipeline file's dir. A pipeline
+    in a SUBDIR with the template next to the ROOT proves it — the old code read
+    `dirname(pipeline_path)` and would have missed the file (and silently not warned)."""
+    import io
+    import json
+    import os
+    import sys
+    import tempfile
+    with tempfile.TemporaryDirectory() as base:
+        os.makedirs(os.path.join(base, "sub"))
+        pipeline = {
+            "nodes": {
+                "a": {"type": "agent",
+                      "output_schema": {"properties": {"other": {"type": "string"}}}},
+                "r": {"type": "render", "template_file": "report.html"},
+            },
+            "graph": {"start": "s1", "stages": {"s1": {"node": "a", "then": "s2"},
+                                                "s2": {"node": "r"}}},
+        }
+        with open(os.path.join(base, "sub", "pipe.json"), "w") as f:
+            json.dump(pipeline, f)
+        with open(os.path.join(base, "report.html"), "w") as f:  # next to ROOT, not pipeline
+            f.write("<h1>{{verdict}}</h1>")
+        old_err = sys.stderr
+        sys.stderr = io.StringIO()
+        try:
+            _dispatch_validate({"root": "r.local.json", "strict": False},
+                               {"pipeline": "sub/pipe.json"}, base)
+        except SystemExit:
+            pass
+        finally:
+            err = sys.stderr.getvalue()
+            sys.stderr = old_err
+        assert "render-key-unprovided" in err and "verdict" in err, err
+
+
 def main() -> None:
     warns_on_required_only_schema()
     quiet_on_typed_properties()
@@ -185,6 +356,24 @@ def main() -> None:
     teeth_default_warns_but_passes()
     teeth_strict_fails_with_exit_2()
     teeth_strict_passes_on_typed_schema()
+    warns_render_key_not_provided()
+    warns_render_names_only_missing_keys()
+    render_warning_is_contract_nudge_not_crash_prediction()
+    quiet_render_key_in_properties()
+    quiet_render_key_in_required()
+    quiet_render_key_raw()
+    quiet_render_key_carried()
+    quiet_render_key_sticky()
+    quiet_render_key_cwd_from()
+    quiet_render_allow_unfilled()
+    quiet_render_via_branch_multipath()
+    quiet_render_via_branch_default()
+    quiet_render_multiple_then_preds()
+    quiet_render_pred_not_agent_or_parse_false_or_no_schema()
+    quiet_render_template_file_without_base()
+    warns_render_template_file_read_from_base()
+    quiet_render_template_file_unreadable()
+    render_template_file_resolves_against_root_dir()
     print("ok")
 
 
