@@ -177,7 +177,12 @@ def build_pipeline_schema() -> Dict[str, Any]:
     node_spec_schema = {
         "type": "object",
         "required": ["type"],
-        "properties": {"type": {"type": "string", "enum": node_type_enum}},
+        "properties": {
+            "type": {"type": "string", "enum": node_type_enum},
+            # ADR-0005: the payload keys this node guarantees (the requires<->provides
+            # contract foothold; required to lint across an envelope-transform).
+            "provides": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        },
         "additionalProperties": True,
     }
 

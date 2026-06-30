@@ -160,10 +160,19 @@ def quiet_branch_on_raw() -> None:
     assert not _has_branch_warn(_branch_cfg("raw", {"properties": {}}))
 
 
-def quiet_branch_parse_false_or_no_schema_or_non_agent() -> None:
-    assert not _has_branch_warn(_branch_cfg("verdict", {"properties": {}}, parse=False))
+def quiet_branch_no_schema_or_non_agent() -> None:
+    # parse:true with NO output_schema -> parsed keys unknown -> incomplete -> skip (the
+    # weak-output-schema lint nudges declaring a schema first); a transform's output at the
+    # start of the graph is also incomplete.
     assert not _has_branch_warn(_branch_cfg("verdict", schema=None))
     assert not _has_branch_warn(_branch_cfg("verdict", {"properties": {}}, node_type="transform"))
+
+
+def warns_branch_parse_false_provides_only_raw() -> None:
+    # a parse:false agent provides exactly {raw} -> branching on `verdict` is a real gap the
+    # single-hop 1a lint skipped; the broad lint now flags it (the producing-side hard error
+    # only covers agent -> SEPARATE branch stage, not a same-stage branch).
+    assert _has_branch_warn(_branch_cfg("verdict", {"properties": {}}, parse=False))
 
 
 # ── 1a-render contract completeness: render needs a key the agent doesn't DECLARE ─
@@ -223,8 +232,9 @@ def render_warning_is_contract_nudge_not_crash_prediction() -> None:
     cfg = _render_cfg("{{a}} {{b}}", schema={"properties": {"a": {"type": "string"}}})
     w = [m for m in lint_pipeline(cfg) if "render-key-unprovided" in m]
     assert w, w
-    assert "doesn't DECLARE" in w[0] and "omits" in w[0], w[0]   # conditional, not certain
-    assert "FAILS at runtime" not in w[0], w[0]                  # the old overclaim is gone
+    assert "depends on undeclared output" in w[0], w[0]   # contract gap, not certain crash
+    assert "where they're absent" in w[0], w[0]           # conditional framing
+    assert "FAILS at runtime" not in w[0], w[0]           # the old overclaim is gone
 
 
 def quiet_render_key_in_properties() -> None:
@@ -255,24 +265,10 @@ def quiet_render_allow_unfilled() -> None:
     assert not _has_render_warn(_render_cfg("{{verdict}}", schema={"properties": {}}, allow_unfilled=True))
 
 
-def quiet_render_via_branch_multipath() -> None:
-    assert not _has_render_warn(_render_cfg("{{verdict}}", schema={"properties": {}}, via_branch=True))
-
-
-def quiet_render_via_branch_default() -> None:
-    # a render reached via a branch DEFAULT is also multi-path -> skip (no false warn)
-    cfg = _render_cfg("{{verdict}}", schema={"properties": {}})
-    cfg["graph"]["stages"]["b"] = {"node": "agent",
-                                   "branch": {"on": "x", "routes": {}, "default": "r"}}
-    assert not _has_render_warn(cfg)
-
-
-def quiet_render_multiple_then_preds() -> None:
-    assert not _has_render_warn(_render_cfg("{{verdict}}", schema={"properties": {}}, extra_preds=True))
-
-
-def quiet_render_pred_not_agent_or_parse_false_or_no_schema() -> None:
-    assert not _has_render_warn(_render_cfg("{{verdict}}", schema={"properties": {}}, parse=False))
+def quiet_render_pred_no_schema_or_non_agent() -> None:
+    # parse:true with no output_schema -> incomplete -> skip; a transform predecessor at the
+    # start of the graph is incomplete too. (parse:false agent -> render is caught by the
+    # data-flow-contract HARD ERROR in validate_pipeline, which runs before the lint.)
     assert not _has_render_warn(_render_cfg("{{verdict}}", schema=None))
     assert not _has_render_warn(_render_cfg("{{verdict}}", schema={"properties": {}}, node_type="transform"))
 
@@ -337,6 +333,221 @@ def render_template_file_resolves_against_root_dir() -> None:
         assert "render-key-unprovided" in err and "verdict" in err, err
 
 
+# ── broad dataflow (multi-hop / multi-path): ADR-0005 slice B ────────────────
+
+def _has(cfg, tag, base_path=None):
+    return any(tag in m for m in lint_pipeline(cfg, base_path))
+
+
+def _fork_to_render(a1_schema, a2_schema, template="{{verdict}}"):
+    """A reachable two-path graph: a pure `fork` start splits to two agent stages that
+    both `then` the same render. Both paths run, so the render sees the INTERSECTION."""
+    return {"nodes": {
+        "a1": {"type": "agent", "output_schema": a1_schema},
+        "a2": {"type": "agent", "output_schema": a2_schema},
+        "r": {"type": "render", "template_text": template}},
+        "graph": {"start": "s0", "stages": {
+            "s0": {"fork": ["s1", "s2"]},
+            "s1": {"node": "a1", "then": "rr"},
+            "s2": {"node": "a2", "then": "rr"},
+            "rr": {"node": "r"}}}}
+
+
+def warns_render_multipath_one_path_missing() -> None:
+    # one reachable path provides verdict, the other doesn't -> intersection drops it -> warn
+    cfg = _fork_to_render({"required": ["verdict"]}, {"properties": {"other": {"type": "string"}}})
+    assert _has(cfg, "render-key-unprovided")
+
+
+def quiet_render_multipath_both_provide() -> None:
+    # both reachable paths provide verdict -> intersection keeps it -> quiet
+    cfg = _fork_to_render({"required": ["verdict"]},
+                          {"properties": {"verdict": {"type": "string"}}})
+    assert not _has(cfg, "render-key-unprovided")
+
+
+def quiet_render_unreachable_pred_not_intersected() -> None:
+    # a predecessor unreachable from start must NOT be intersected (it never runs); else the
+    # single reachable path that DOES provide verdict would be falsely warned.
+    cfg = {"nodes": {
+        "good": {"type": "agent", "output_schema": {"required": ["verdict"]}},
+        "ghost": {"type": "agent", "output_schema": {"properties": {"x": {"type": "string"}}}},
+        "r": {"type": "render", "template_text": "{{verdict}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "good", "then": "rr"},
+            "dead": {"node": "ghost", "then": "rr"},   # nothing routes to `dead`
+            "rr": {"node": "r"}}}}
+    assert not _has(cfg, "render-key-unprovided")
+
+
+def quiet_render_through_args_transform_preserves() -> None:
+    # agent declares verdict -> args-transform PRESERVES inbound -> render sees verdict -> quiet
+    cfg = {"nodes": {
+        "a": {"type": "agent", "output_schema": {"required": ["verdict"]}},
+        "t": {"type": "transform", "target": "fn:m:f"},   # call defaults "args" -> preserves
+        "r": {"type": "render", "template_text": "{{verdict}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "t", "then": "s3"},
+            "s3": {"node": "r"}}}}
+    assert not _has(cfg, "render-key-unprovided")
+
+
+def quiet_render_needs_args_transform_into() -> None:
+    # the args-transform nests its result under `into: summary` -> render needs summary -> quiet
+    cfg = {"nodes": {
+        "a": {"type": "agent", "output_schema": {"required": ["verdict"]}},
+        "t": {"type": "transform", "target": "fn:m:f", "into": "summary"},
+        "r": {"type": "render", "template_text": "{{summary}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "t", "then": "s3"},
+            "s3": {"node": "r"}}}}
+    assert not _has(cfg, "render-key-unprovided")
+
+
+def warns_render_through_args_transform_missing() -> None:
+    # nobody provides verdict along the chain -> warn even multi-hop
+    cfg = {"nodes": {
+        "a": {"type": "agent", "output_schema": {"properties": {"foo": {"type": "string"}}}},
+        "t": {"type": "transform", "target": "fn:m:f"},
+        "r": {"type": "render", "template_text": "{{verdict}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "t", "then": "s3"},
+            "s3": {"node": "r"}}}}
+    assert _has(cfg, "render-key-unprovided")
+
+
+def quiet_render_through_declared_envelope_transform() -> None:
+    # parse:false agent -> envelope-transform that DECLARES provides:[verdict] -> render -> quiet
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False},
+        "t": {"type": "transform", "target": "fn:m:f", "call": "envelope", "provides": ["verdict"]},
+        "r": {"type": "render", "template_text": "{{verdict}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "t", "then": "s3"},
+            "s3": {"node": "r"}}}}
+    assert not _has(cfg, "render-key-unprovided")
+
+
+def undeclared_envelope_transform_warns_and_taints() -> None:
+    # an UNDECLARED envelope-transform: warn on IT (actionable), and SKIP the downstream
+    # render (its provides are unknown -> tainted -> no false render warning).
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False},
+        "t": {"type": "transform", "target": "fn:m:f", "call": "envelope"},
+        "r": {"type": "render", "template_text": "{{verdict}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "t", "then": "s3"},
+            "s3": {"node": "r"}}}}
+    w = lint_pipeline(cfg)
+    assert any("transform-provides-undeclared" in m and "s2" in m for m in w), w
+    assert not any("render-key-unprovided" in m for m in w), w   # downstream skipped, not falsely warned
+
+
+def render_warnings_are_actionable() -> None:
+    # every requires-warning must name the concrete fix (human/llm-applicable) — ADR-0005 §6
+    cfg = _render_cfg("{{verdict}}", schema={"properties": {"other": {"type": "string"}}})
+    w = [m for m in lint_pipeline(cfg) if "render-key-unprovided" in m]
+    assert w and "Declare" in w[0] and "output_schema" in w[0] and "sticky" in w[0], w[0]
+
+
+def _chain(*node_pairs, template, sticky=None):
+    """A linear `then` chain: each (role, node) becomes stage s1, s2, ... ending in a render
+    of `template`. Returns the cfg."""
+    nodes = {role: node for role, node in node_pairs}
+    nodes["r"] = {"type": "render", "template_text": template}
+    names = ["s{}".format(i + 1) for i in range(len(node_pairs))]
+    stages = {}
+    for i, (role, _n) in enumerate(node_pairs):
+        stages[names[i]] = {"node": role, "then": (names[i + 1] if i + 1 < len(names) else "rr")}
+    stages["rr"] = {"node": "r"}
+    graph = {"start": names[0], "stages": stages}
+    if sticky:
+        graph["sticky"] = sticky
+    return {"nodes": nodes, "graph": graph}
+
+
+def quiet_render_after_gate_provides_decision() -> None:
+    cfg = _chain(("a", {"type": "agent", "output_schema": {"required": ["v"]}}),
+                 ("g", {"type": "human_gate"}), template="{{decision}} {{v}}")
+    assert not _has(cfg, "render-key-unprovided")
+
+
+def quiet_render_after_get_into() -> None:
+    cfg = _chain(("a", {"type": "agent", "output_schema": {"required": ["v"]}}),
+                 ("g", {"type": "get", "into": "fetched"}), template="{{fetched}}")
+    assert not _has(cfg, "render-key-unprovided")
+
+
+def quiet_render_sticky_survives_multihop() -> None:
+    cfg = _chain(("a", {"type": "agent", "output_schema": {"required": ["v"]}}),
+                 ("t", {"type": "transform", "target": "fn:m:f"}),
+                 template="{{run_id}}", sticky=["run_id"])
+    assert not _has(cfg, "render-key-unprovided")
+
+
+def loop_converges_and_keeps_key() -> None:
+    # a self-loop (retry) must reach a fixpoint (no hang) and not false-warn on a key the
+    # loop body re-provides each turn.
+    cfg = {"nodes": {
+        "w": {"type": "agent", "output_schema": {"required": ["v"]}},
+        "r": {"type": "render", "template_text": "{{v}}"}},
+        "graph": {"start": "s2", "stages": {
+            "s2": {"node": "w", "branch": {"on": "v", "routes": {"again": "s2"}, "default": "s3"}},
+            "s3": {"node": "r"}}}}
+    assert not _has(cfg, "render-key-unprovided") and not _has(cfg, "branch-key-unprovided")
+
+
+def quiet_render_parse_false_agent_forwards_cwd_from() -> None:
+    # opus-review regression: carry_cwd forwards the `cwd_from` key onto EVERY agent reply
+    # (agent.py:342, before the parse branch), so a parse:false repo-bound agent DOES provide
+    # it — a downstream render needing it must NOT be warned (the transfer once omitted it).
+    cfg = {"nodes": {
+        "wt": {"type": "worktree", "provides": ["workdir"]},
+        "a": {"type": "agent", "parse": False, "cwd_from": "workdir"},
+        "t": {"type": "transform", "target": "fn:m:f"},
+        "r": {"type": "render", "template_text": "{{workdir}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "wt", "then": "s2"},
+            "s2": {"node": "a", "then": "s3"},
+            "s3": {"node": "t", "then": "s4"},
+            "s4": {"node": "r"}}}}
+    assert not _has(cfg, "render-key-unprovided")
+
+
+def lint_never_raises_on_malformed_output_schema() -> None:
+    # opus-review: lint_pipeline must NEVER raise. A non-dict output_schema + a declared
+    # `provides` used to crash `_agent_provides_keys` with AttributeError. (validate_pipeline
+    # may reject it first in production, but the lint must be independently safe.)
+    cfg = {"nodes": {
+        "a": {"type": "agent", "output_schema": ["not", "a", "dict"], "provides": ["v"]},
+        "r": {"type": "render", "template_text": "{{v}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "r"}}}}
+    lint_pipeline(cfg)   # must not raise
+
+
+def opaque_shell_reset_skips_downstream_unless_declared() -> None:
+    # a shell REPLACES the payload (N6): undeclared -> downstream render skipped (no warn);
+    # declaring `provides` re-enables the check (and then a missing key warns).
+    base = {"nodes": {
+        "a": {"type": "agent", "output_schema": {"required": ["v"]}},
+        "sh": {"type": "shell"},
+        "r": {"type": "render", "template_text": "{{v}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "sh", "then": "s3"},
+            "s3": {"node": "r"}}}}
+    assert not _has(base, "render-key-unprovided")   # undeclared shell -> skipped, no false warn
+    base["nodes"]["sh"]["provides"] = ["other"]      # declares it provides `other`, not `v`
+    assert _has(base, "render-key-unprovided")        # now v is provably absent -> warn
+
+
 def main() -> None:
     warns_on_required_only_schema()
     quiet_on_typed_properties()
@@ -352,7 +563,8 @@ def main() -> None:
     quiet_branch_key_carried()
     quiet_branch_key_sticky()
     quiet_branch_on_raw()
-    quiet_branch_parse_false_or_no_schema_or_non_agent()
+    quiet_branch_no_schema_or_non_agent()
+    warns_branch_parse_false_provides_only_raw()
     teeth_default_warns_but_passes()
     teeth_strict_fails_with_exit_2()
     teeth_strict_passes_on_typed_schema()
@@ -366,14 +578,27 @@ def main() -> None:
     quiet_render_key_sticky()
     quiet_render_key_cwd_from()
     quiet_render_allow_unfilled()
-    quiet_render_via_branch_multipath()
-    quiet_render_via_branch_default()
-    quiet_render_multiple_then_preds()
-    quiet_render_pred_not_agent_or_parse_false_or_no_schema()
+    quiet_render_pred_no_schema_or_non_agent()
     quiet_render_template_file_without_base()
     warns_render_template_file_read_from_base()
     quiet_render_template_file_unreadable()
     render_template_file_resolves_against_root_dir()
+    warns_render_multipath_one_path_missing()
+    quiet_render_multipath_both_provide()
+    quiet_render_unreachable_pred_not_intersected()
+    quiet_render_through_args_transform_preserves()
+    quiet_render_needs_args_transform_into()
+    warns_render_through_args_transform_missing()
+    quiet_render_through_declared_envelope_transform()
+    undeclared_envelope_transform_warns_and_taints()
+    render_warnings_are_actionable()
+    quiet_render_after_gate_provides_decision()
+    quiet_render_after_get_into()
+    quiet_render_sticky_survives_multihop()
+    loop_converges_and_keeps_key()
+    quiet_render_parse_false_agent_forwards_cwd_from()
+    lint_never_raises_on_malformed_output_schema()
+    opaque_shell_reset_skips_downstream_unless_declared()
     print("ok")
 
 

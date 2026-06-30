@@ -28,14 +28,7 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 import difflib
-import os
-import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-
-# Mirror of render_node._PLACEHOLDER / human_gate._PLACEHOLDER (the {{mustache}}
-# the render node fills). Duplicated, not imported, to keep this module cheap to
-# import (it runs in CI sandboxes) — same convention the other two copies follow.
-_PLACEHOLDER = re.compile(r"{{\s*(\w+)\s*}}")
 
 # Lazy imports for enum tables that depend on third-party modules — pulled inside
 # functions to keep this module cheap to import (validators may run in CI sandboxes).
@@ -483,6 +476,16 @@ def validate_pipeline(config: Dict[str, Any]) -> None:
                 "node {!r} has no 'type'{} — if this comes from an `_extends` "
                 "overlay, the base pipeline has no such node (stale overlay key "
                 "after a rename/removal?)".format(role, _suggest(role, nodes - {role})))
+            continue
+        # ADR-0005 `provides` (data-flow contract): the keys a node GUARANTEES on the
+        # payload. Required to lint across an envelope-transform (whose output keys are
+        # otherwise opaque), optional elsewhere as an explicit override. Must be a list
+        # of non-empty key strings; the requires↔provides lint reads it.
+        prov = n.get("provides")
+        if prov is not None and (not isinstance(prov, list)
+                                 or not all(isinstance(k, str) and k for k in prov)):
+            errs.append("node {!r}: 'provides' must be a list of non-empty payload-key "
+                        "strings (the keys this node guarantees on the payload)".format(role))
     for k in g:
         if k not in _GRAPH_KEYS and not k.startswith("_"):
             errs.append("graph: unknown key {!r}{}; known: {}".format(
@@ -579,139 +582,13 @@ def lint_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -> Li
     stages = g.get("stages") or {}
     sticky = g.get("sticky") or []
     _lint_weak_output_schema(nodes, warnings)
-    _lint_branch_key_provided(nodes, stages, sticky, warnings)
-    _lint_render_key_provided(nodes, stages, sticky, base_path, warnings)
+    # ADR-0005 slice B: the broad requires↔provides graph analysis (absorbs the 1a
+    # single-hop render/branch checks as the 1-length-path case). Lives in its own module
+    # (the dataflow lattice + fixpoint are independently testable); imported lazily to keep
+    # this module cheap to import.
+    from .dataflow import lint_dataflow
+    lint_dataflow(nodes, stages, sticky, g.get("start"), base_path, warnings)
     return warnings
-
-
-def _agent_provides(node: Dict[str, Any], sticky_keys: set) -> set:
-    """The payload keys a `parse:true` agent's reply DECLARES it provides downstream:
-    `output_schema` properties ∪ `required` ∪ `{"raw"}` ∪ explicit `carry` ∪ `cwd_from`
-    ∪ graph `sticky`. Mirrors `reply_with({"raw": text, **carry_cwd, **carried, **parsed})`
-    (agent.py:388); the inbound payload is dropped, so the reply is all that flows on.
-
-    NOT the complete RUNTIME set: `check_schema` doesn't enforce `additionalProperties`
-    (jsonschema.py), so the model MAY emit keys beyond the declared schema and those reach
-    the payload too. We count only DECLARED keys on purpose — a lint built on this flags a
-    render/branch that depends on UNDECLARED output (a real contract gap: it works only on
-    runs where the model happens to emit the key). So such a warning CAN fire on a pipeline
-    that happens to run clean: this is contract-completeness, not crash-prediction."""
-    schema = node.get("output_schema") or {}
-    provides = (set((schema.get("properties") or {}).keys())
-                | set(schema.get("required") or [])
-                | {"raw"} | set(node.get("carry") or []) | set(sticky_keys))
-    cwd_from = node.get("cwd_from")
-    if isinstance(cwd_from, str) and cwd_from:
-        provides.add(cwd_from)
-    return provides
-
-
-def _lint_branch_key_provided(nodes, stages, sticky, warnings: List[str]) -> None:
-    """1a — contract completeness, first slice (seam-fix-plan #1a). A stage that branches on
-    a key (`branch.on`) its OWN `parse:true` agent doesn't DECLARE depends on undeclared
-    output: it routes correctly only on runs where the model happens to emit that key (an
-    omitted key falls through to `branch.default`, silently). Config-only (no template
-    files): the branch reads the stage's own output, so the agent's DECLARED provides are
-    known from `_agent_provides`. Can fire on a pipeline that happens to run (the key may be
-    emitted though undeclared — check_schema allows extras); that's the intended contract
-    nudge, not a crash prediction. Only fires when `output_schema` is declared (no schema ->
-    the weak-output-schema lint nudges declaring it first)."""
-    sticky_keys = set(sticky) if isinstance(sticky, list) else set()
-    for s_name, s in stages.items():
-        branch = s.get("branch") or {}
-        on = branch.get("on")
-        if not isinstance(on, str) or not on:
-            continue
-        node = nodes.get(s.get("node")) or {}
-        if node.get("type") != "agent" or node.get("parse", True) is False:
-            continue
-        if not isinstance(node.get("output_schema"), dict):
-            continue
-        provides = _agent_provides(node, sticky_keys)
-        if on not in provides:
-            declared = sorted(provides - {"raw"})
-            warnings.append(
-                "stage {!r}: branches on {!r}, but its agent's output_schema doesn't "
-                "declare it (declares {}). The branch then depends on UNDECLARED output — it "
-                "falls through to branch.default on any run where the agent omits {!r}. "
-                "Declare {!r} in the agent's output_schema (or carry/sticky it). "
-                "[lint: branch-key-unprovided]".format(s_name, on, declared, on, on))
-
-
-def _render_template_text(rnode: Dict[str, Any], base_path: Optional[str]) -> Optional[str]:
-    """The render's template source, or None when it can't be read statically (skip —
-    not the linter's job to report a missing/unreadable file; runtime/validate do). An
-    inline `template_text` is always available; a `template_file` is read relative to
-    `base_path` (the root config's dir, matching `_build_render`) when known, else by
-    absolute path."""
-    inline = rnode.get("template_text")
-    if isinstance(inline, str):
-        return inline
-    tfile = rnode.get("template_file")
-    if not isinstance(tfile, str) or not tfile:
-        return None
-    path = tfile if os.path.isabs(tfile) else (
-        os.path.join(base_path, tfile) if base_path else None)
-    if path is None:
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
-    except OSError:
-        return None
-
-
-def _lint_render_key_provided(nodes, stages, sticky, base_path, warnings: List[str]) -> None:
-    """1a-render — contract completeness, render slice (seam-fix-plan #1a). A render whose
-    template has a `{{placeholder}}` its predecessor agent doesn't DECLARE depends on
-    undeclared output: the render fills that key only on runs where the model happens to emit
-    it, and FAILS (`render_unfilled_placeholders`, the project's worst fault class) on any
-    run where it doesn't. Move that risk to author time. SCOPE-limited to stay useful, not
-    noisy: only fires for a render reached by EXACTLY ONE `then` predecessor (no
-    branch/fork/fanin in-edge — those union/intersect provides across paths) that is a
-    `parse:true` agent with `output_schema` declared. Counts only the agent's DECLARED
-    provides (`_agent_provides`); since check_schema allows undeclared emitted keys, this CAN
-    warn on a render that happens to run clean — the intended nudge to declare the
-    dependency, not a crash prediction. `allow_unfilled:true` (the author's
-    intentional-literal opt-out) and unreadable templates skip."""
-    sticky_keys = set(sticky) if isinstance(sticky, list) else set()
-    then_preds: Dict[str, List[str]] = {}
-    other_target: set = set()
-    for p, s in stages.items():
-        t = s.get("then")
-        if isinstance(t, str) and t:
-            then_preds.setdefault(t, []).append(p)
-        b = s.get("branch") or {}
-        other_target.update(v for v in (b.get("routes") or {}).values() if isinstance(v, str))
-        if isinstance(b.get("default"), str):
-            other_target.add(b["default"])
-        other_target.update(d for d in (s.get("fork") or []) if isinstance(d, str))
-    for r_name, s in stages.items():
-        rnode = nodes.get(s.get("node")) or {}
-        if rnode.get("type") != "render" or rnode.get("allow_unfilled"):
-            continue
-        preds = then_preds.get(r_name, [])
-        if len(preds) != 1 or r_name in other_target:
-            continue  # not a single-path render — provides aren't statically complete
-        pnode = nodes.get(stages[preds[0]].get("node")) or {}
-        if pnode.get("type") != "agent" or pnode.get("parse", True) is False:
-            continue
-        if not isinstance(pnode.get("output_schema"), dict):
-            continue
-        text = _render_template_text(rnode, base_path)
-        if text is None:
-            continue
-        provides = _agent_provides(pnode, sticky_keys)
-        missing = sorted({ph for ph in _PLACEHOLDER.findall(text) if ph not in provides})
-        if missing:
-            declared = sorted(provides - {"raw"})
-            warnings.append(
-                "stage {!r}: render template needs {} which its agent (stage {!r}) doesn't "
-                "DECLARE (declares {}). The render then depends on undeclared output — it "
-                "FAILS with render_unfilled_placeholders on any run where the agent omits "
-                "them. Declare them in the agent's output_schema (or carry/sticky), or set "
-                "allow_unfilled:true if intentionally literal. "
-                "[lint: render-key-unprovided]".format(r_name, missing, preds[0], declared))
 
 
 def _lint_weak_output_schema(nodes: Dict[str, Any], warnings: List[str]) -> None:

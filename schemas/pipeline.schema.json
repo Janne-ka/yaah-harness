@@ -68,6 +68,13 @@
       "additionalProperties": {
         "additionalProperties": true,
         "properties": {
+          "provides": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
+          },
           "type": {
             "enum": [
               "agent",
