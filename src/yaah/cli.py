@@ -213,9 +213,13 @@ def _parse_validate(rest: list) -> dict:
     strict = "--strict" in rest
     if strict:
         rest.remove("--strict")    # --strict: lint warnings FAIL (exit 2), for CI
+    from_code = "--from-code" in rest
+    if from_code:
+        rest.remove("--from-code")  # --from-code: read @provides off fn: transforms (imports app code)
     spec = _parse_cli(rest)        # parse root + --fake/--debug, then
     spec["action"] = "validate"    # check-only (never runs the pipeline)
     spec["strict"] = strict
+    spec["from_code"] = from_code
     return spec
 
 
@@ -453,6 +457,13 @@ def _dispatch_validate(spec: Dict[str, Any], root: Dict[str, Any], base: str) ->
     from .validate import validate_pipeline, lint_pipeline
     pipeline_ref = root.get("pipeline")
     warnings: list = []
+    # --from-code (ADR-0005 slice D): read @provides off fn: transforms so the lint sees
+    # across them without hand-written `provides`. OPT-IN because it IMPORTS app code; the
+    # default lint stays pure.
+    resolve = None
+    if spec.get("from_code"):
+        from .contract import fn_provides_resolver
+        resolve = fn_provides_resolver(base)
     if isinstance(pipeline_ref, str):
         pipeline_cfg = _read_json(_rel(base, pipeline_ref))
         validate_pipeline(pipeline_cfg)
@@ -461,11 +472,11 @@ def _dispatch_validate(spec: Dict[str, Any], root: Dict[str, Any], base: str) ->
         # (runtime.py: _assemble_harness), so _build_render joins template_file
         # onto `base`, NOT the pipeline file's own dir. The lint MUST match, or it
         # reads the wrong path whenever `root["pipeline"]` points into a subdir.
-        warnings = lint_pipeline(pipeline_cfg, base_path=base)
+        warnings = lint_pipeline(pipeline_cfg, base_path=base, resolve=resolve)
         ok_msg = "ok: {} is valid (root + pipeline {})".format(spec["root"], pipeline_ref)
     elif isinstance(pipeline_ref, dict):
         validate_pipeline(pipeline_ref)
-        warnings = lint_pipeline(pipeline_ref, base_path=base)
+        warnings = lint_pipeline(pipeline_ref, base_path=base, resolve=resolve)
         ok_msg = "ok: {} is valid (root + inline pipeline)".format(spec["root"])
     else:
         # Root validation already caught the missing/bad-type case above.

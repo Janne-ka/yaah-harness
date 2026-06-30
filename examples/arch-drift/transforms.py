@@ -28,6 +28,8 @@ from typing import Any, Dict, List, Optional
 
 from yaah.agents.attacher import Attacher  # ADR-0003 — engine ships zero built-ins;
                                             # this file holds the reference `usage` impl.
+from yaah.contract import provides  # ADR-0005 slice D — declare each transform's ADDED keys
+                                    # so `yaah validate --from-code` sees across them.
 
 
 # ---------- snapshot strategies (pluggable) ----------------------------------
@@ -200,6 +202,7 @@ _SNAPSHOT_STRATEGIES = {
 }
 
 
+@provides("snapshot", "feedback")
 def snapshot(envelope, config) -> Dict[str, Any]:
     """Dispatch to the snapshot strategy named in `payload['snapshot_strategy']`
     (default: 'imports'). Lets one pipeline serve multiple targets — the
@@ -215,6 +218,7 @@ def snapshot(envelope, config) -> Dict[str, Any]:
 
 # ---------- read the currently-committed SVG ---------------------------------
 
+@provides("committed_svg", "committed_svg_path")
 def read_committed_svg(envelope, config) -> Dict[str, Any]:
     """Read the currently-committed architecture SVG, returning empty string if
     the file does not exist (first-run case: drift is trivially 'yes' and the
@@ -265,6 +269,7 @@ _CANNED_SVG = (
 )
 
 
+@provides("new_svg")
 def render_mermaid(envelope, config) -> Dict[str, Any]:
     """Render `mermaid` to SVG. Shells out to `mmdc` (mermaid-cli) by default;
     when `MERMAID_RENDERER=:canned` is in the environment, returns a pre-baked
@@ -315,6 +320,7 @@ def _normalize_svg(svg: str) -> str:
     return _WHITESPACE.sub(" ", _SVG_ID.sub("", svg)).strip()
 
 
+@provides("changed", "summary")
 def diff_svgs(envelope, config) -> Dict[str, Any]:
     """Compare committed vs newly-rendered SVG. Output `changed: 'yes'|'no'`
     (strings, not bool, because yaah's branch matches on string repr) and a
@@ -409,6 +415,7 @@ def write_both_candidates(envelope, config) -> Dict[str, Any]:
     return {**envelope.payload, "candidate_files": [w["latest"] for w in written]}
 
 
+@provides("report_latest", "report_versioned")
 def stamp_report(envelope, config) -> Dict[str, Any]:
     """Runs right after the report `render`. The render always overwrites a FIXED
     file (`diagrams/arch-report*.html`), so that file is only ever the latest —

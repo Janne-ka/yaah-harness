@@ -1,6 +1,7 @@
 # ADR-0005 — requires↔provides: a statically-lintable data-flow contract
 
-Status: PROPOSED (design pass for ADR-0004's "lintable typed composition" extension).
+Status: ACCEPTED — slices A, B, D implemented (`07b5adf` + this change); slice C (obligations)
+DEFERRED until it has runtime teeth (see Build slices).
 Source: [ADR-0004 §Extension](0004-parse-by-default.md);
 [`.notes/silent-dataflow-class-2026-06-29.md`](../../.notes/silent-dataflow-class-2026-06-29.md);
 [`.notes/seam-fix-plan.md`](../../.notes/seam-fix-plan.md); [`.notes/1b-design.md`](../../.notes/1b-design.md).
@@ -42,9 +43,9 @@ below). The ONE opaque case is an envelope-transform (its fn returns an arbitrar
   | node | provides_out(provides_in) |
   |---|---|
   | agent parse:true | {raw} ∪ output_schema(props∪required) ∪ carry ∪ cwd_from ∪ sticky — drops inbound |
-  | agent parse:false | {raw} ∪ carry ∪ sticky — drops inbound |
+  | agent parse:false | {raw} ∪ carry ∪ cwd_from ∪ sticky — drops inbound (carry_cwd forwards cwd_from regardless of parse, agent.py:342) |
   | transform call:"args" | provides_in ∪ {into} (into default "result"; preserves inbound) |
-  | transform call:"envelope" | declared `provides` (drops inbound); UNDECLARED ⇒ TAINT |
+  | transform call:"envelope" | declared `provides` ⇒ provides_in ∪ declared (**PRESERVE + ADD** — the dominant fn returns `{**payload, ...}`, so `provides` lists the ADDED keys and inbound is kept; a true-reset fn is then over-stated, a safe false-negative). UNDECLARED ⇒ TAINT |
   | render | provides_in ∪ {output, path} |
   | human_gate | provides_in ∪ {decision} |
   | get / post | provides_in ∪ {into} |
@@ -94,9 +95,12 @@ satisfied on every path.
 ### 5. Two sources, one contract format — extract where there's code, declare where there's config
 
 - An **agent** is config (prompt + authored `output_schema`) → its contract stays authored.
-- A **transform** IS typed Python → a `@provides(...)` decorator registers its output
-  model/obligations, introspected at import and emitted as the same contract JSON the engine
-  consumes. Shape comes for free (can't lie about shape); obligations are the decorator's args.
+- A **transform** IS typed Python → a `@provides(...)` decorator registers its added-keys next
+  to the code, read at lint time (opt-in `--from-code`) as the same `provides` the engine
+  consumes — one declaration instead of two. SHIPPED shape-only (keys); obligations would be
+  the decorator's extra args once C lands. NOTE: the keys are hand-maintained, NOT introspected
+  from the `return` dict, so the decorator can still drift (over-/under-declare) exactly like an
+  `output_schema` — it removes the config/code DUPLICATION, not the honest-contract caveat (§6).
 - **The engine stays domain-free** (ADR-0001): the decorator + extractor are an authoring
   TOOL that introspects app components and emits JSON; `src/yaah/` only ever CONSUMES a
   `provides` JSON declaration and runs the join. Removing the tool leaves a working engine
@@ -116,16 +120,24 @@ certain crash. Advisory; `--strict` makes it CI-enforceable. The linter never ra
 
 ## Build slices (each sound + committable; opus review gates the design before C/D)
 
-- **A. substrate** — `provides: [str]` config key + validation (list of non-empty strings;
-  only meaningful on a node that drops/spreads). Foothold for everything else.
-- **B. shape join** — forward dataflow (intersection, taint+companion-warning, sticky, loop
-  fixpoint) over render/branch consumers, actionable output. Supersedes the 1a single-hop
-  functions (one lint, no double-warnings) OR runs additive for multi-hop only — decided at
-  review (regression risk vs. one-model cleanliness).
-- **C. obligation** — `NonEmpty` first (most grounded by N7/N8/N9); `OnlyOnBranch` /
-  `BeforeLoopGuard` as the flow-sensitive tier.
-- **D. extraction tool** — `@provides` decorator + import-time extractor emitting contract
-  JSON; an authoring tool outside `src/yaah/`.
+- **A. substrate** ✅ SHIPPED `07b5adf` — `provides: [str]` config key + validation (list of
+  non-empty strings; only meaningful on a node that drops/spreads). Foothold for everything else.
+- **B. shape join** ✅ SHIPPED `07b5adf` — forward dataflow (intersection, taint+companion-warning,
+  sticky, loop fixpoint) over render/branch consumers, actionable output. ABSORBED the 1a
+  single-hop functions (one lint, no double-warnings).
+- **D. extraction tool** ✅ SHIPPED — `src/yaah/contract.py`: a `@provides(*keys)` decorator
+  (records the ADDED keys on the fn — hand-maintained, NOT introspected from the `return`, so
+  the same drift caveat as `output_schema`) + `fn_provides_resolver` (imports an `fn:` target,
+  reads the decorator). OPT-IN via `yaah validate --from-code`, dependency-injected into the
+  lint so the default stays pure and the engine domain-free (remove the module → engine still
+  reads config-declared `provides`). SHAPE ONLY — obligations wait for C. Proven end-to-end:
+  decorating arch-drift's 5 transforms takes its `--from-code` lint from 1 warning to 0 (all 3
+  consumers — the `changed` branch, `report.html` render, `decision` gate — now actually checked).
+- **C. obligation** — DEFERRED (no runtime teeth yet: `check_schema` enforces
+  type/enum/required/properties/items, NOT non-empty, so a `NonEmpty` obligation would be
+  declared on both sides and enforced on neither — declaration-vs-declaration). Build only when
+  a real NonEmpty need appears, AND with runtime enforcement first. `NonEmpty` is the most
+  grounded (N7/N8/N9); `OnlyOnBranch` / `BeforeLoopGuard` the flow-sensitive tier.
 
 ## Consequences
 
@@ -136,9 +148,16 @@ certain crash. Advisory; `--strict` makes it CI-enforceable. The linter never ra
 - Domain-free engine preserved; the tool is replaceable (ADR-0001).
 
 ### Negative / accepted tradeoffs
-- A config-declared `provides` can LIE (author declares a key the fn doesn't emit) → false
-  negative. Accepted: it's a declaration like `output_schema`; the decorator (D) derives shape
-  from code to remove the shape-lie; obligation-lies remain author-trust.
+- A declared `provides`/`@provides`/`output_schema` is HAND-MAINTAINED and can drift from the
+  fn's actual `return` in BOTH directions (the decorator does NOT close this — it records the
+  author's declared keys, it doesn't read the function body):
+  - OVER-declare (a key the fn may not emit) → a downstream check passes that shouldn't → false
+    NEGATIVE. The dominant/accepted case (same trust model as `output_schema`).
+  - UNDER-declare (the fn emits `{**payload, "y": …}` but `provides` omits `y`) → a downstream
+    `{{y}}` is flagged though `y` IS present → false POSITIVE. Rare (authors list what they add)
+    and the warning's advice ("declare `y`") is still correct, but it IS a false positive by the
+    zero-FP goal. Mitigation if it bites: a test/extractor that cross-checks decorator keys
+    against statically-visible `return {...}` literals. Not built (no signal it bites yet).
 - Surface grows (`provides` key, obligation annotations). Justified by the failure class it
   defends; optional where provides are already known.
 - The join is the real work and is easy to get subtly wrong (cf. the 1a "zero false positives"

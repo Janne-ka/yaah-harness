@@ -432,6 +432,22 @@ def quiet_render_through_declared_envelope_transform() -> None:
     assert not _has(cfg, "render-key-unprovided")
 
 
+def declared_envelope_transform_preserves_inbound() -> None:
+    # PRESERVE + ADD, not reset: an envelope-transform whose fn does `{**payload, "c": ...}`
+    # declares only the ADDED key `c`, yet a downstream render of an INBOUND key (`a`) must NOT
+    # warn — inbound survives. (The old reset model would false-positive on `a`.) Mirrors the
+    # real arch-drift transforms (`return {**envelope.payload, "snapshot": ...}`).
+    cfg = {"nodes": {
+        "a": {"type": "agent", "output_schema": {"required": ["a", "b"]}},
+        "t": {"type": "transform", "target": "fn:m:f", "call": "envelope", "provides": ["c"]},
+        "r": {"type": "render", "template_text": "{{a}} {{c}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "t", "then": "s3"},
+            "s3": {"node": "r"}}}}
+    assert not _has(cfg, "render-key-unprovided"), lint_pipeline(cfg)
+
+
 def undeclared_envelope_transform_warns_and_taints() -> None:
     # an UNDECLARED envelope-transform: warn on IT (actionable), and SKIP the downstream
     # render (its provides are unknown -> tainted -> no false render warning).
@@ -590,6 +606,7 @@ def main() -> None:
     quiet_render_needs_args_transform_into()
     warns_render_through_args_transform_missing()
     quiet_render_through_declared_envelope_transform()
+    declared_envelope_transform_preserves_inbound()
     undeclared_envelope_transform_warns_and_taints()
     render_warnings_are_actionable()
     quiet_render_after_gate_provides_decision()

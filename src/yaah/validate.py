@@ -28,7 +28,7 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 import difflib
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 # Lazy imports for enum tables that depend on third-party modules — pulled inside
 # functions to keep this module cheap to import (validators may run in CI sandboxes).
@@ -557,7 +557,29 @@ def validate_pipeline(config: Dict[str, Any]) -> None:
         raise ValueError("invalid pipeline:\n  - " + "\n  - ".join(errs))
 
 
-def lint_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -> List[str]:
+def _augment_provides_from_code(nodes: Dict[str, Any],
+                                resolve: Callable[[Any], Optional[List[str]]]) -> Dict[str, Any]:
+    """Return a shallow copy of `nodes` with `provides` filled in for any UNDECLARED
+    envelope-transform whose fn: target `resolve` maps to keys (ADR-0005 slice D, the
+    @provides decorator read from code). Pure — never mutates the input; a node that
+    resolves to nothing is left untouched, so the lint taints it exactly as before."""
+    out: Dict[str, Any] = {}
+    for role, n in nodes.items():
+        # "undeclared" == provides is not a list — the SAME predicate dataflow._transfer uses,
+        # so a deliberate `provides: []` (declares "adds nothing") counts as declared here too
+        # and is never overridden by code-read keys.
+        if (isinstance(n, dict) and n.get("type") == "transform"
+                and n.get("call") == "envelope" and not isinstance(n.get("provides"), list)):
+            keys = resolve(n.get("target"))
+            if keys:
+                n = dict(n)
+                n["provides"] = list(keys)
+        out[role] = n
+    return out
+
+
+def lint_pipeline(config: Dict[str, Any], base_path: Optional[str] = None,
+                  resolve: Optional[Callable[[Any], Optional[List[str]]]] = None) -> List[str]:
     """Advisory lint over a VALID pipeline config — returns WARNINGS, never raises.
 
     Catches valid-but-RISKY shapes that otherwise bite deep in a run, each rule traced
@@ -572,12 +594,19 @@ def lint_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -> Li
     render-template lint checks only inline `template_text`; a `template_file` it can't
     locate is skipped, never a false warning.
 
+    `resolve` (ADR-0005 slice D, OPT-IN) maps a transform's `target` to the keys its
+    `@provides`-decorated fn declares, so the lint sees across an envelope-transform without
+    the author writing `provides` in config too. It IMPORTS app code, so it is injected by
+    the caller only on opt-in (`yaah validate --from-code`); the default lint stays pure.
+
     SCOPE (be honest — a clean lint is NOT "production-safe"): these rules catch CONFIG
     contract weakness only — they do NOT check transform/agent LOGIC, semantic output
     correctness, or runtime data values. That's the job of tests, the counterfactual
     agents, and the followability eval, not the linter."""
     warnings: List[str] = []
     nodes = config.get("nodes") or {}
+    if resolve is not None:
+        nodes = _augment_provides_from_code(nodes, resolve)
     g = config.get("graph") or {}
     stages = g.get("stages") or {}
     sticky = g.get("sticky") or []

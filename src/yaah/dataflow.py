@@ -112,8 +112,13 @@ def _transfer(node: Optional[Dict[str, Any]], pin: Provides, sticky: Set[str],
         # declaring output_schema first). Skip, never false-warn.
         return (frozenset({"raw"} | carry | cwd | sticky), False)
     if ntype == "transform" and node.get("call") == "envelope":
-        if explicit_set:
-            return (frozenset(explicit_set | sticky), True)      # declared RESET → complete
+        if isinstance(node.get("provides"), list):   # declared (a list, possibly empty)
+            # PRESERVE + ADD, not reset: the dominant pattern is
+            # `return {**envelope.payload, "k": ...}` (merge inbound, add keys), so `provides`
+            # declares the ADDED keys and inbound is kept; completeness rides through. (A fn
+            # that truly RESETS — returns only its own keys — is then over-stated: a safe
+            # false-NEGATIVE, never a false warning.)
+            return (known | explicit_set | sticky, complete)
         tainted.append(stage_name)                                # undeclared → taint (companion warn)
         return (frozenset(sticky), False)                         # only sticky survives, INCOMPLETE
     if ntype in _OPAQUE_RESET:
