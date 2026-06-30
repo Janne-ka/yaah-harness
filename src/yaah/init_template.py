@@ -164,7 +164,7 @@ def scaffold(target_dir: str, archetype: str = "linear") -> int:
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(path, "w") as f:
-            f.write(content)
+        with open(path, "w", encoding="utf-8") as f:   # templates carry em-dash/arrow; force
+            f.write(content)                            # UTF-8 so a non-UTF-8 locale can't crash
     written = len(template) + _write_generated_schemas(target_dir)
     return written

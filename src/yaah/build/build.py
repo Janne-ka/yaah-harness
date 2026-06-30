@@ -74,7 +74,7 @@ def build(
     base_dir: Optional[str] = None,
     live_config_path: Optional[str] = None,
 ) -> Harness:
-    validate_pipeline(config)
+    validate_pipeline(config, base_path=base_dir)
     comms = comms or InProcessComms()
     registry = registry or default_registry()
     ctx = BuildContext(comms=comms, backend=backend, prompt_source=prompt_source,
@@ -143,7 +143,7 @@ async def serve_from_config(
     """Worker side: build each node from config and serve it over the bus.
     `roles` optionally restricts which nodes this worker serves. Returns the
     list of served roles."""
-    validate_pipeline(config)
+    validate_pipeline(config, base_path=base_dir)
     registry = registry or default_registry()
     ctx = BuildContext(comms=comms, backend=backend, prompt_source=prompt_source,
                        data_source=data_source, data_sink=data_sink, mcp_source=mcp_source,

@@ -452,14 +452,18 @@ def _check_constraints(cons: Any, start: Any, stages: Dict[str, Any],
                         "bypassing the required stage".format(i, late, early))
 
 
-def validate_pipeline(config: Dict[str, Any]) -> None:
+def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -> None:
     """Fail fast on a malformed pipeline at BUILD time instead of mid-run. Every
     cross-reference must resolve: graph.start, each `then`, branch routes/default
     → a declared stage; each stage's node, validators, fanout roles → a declared
     node. Every stage key must be known (an unknown key is a silent no-op — the
     sink/sinks bug class). Catches the typo'd `then` (KeyError deep in the loop)
     and the missing node role (LookupError in-proc, silent NATS timeout when
-    distributed) before anything runs. Raises ValueError with every problem found."""
+    distributed) before anything runs. Raises ValueError with every problem found.
+
+    `base_path` (the root config's dir, as `build` passes its `base_dir`) lets the
+    data-flow contract check read `template_file` renders; omit it and a
+    `template_file` edge is left to the runtime's fail-loud instead of guessed at."""
     nodes = set(config.get("nodes", {}))
     g = config.get("graph") or {}
     stages = g.get("stages", {})
@@ -552,7 +556,8 @@ def validate_pipeline(config: Dict[str, Any]) -> None:
     cons = g.get("constraints")
     if cons is not None:
         _check_constraints(cons, start, stages, errs)
-    _check_data_flow_contract(config.get("nodes") or {}, stages, errs)
+    _check_data_flow_contract(config.get("nodes") or {}, stages, errs,
+                              sticky=g.get("sticky") or [], base_path=base_path)
     if errs:
         raise ValueError("invalid pipeline:\n  - " + "\n  - ".join(errs))
 
@@ -639,8 +644,13 @@ def _lint_weak_output_schema(nodes: Dict[str, Any], warnings: List[str]) -> None
         schema = node.get("output_schema")
         if not isinstance(schema, dict):
             continue
-        required = schema.get("required") or []
-        props = schema.get("properties") or {}
+        # `required`/`properties` may be malformed (e.g. `required: 5`, `properties: [...]`):
+        # validate_pipeline doesn't check output_schema internals, so guard here — the lint
+        # NEVER raises (it's advisory; a bad schema is for the schema validator, not a crash).
+        required = schema.get("required")
+        if not isinstance(required, list):
+            continue
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
         untyped = [k for k in required
                    if not isinstance(props.get(k), dict)
                    or not ("type" in props[k] or "enum" in props[k])]
@@ -656,16 +666,27 @@ def _check_data_flow_contract(
     nodes_dict: Dict[str, Any],
     stages: Dict[str, Any],
     errs: List[str],
+    sticky: Iterable[str] = (),
+    base_path: Optional[str] = None,
 ) -> None:
     """The data-flow contract (AGENTS.md §rules-that-bite): an agent's reply
     is a STRING in payload['raw']. Nothing merges it until a `transform`
     with `call: "envelope"` does. So an `agent` stage flowing directly to a
-    `render` stage or a stage with a `branch:` attribute is silent-wrong:
-    render finds {{placeholders}} it cannot fill; branch reads payload keys
-    that were never merged.
+    `render` or `branch` that reads a key the agent never produced is
+    silent-wrong: render finds {{placeholders}} it cannot fill; branch reads a
+    missing key and takes `default` every time.
 
-    This check catches at LOAD what previously surfaced at runtime
+    Fails ACCURATELY: a parse=false agent DOES provide `raw` (+ `carry`,
+    `cwd_from`, sticky), so a render of only those — `{{raw}}` — is fine and is
+    NOT rejected. We read the render template (inline, or `template_file` via
+    `base_path`) and the branch key and flag ONLY a genuinely-unprovided key.
+    When a `template_file` can't be read (no `base_path`), the edge is left to
+    the runtime's own fail-loud rather than guessed at.
+
+    This check catches at LOAD what would otherwise surface mid-run
     (the CHECK 8 footgun in the pre-submission rubric)."""
+    from .dataflow import _PLACEHOLDER, _as_key_set, _render_template_text
+    sticky_set = {k for k in sticky if isinstance(k, str)}
     for s_name, s in stages.items():
         s_node_name = s.get("node")
         if not s_node_name:
@@ -680,6 +701,12 @@ def _check_data_flow_contract(
         # explicitly opts out via parse=False.
         if s_node.get("parse", True):
             continue
+        # What a parse=false agent actually provides (no merge step): `raw` plus
+        # carry / cwd_from / sticky (agent.py:342 forwards cwd_from regardless of parse).
+        provided = {"raw"} | _as_key_set(s_node.get("carry")) | sticky_set
+        cwd_from = s_node.get("cwd_from")
+        if isinstance(cwd_from, str) and cwd_from:
+            provided.add(cwd_from)
         t_name = s.get("then")
         if t_name is None or t_name not in stages:
             continue  # terminal or already-flagged by the .then validity check
@@ -687,40 +714,39 @@ def _check_data_flow_contract(
         t_node_name = t.get("node")
         t_node = nodes_dict.get(t_node_name) or {} if t_node_name else {}
         t_type = t_node.get("type") or ""
-        # Agent → render is silent-wrong: render finds {{placeholders}} it
-        # cannot fill. `allow_unfilled: true` on the render node is the
-        # explicit opt-out for "the raw payload is intentional".
+        # Agent → render: fail only if the template needs a key the agent does NOT
+        # provide (so `{{raw}}` is fine). `allow_unfilled: true` opts out entirely.
         if t_type == "render" and not t_node.get("allow_unfilled"):
-            errs.append(
-                "stage {!r} (agent) → stage {!r} (render) with no parse "
-                "between — the agent's reply is a STRING in payload['raw'], "
-                "so `render` finds {{placeholders}} it cannot fill. Insert a "
-                "`transform` stage with `call: \"envelope\"` that parses + "
-                "merges (e.g. `examples/hello-yaah/hello_transforms.py:parse`), "
-                "OR set `allow_unfilled: true` on the render node if the "
-                "unparsed payload is intentional".format(s_name, t_name))
+            text = _render_template_text(t_node, base_path)
+            if text is None:
+                continue  # `template_file` unreadable here → leave it to runtime fail-loud
+            missing = sorted(set(_PLACEHOLDER.findall(text)) - provided)
+            if missing:
+                errs.append(
+                    "stage {!r} (agent, parse=false) → stage {!r} (render) needs "
+                    "{} which the agent does not provide (its reply is a STRING in "
+                    "payload['raw']; it provides {}). Insert a `transform` stage with "
+                    "`call: \"envelope\"` that parses + merges (e.g. "
+                    "`examples/hello-yaah/hello_transforms.py:parse`), OR set "
+                    "`allow_unfilled: true` if the unparsed payload is intentional".format(
+                        s_name, t_name, missing, sorted(provided)))
             continue
-        # Agent → stage-with-branch is silent-wrong WHEN the merging stage's
-        # NODE doesn't itself merge keys onto the payload. Two node types
-        # legitimately merge here and so are exceptions:
-        #   - `transform`: the canonical parse step (the whole point).
-        #   - `human_gate`: the operator's `decision.json` becomes the
-        #     payload's `decision` key during resume; the branch reads what
-        #     the human typed, not the agent's raw.
-        # Anything else (json_object validator, expect_field, render with
-        # branch, another agent, etc.) does NOT merge, so branching on a key
-        # the agent never produced reads as missing → branch.default fires
-        # every time.
-        if t.get("branch") and t_type not in ("transform", "human_gate"):
+        # Agent → stage-with-branch: `transform`/`human_gate` merge keys, so they're
+        # exempt; for any other node the branch reads the agent's payload directly, so
+        # fail only if `branch.on` is a key the agent does NOT provide (branching on
+        # `raw` is fine).
+        branch = t.get("branch")
+        if branch and t_type not in ("transform", "human_gate"):
+            on = branch.get("on") if isinstance(branch, dict) else None
+            if isinstance(on, str) and on in provided:
+                continue
             errs.append(
-                "stage {!r} (agent) → stage {!r} (type {!r}) which has a "
-                "`branch:` — the agent's reply is a STRING in payload['raw'], "
-                "and {!r} does not merge keys onto the payload, so `branch.on` "
-                "reads as missing and the run takes `branch.default` every "
-                "time. Insert a `transform` stage with `call: \"envelope\"` "
-                "between them that parses + merges (see `examples/hello-yaah/"
-                "hello_transforms.py:parse` for the canonical shape).".format(
-                    s_name, t_name, t_type or "?", t_type or "?"))
+                "stage {!r} (agent, parse=false) → stage {!r} (type {!r}) branches on "
+                "{!r}, which the agent does not merge onto the payload (it provides {}), "
+                "so `branch.on` reads as missing and the run takes `branch.default` every "
+                "time. Insert a `transform` stage with `call: \"envelope\"` between them "
+                "that parses + merges (see `examples/hello-yaah/hello_transforms.py:parse`).".format(
+                    s_name, t_name, t_type or "?", on, sorted(provided)))
 
 
 def validate_budgets(root: Dict[str, Any], pipeline: Dict[str, Any]) -> None:

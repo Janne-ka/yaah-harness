@@ -65,8 +65,10 @@ def fn_provides_resolver(base_dir: Optional[str] = None) -> Callable[[Any], Opti
     target and reads its `@provides`. IMPORTS APP CODE, so wire it only when the caller has
     opted into reading contracts from code (e.g. `yaah validate --from-code`). A non-`fn:`
     target, an undecorated fn, or ANY import failure resolves to None — the lint then treats
-    the transform as undeclared (its existing, safe behaviour). `base_dir` is put on sys.path
-    so the app's modules import the same way the runtime resolves them."""
+    the transform as undeclared (its existing, safe behaviour). `base_dir` is APPENDED to
+    sys.path (not prepended like the runtime's `insert(0)`) so a name-colliding app module can
+    never shadow a stdlib/3rd-party one during the import — if it doesn't resolve, the transform
+    just stays undeclared (a safe false-negative on this opt-in path)."""
     from .external_call import import_callable
 
     def resolve(target: Any) -> Optional[List[str]]:
@@ -74,12 +76,16 @@ def fn_provides_resolver(base_dir: Optional[str] = None) -> Callable[[Any], Opti
             return None
         added = False
         if base_dir and base_dir not in sys.path:
-            sys.path.insert(0, base_dir)
-            added = True
+            sys.path.append(base_dir)   # APPEND, not insert(0): never shadow a stdlib/3rd-party
+            added = True                # module a transitively-imported module needs
         try:
             fn = import_callable(target[len("fn:"):])
-        except Exception:
-            return None     # unimportable / not 'module:func' → can't resolve, stay undeclared
+        except (Exception, SystemExit):
+            # unimportable / not 'module:func' / a module that sys.exit()s at import → can't
+            # resolve, stay undeclared. Catch SystemExit too (a BaseException) so the lint NEVER
+            # raises on the opt-in path; KeyboardInterrupt is deliberately NOT caught (Ctrl-C
+            # must still abort `yaah validate`).
+            return None
         finally:
             if added:
                 try:

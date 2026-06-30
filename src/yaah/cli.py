@@ -466,7 +466,7 @@ def _dispatch_validate(spec: Dict[str, Any], root: Dict[str, Any], base: str) ->
         resolve = fn_provides_resolver(base)
     if isinstance(pipeline_ref, str):
         pipeline_cfg = _read_json(_rel(base, pipeline_ref))
-        validate_pipeline(pipeline_cfg)
+        validate_pipeline(pipeline_cfg, base_path=base)
         # render `template_file` paths resolve against the ROOT config's dir
         # (`base`) — the runtime builds the pipeline with `base_dir=base`
         # (runtime.py: _assemble_harness), so _build_render joins template_file
@@ -475,7 +475,7 @@ def _dispatch_validate(spec: Dict[str, Any], root: Dict[str, Any], base: str) ->
         warnings = lint_pipeline(pipeline_cfg, base_path=base, resolve=resolve)
         ok_msg = "ok: {} is valid (root + pipeline {})".format(spec["root"], pipeline_ref)
     elif isinstance(pipeline_ref, dict):
-        validate_pipeline(pipeline_ref)
+        validate_pipeline(pipeline_ref, base_path=base)
         warnings = lint_pipeline(pipeline_ref, base_path=base, resolve=resolve)
         ok_msg = "ok: {} is valid (root + inline pipeline)".format(spec["root"])
     else:

@@ -42,9 +42,32 @@ _PLACEHOLDER = re.compile(r"{{\s*(\w+)\s*}}")
 _TOP = object()
 Provides = Any  # _TOP | Tuple[frozenset, bool]
 
-# Node types that REPLACE the payload with keys the lint can't see statically (N6). Like an
-# undeclared envelope-transform they're INCOMPLETE unless they declare `provides`.
-_OPAQUE_RESET = frozenset({"shell", "worktree", "agent_loop"})
+def _as_key_set(val: Any) -> Set[str]:
+    """A config field meant to be a list of key NAMES → the set of its string entries; any
+    malformed shape (non-list, or non-string items) contributes nothing. Keeps the lint
+    NEVER-RAISES on unvalidated input (e.g. `carry: true`, `required: 5`)."""
+    if not isinstance(val, list):
+        return set()
+    return {v for v in val if isinstance(v, str)}
+
+
+# Built-in nodes that REPLACE the payload with a GUARANTEED, engine-defined key set (N6).
+# Unlike an undeclared envelope-transform (arbitrary fn output), the lint can model these
+# EXACTLY, so downstream consumers ARE checkable. Conditional keys (shell's `stdout`/`timed_out`,
+# emitted only on some run paths) are deliberately EXCLUDED — a consumer of one reads a
+# not-guaranteed key, which the lint then correctly flags.
+def _shell_keys(node: Dict[str, Any]) -> Set[str]:
+    keys = {"exit_code", "ok", "stdout_tail"}    # shell_node.py:47 (success) ∩ :54 (timeout)
+    cwd_from = node.get("cwd_from")              # carry_cwd forwards the workdir key, if bound
+    if isinstance(cwd_from, str) and cwd_from:
+        keys.add(cwd_from)
+    return keys
+
+
+def _worktree_keys(node: Dict[str, Any]) -> Set[str]:
+    if node.get("op") == "remove":               # worktree_node.py:161
+        return {"removed", "ok"}
+    return {"workdir", "branch", "repo", "base"}  # worktree_node.py:153 (op="add", the default)
 
 
 def _meet(a: Provides, b: Provides) -> Provides:
@@ -67,9 +90,10 @@ def _agent_provides_keys(node: Dict[str, Any], sticky: Set[str]) -> Set[str]:
     schema = node.get("output_schema")
     if not isinstance(schema, dict):     # a malformed (non-dict) output_schema must NOT crash
         schema = {}                       # the lint (never-raises) — treat as no declared shape
-    keys = (set((schema.get("properties") or {}).keys())
-            | set(schema.get("required") or [])
-            | {"raw"} | set(node.get("carry") or []) | set(sticky))
+    props = schema.get("properties")
+    props_keys = set(props.keys()) if isinstance(props, dict) else set()   # `properties: [...]`
+    keys = (props_keys | _as_key_set(schema.get("required"))               # `required: 5` → {}
+            | {"raw"} | _as_key_set(node.get("carry")) | set(sticky))
     cwd_from = node.get("cwd_from")
     if isinstance(cwd_from, str) and cwd_from:
         keys.add(cwd_from)
@@ -94,7 +118,7 @@ def _transfer(node: Optional[Dict[str, Any]], pin: Provides, sticky: Set[str],
 
     ntype = node.get("type")
     if ntype == "agent":
-        carry = set(node.get("carry") or [])
+        carry = _as_key_set(node.get("carry"))
         # `carry_cwd` forwards the cwd_from key onto EVERY agent reply (agent.py:342,
         # before the parse branch), so it's provided regardless of parse / output_schema.
         cwd_from = node.get("cwd_from")
@@ -121,18 +145,18 @@ def _transfer(node: Optional[Dict[str, Any]], pin: Provides, sticky: Set[str],
             return (known | explicit_set | sticky, complete)
         tainted.append(stage_name)                                # undeclared → taint (companion warn)
         return (frozenset(sticky), False)                         # only sticky survives, INCOMPLETE
-    if ntype in _OPAQUE_RESET:
-        # shell/worktree/agent_loop REPLACE the payload with keys the lint can't see (N6).
-        # A declared `provides` makes them precise; undeclared they're INCOMPLETE so
-        # downstream consumers are conservatively skipped (a known false-NEGATIVE — never a
-        # false warning). No companion warning here (unlike envelope-transform, whose whole
-        # job is to emit payload keys): a shell is often a side-effect with no key output, so
-        # warning on every one would be noise. Declare `provides` to re-enable downstream
-        # checks. (Refining this — warn only when a consumer is actually skipped — is a
-        # review item.)
-        if explicit_set:
-            return (frozenset(explicit_set | sticky), True)
-        return (frozenset(sticky), False)
+    if ntype == "agent_loop":
+        # reply_with({**payload, answer, turns, outcome}) (agent_loop_node.py:122) — PRESERVES
+        # all inbound, ADDS these three. Completeness rides through (preserve+add, like a
+        # declared envelope-transform), so it is NOT an opaque reset.
+        return (known | {"answer", "turns", "outcome"} | explicit_set | sticky, complete)
+    if ntype in ("shell", "worktree"):
+        # RESET to the node's GUARANTEED keys (+carry +author-declared), COMPLETE: the set is
+        # engine-known, so a downstream consumer of an unguaranteed key IS flagged — fail-loud
+        # stands on accurate ground. Over-declared carry/`provides` only over-states `known`
+        # (a safe false-negative), never a false warning.
+        base = _shell_keys(node) if ntype == "shell" else _worktree_keys(node)
+        return (frozenset(base | _as_key_set(node.get("carry")) | explicit_set | sticky), True)
     # PRESERVE nodes: add the keys this node type puts on the payload, keep completeness.
     added: Set[str] = set(explicit_set)
     if ntype == "transform":                 # call:"args" → result nested under `into`
@@ -175,11 +199,12 @@ def _edges(stages: Dict[str, Any]) -> Dict[str, List[str]]:
 
 
 def compute_provides(nodes: Dict[str, Any], stages: Dict[str, Any], sticky: Set[str],
-                     start: Optional[str], tainted: List[str]) -> Dict[str, Provides]:
+                     start: Optional[str], tainted: List[str]) -> "Tuple[Dict[str, Provides], Dict[str, List[str]]]":
     """Forward dataflow to a least fixpoint: provides_in(stage) = meet over predecessors
     of provides_out(pred). Monotone (sets only shrink from TOP), so it converges; loops
     (retry/`then` cycles) are handled by the fixpoint, not a special case. Unreached
-    stages stay TOP. Returns {stage: provides_in}."""
+    stages stay TOP. Returns ({stage: provides_in}, predecessor-map) — the caller reuses
+    the predecessor map rather than recomputing it."""
     pin: Dict[str, Provides] = {s: _TOP for s in stages}
     if start in stages:
         pin[start] = (frozenset(), False)   # the entry payload is the unknowable INPUT
@@ -212,7 +237,7 @@ def compute_provides(nodes: Dict[str, Any], stages: Dict[str, Any], sticky: Set[
     # `tainted` accumulates duplicates across passes; de-dup preserving order.
     seen: Set[str] = set()
     tainted[:] = [t for t in tainted if not (t in seen or seen.add(t))]
-    return pin
+    return pin, preds
 
 
 def _render_template_text(rnode: Dict[str, Any], base_path: Optional[str]) -> Optional[str]:
@@ -245,9 +270,8 @@ def lint_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list: An
     ACTIONABLE warnings only; never raises."""
     sticky = set(k for k in sticky_list if isinstance(k, str)) if isinstance(sticky_list, list) else set()
     tainted: List[str] = []
-    pin = compute_provides(nodes, stages, sticky, start, tainted)
+    pin, preds = compute_provides(nodes, stages, sticky, start, tainted)
     tainted_set = set(tainted)
-    preds = _edges(stages)
 
     def tainted_ancestors(stage: str) -> List[str]:
         """Undeclared envelope-transforms reverse-reachable from `stage` — the culprits

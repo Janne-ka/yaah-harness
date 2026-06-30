@@ -548,20 +548,44 @@ def lint_never_raises_on_malformed_output_schema() -> None:
     lint_pipeline(cfg)   # must not raise
 
 
-def opaque_shell_reset_skips_downstream_unless_declared() -> None:
-    # a shell REPLACES the payload (N6): undeclared -> downstream render skipped (no warn);
-    # declaring `provides` re-enables the check (and then a missing key warns).
-    base = {"nodes": {
-        "a": {"type": "agent", "output_schema": {"required": ["v"]}},
-        "sh": {"type": "shell"},
-        "r": {"type": "render", "template_text": "{{v}}"}},
-        "graph": {"start": "s1", "stages": {
-            "s1": {"node": "a", "then": "s2"},
-            "s2": {"node": "sh", "then": "s3"},
-            "s3": {"node": "r"}}}}
-    assert not _has(base, "render-key-unprovided")   # undeclared shell -> skipped, no false warn
-    base["nodes"]["sh"]["provides"] = ["other"]      # declares it provides `other`, not `v`
-    assert _has(base, "render-key-unprovided")        # now v is provably absent -> warn
+def placeholder_regex_matches_the_render_node() -> None:
+    # The lint extracts a render's {{keys}} with dataflow._PLACEHOLDER and feeds them to BOTH
+    # the advisory render check AND the hard data-flow fail-loud (validate.py imports this copy).
+    # If it ever diverges from the regex the render node ACTUALLY fills, the lint reasons about a
+    # different key set than runtime → the silent-misroute class reopens. render_node owns its own
+    # copy (deliberately un-imported for cheap import), so guard the equivalence here.
+    from yaah.dataflow import _PLACEHOLDER as lint_re
+    from yaah.nodes.render_node import _PLACEHOLDER as render_re
+    assert lint_re.pattern == render_re.pattern, (lint_re.pattern, render_re.pattern)
+
+
+def opaque_nodes_provide_their_real_keys() -> None:
+    # shell/worktree REPLACE the payload (N6) but emit a KNOWN, engine-defined set, so the lint
+    # models them EXACTLY: a consumer of a guaranteed key is fine; a consumer of a key the node
+    # does NOT provide is correctly flagged (fail-loud on accurate ground). agent_loop PRESERVES
+    # inbound and adds {answer,turns,outcome}, so it is not a reset at all.
+    def chain(node, template):
+        return {"nodes": {
+            "a": {"type": "agent", "output_schema": {"required": ["v"]}},
+            "x": node,
+            "r": {"type": "render", "template_text": template}},
+            "graph": {"start": "s1", "stages": {
+                "s1": {"node": "a", "then": "s2"},
+                "s2": {"node": "x", "then": "s3"},
+                "s3": {"node": "r"}}}}
+    # shell: emits exit_code/ok/stdout_tail; drops inbound v unless carried
+    assert not _has(chain({"type": "shell"}, "{{exit_code}}"), "render-key-unprovided")
+    assert _has(chain({"type": "shell"}, "{{v}}"), "render-key-unprovided")           # v dropped
+    assert not _has(chain({"type": "shell", "carry": ["v"]}, "{{v}}"), "render-key-unprovided")
+    assert not _has(chain({"type": "shell", "provides": ["custom"]}, "{{custom}}"),
+                    "render-key-unprovided")                                          # author-declared
+    # worktree: add (default) → workdir/branch/repo/base; remove → removed/ok
+    assert not _has(chain({"type": "worktree"}, "{{workdir}}"), "render-key-unprovided")
+    assert _has(chain({"type": "worktree", "op": "remove"}, "{{workdir}}"),
+                "render-key-unprovided")                                              # add-only key
+    assert not _has(chain({"type": "worktree", "op": "remove"}, "{{removed}}"), "render-key-unprovided")
+    # agent_loop preserves inbound v and adds answer
+    assert not _has(chain({"type": "agent_loop"}, "{{v}} {{answer}}"), "render-key-unprovided")
 
 
 def main() -> None:
@@ -615,7 +639,8 @@ def main() -> None:
     loop_converges_and_keeps_key()
     quiet_render_parse_false_agent_forwards_cwd_from()
     lint_never_raises_on_malformed_output_schema()
-    opaque_shell_reset_skips_downstream_unless_declared()
+    placeholder_regex_matches_the_render_node()
+    opaque_nodes_provide_their_real_keys()
     print("ok")
 
 

@@ -534,8 +534,51 @@ def test_budget_fork_wait_smaller_than_branch_node_timeout() -> None:
     raise AssertionError("fork wait.timeout < branch node timeout should raise")
 
 
+def _parse_false_to(consumer: Dict[str, Any], extra_stage: Dict[str, Any]) -> Dict[str, Any]:
+    return {"nodes": {"ask": {"type": "agent", "parse": False}, **{"c": consumer}},
+            "graph": {"start": "a", "stages": {
+                "a": {"node": "ask", "then": "b"},
+                "b": {"node": "c", **extra_stage}}}}
+
+
+def test_parse_false_render_of_raw_is_accepted() -> None:
+    # parse=false DOES provide `raw`, so a render of only {{raw}} is runnable — the hard
+    # data-flow check must NOT reject it (it reads the template now, not just the edge shape).
+    p = _parse_false_to({"type": "render", "template_text": "Result: {{raw}}"}, {})
+    validate_pipeline(p)  # must not raise
+
+
+def test_parse_false_render_of_unprovided_key_still_fails_loud() -> None:
+    # but a render needing a key the agent never produced is still rejected at LOAD, and the
+    # error names the missing key — fail-loud preserved, just accurate.
+    p = _parse_false_to({"type": "render", "template_text": "{{verdict}}"}, {})
+    try:
+        validate_pipeline(p)
+    except ValueError as e:
+        assert "verdict" in str(e), str(e)
+        return
+    raise AssertionError("parse=false → render needing an unprovided key must still raise")
+
+
+def test_parse_false_branch_on_raw_ok_but_other_key_fails() -> None:
+    on_raw = _parse_false_to({"type": "json_object"},
+                             {"branch": {"on": "raw", "routes": {}, "default": "a"}})
+    validate_pipeline(on_raw)  # branches on `raw`, which the agent provides → fine
+    on_key = _parse_false_to({"type": "json_object"},
+                             {"branch": {"on": "verdict", "routes": {}, "default": "a"}})
+    try:
+        validate_pipeline(on_key)
+    except ValueError as e:
+        assert "verdict" in str(e), str(e)
+        return
+    raise AssertionError("parse=false → branch on an unprovided key must still raise")
+
+
 def main() -> None:
     test_valid_root_passes()
+    test_parse_false_render_of_raw_is_accepted()
+    test_parse_false_render_of_unprovided_key_still_fails_loud()
+    test_parse_false_branch_on_raw_ok_but_other_key_fails()
     test_unknown_top_level_key_with_did_you_mean()
     test_underscore_keys_treated_as_comments()
     test_bare_string_transport_suggests_typed_block()
@@ -571,7 +614,7 @@ def main() -> None:
     test_budget_node_timeout_exceeds_transport_window()
     test_budget_inproc_has_no_reply_window()
     test_budget_fork_wait_smaller_than_branch_node_timeout()
-    print("test_validate: PASS (36 scenarios)")
+    print("test_validate: PASS (39 scenarios)")
 
 
 if __name__ == "__main__":
