@@ -28,6 +28,12 @@ def compensate_fn(ctx):
     return {"compensated": True}
 
 
+def failing_compensate_fn(ctx):
+    """A compensation target whose own undo FAILS (rollback target down)."""
+    COMPENSATED.append(ctx)
+    raise RuntimeError("rollback API unreachable")
+
+
 class Writer:
     async def invoke(self, env, config):
         return env.reply("result", text="nope", ok=False)
@@ -46,6 +52,14 @@ class UndoNode:
     async def invoke(self, env, config):
         self.sink.append(dict(env.payload))
         return env.reply_with(Kind.RESULT, {"undone": True})
+
+
+class RaisingUndoNode:
+    """A `node:` compensation target whose undo RAISES (rollback service down).
+    InProcessComms.request awaits invoke() directly, so the raise propagates out
+    of call_target — the same failure signal as an fn: target that raises."""
+    async def invoke(self, env, config):
+        raise RuntimeError("undo node blew up")
 
 
 def _failing_graph(on_error):
@@ -117,6 +131,80 @@ async def scenario_on_error_compensate_node() -> None:
     assert len(undone) == 1 and undone[0]["node"] == "agent1", undone
 
 
+async def scenario_compensate_failure_default_escalates() -> None:
+    # slop-fix #6: when the undo ITSELF fails and on_compensate_fail is unset,
+    # the default is "error" — escalate, carrying the ORIGINAL failure PLUS a
+    # compensation_failed one (masks nothing), and the parked set still flushes.
+    import importlib
+    mod = importlib.import_module("test_error_handling")
+    mod.COMPENSATED.clear()
+    comms = InProcessComms()
+    comms.register("role:writer", Writer())
+    comms.register("role:check", FailValidator())
+    es = EnvelopeStore(MemoryStore())
+    await es.save("agent1:RID:branch", Envelope(Kind.RESULT, {"stale": True}))
+    h = Harness(comms, _failing_graph(
+        {"compensate": "fn:test_error_handling:failing_compensate_fn"}), envelope_store=es)
+    caught = None
+    try:
+        await h.run(Envelope(Kind.TASK, {}, {"correlation_id": "RID"}))
+    except StageFailed as e:
+        caught = e
+    assert caught is not None, "compensation failure must escalate by default"
+    codes = [f.code for f in caught.verdict.failures]
+    assert "compensation_failed" in codes, codes         # the undo-failure surfaces
+    assert "not_ok" in codes, codes                       # AND the original is preserved
+    assert len(mod.COMPENSATED) == 1, "the undo was attempted"
+    assert await es.list("agent1:RID:") == [], "parked set still flushed"
+
+
+async def scenario_compensate_failure_warn_tolerates() -> None:
+    # slop-fix #6: on_compensate_fail="warn" — a failed undo is NOTED, and the
+    # ORIGINAL StageFailed surfaces (not a compensation_failed one); flush runs.
+    import importlib
+    mod = importlib.import_module("test_error_handling")
+    mod.COMPENSATED.clear()
+    comms = InProcessComms()
+    comms.register("role:writer", Writer())
+    comms.register("role:check", FailValidator())
+    es = EnvelopeStore(MemoryStore())
+    await es.save("agent1:RID:branch", Envelope(Kind.RESULT, {"stale": True}))
+    h = Harness(comms, _failing_graph(
+        {"compensate": "fn:test_error_handling:failing_compensate_fn",
+         "on_compensate_fail": "warn"}), envelope_store=es)
+    caught = None
+    try:
+        await h.run(Envelope(Kind.TASK, {}, {"correlation_id": "RID"}))
+    except StageFailed as e:
+        caught = e
+    assert caught is not None, "the original failure still propagates"
+    codes = [f.code for f in caught.verdict.failures]
+    assert codes == ["not_ok"], codes                     # ONLY the original, not compensation_failed
+    assert len(mod.COMPENSATED) == 1, "the undo was attempted"
+    assert await es.list("agent1:RID:") == [], "parked set still flushed"
+
+
+async def scenario_compensate_node_failure_escalates() -> None:
+    # slop-fix #6, node: path — a node: undo target that RAISES is caught the same
+    # as an fn: one (comms.request awaits invoke directly), and escalates by default.
+    # (A node target that instead RETURNS an error envelope does not raise, so it is
+    # NOT detectable as a compensation failure — there is no engine contract for a
+    # result payload meaning "undo failed"; only a raise is a uniform failure signal.)
+    comms = InProcessComms()
+    comms.register("role:writer", Writer())
+    comms.register("role:check", FailValidator())
+    comms.register("role:undo", RaisingUndoNode())
+    h = Harness(comms, _failing_graph({"compensate": "node:role:undo"}))
+    caught = None
+    try:
+        await h.run(Envelope(Kind.TASK, {}, {"correlation_id": "RID"}))
+    except StageFailed as e:
+        caught = e
+    assert caught is not None, "a raising node: undo escalates by default"
+    codes = [f.code for f in caught.verdict.failures]
+    assert "compensation_failed" in codes and "not_ok" in codes, codes
+
+
 async def scenario_no_on_error_fails_through() -> None:
     comms = InProcessComms()
     comms.register("role:writer", Writer())
@@ -161,6 +249,9 @@ async def main() -> None:
     await scenario_on_error_clear_publishes_and_flushes()
     await scenario_on_error_compensate_fn()
     await scenario_on_error_compensate_node()
+    await scenario_compensate_failure_default_escalates()
+    await scenario_compensate_failure_warn_tolerates()
+    await scenario_compensate_node_failure_escalates()
     await scenario_no_on_error_fails_through()
     await scenario_flush_drops_parked_set()
     scenario_build_parses_on_error()

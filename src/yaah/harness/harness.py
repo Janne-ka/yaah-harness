@@ -716,7 +716,8 @@ class Harness:
           - {"compensate": T} (side-effecting node): run the node-specific undo target
             T (a call_target fn:/node:/http:), which receives the corr + failed
             artifact + error codes so it can target what to roll back, then drop the
-            parked set.
+            parked set. If the undo itself fails, `on_compensate_fail` picks the
+            severity ("error" default = escalate loud / "warn" = note + tolerate).
         No-op when `on_error` is unset (fail straight through). It does NOT swallow the
         failure — recovery runs, then the caller still raises StageFailed; cleanup
         leaves the system ready, it doesn't paper over the error."""
@@ -734,7 +735,38 @@ class Harness:
             ctx = {"correlation_id": corr, "node": node_id,
                    "payload": dict(out.payload),
                    "error": [f.code for f in verdict.failures]}
-            await call_target(oe["compensate"], ctx, comms=self.comms)
+            # The undo can ITSELF fail (rollback target down / raises). The
+            # component declares how loud via `on_compensate_fail` (slop-fix #6):
+            #   "error" (default) → escalate: the un-undone side-effect is live, so
+            #                       fail loud, carrying the ORIGINAL failures PLUS a
+            #                       compensation_failed one (masks nothing).
+            #   "warn"            → tolerate: NOTE it in the trace, let the original
+            #                       StageFailed surface (caller re-raises it).
+            # `flush` (parked-set bookkeeping, independent of the external effect)
+            # always runs.
+            # Bounds: only a RAISED failure is caught (fn:/http: that raise, node:
+            # whose invoke raises) — a node: target that instead RETURNS an error
+            # envelope doesn't raise, so it reads as success (no engine contract for
+            # "a result payload means the undo failed"). An unknown on_compensate_fail
+            # value falls to the "error" branch (fail loud — the safe default).
+            try:
+                await call_target(oe["compensate"], ctx, comms=self.comms)
+            except Exception as ce:  # the undo failed
+                # Trace + StageFailed identity is stage.name (as everywhere else —
+                # the origin span at _drive and the origin StageFailed both use it);
+                # node_id/parked_prefix stay the addressing identity for bookkeeping.
+                await self._spans.note(stage.name, input, status="error", attrs={
+                    "event": "compensation_failed", "target": str(oe["compensate"]),
+                    "on_compensate_fail": oe.get("on_compensate_fail", "error"),
+                    "error": str(ce)})
+                await self._envelopes.flush(parked_prefix)
+                if oe.get("on_compensate_fail", "error") == "warn":
+                    return  # noted; the original StageFailed re-raises at the caller
+                raise StageFailed(stage.name, Verdict.failed(
+                    *verdict.failures,
+                    Failure("compensation_failed",
+                            "compensate target {!r} failed: {}".format(oe["compensate"], ce))),
+                    out) from ce
             await self._envelopes.flush(parked_prefix)
 
     async def _validate(self, stage: Stage, out: Envelope) -> "tuple[Verdict, List[dict]]":
