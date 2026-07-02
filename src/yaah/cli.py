@@ -64,6 +64,7 @@ Debug:
 
 Diagnose:
   manual                        print the generated agent manual (for LLM authors)
+  mcp-serve                     serve validate/run/gates as MCP tools over stdio
   validate <root>               validate root + referenced pipeline file (no run)
                                   [--strict] [--from-code] [--json (machine-readable diagnostics)]
   doctor                        diagnose install: Python version, optional deps, packaged base configs
@@ -167,6 +168,12 @@ def _parse_init(rest: list) -> dict:
     if len(rest) > 1:
         _usage_exit("init takes one argument (the target directory)")
     return {"action": "scaffold", "target_dir": rest[0], "archetype": "linear"}
+
+
+def _parse_mcp_serve(rest: list) -> dict:
+    if rest:
+        _usage_exit("mcp-serve takes no arguments (configs are named per tool call)")
+    return {"action": "mcp-serve"}
 
 
 def _parse_manual(rest: list) -> dict:
@@ -303,6 +310,7 @@ def _parse_baton_schema(rest: list) -> dict:
 _VERB_PARSERS: Dict[str, Callable[[list], dict]] = {
     "init":          _parse_init,
     "manual":        _parse_manual,
+    "mcp-serve":     _parse_mcp_serve,
     "scaffold":      _parse_scaffold,
     "run":           _parse_run,
     "list":          _parse_via_flag("--list"),
@@ -430,6 +438,14 @@ def _dispatch_manual(spec: Dict[str, Any]) -> None:
     print(build_manual())
 
 
+def _dispatch_mcp_serve(spec: Dict[str, Any]) -> None:
+    """Serve yaah's operator surface as MCP tools over stdio (newline-delimited
+    JSON-RPC): validate / run / list_gates / baton_schema / resume — so any
+    MCP-capable agent host operates yaah natively, no CLI string parsing."""
+    from .adapters.mcp_server import serve_process_stdio
+    asyncio.run(serve_process_stdio())
+
+
 def _dispatch_scaffold(spec: Dict[str, Any]) -> None:
     """Write the named archetype's template into target_dir. `yaah init <dir>`
     enters here with archetype="linear" (back-compat)."""
@@ -453,6 +469,7 @@ _SELF_CONTAINED_DISPATCH: Dict[str, Callable[[Dict[str, Any]], None]] = {
     "trace":         _dispatch_trace,
     "scaffold-list": _dispatch_scaffold_list,
     "manual":        _dispatch_manual,
+    "mcp-serve":     _dispatch_mcp_serve,
     "scaffold":      _dispatch_scaffold,
 }
 
