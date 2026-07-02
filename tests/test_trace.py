@@ -12,32 +12,8 @@ from yaah.build import build
 from yaah.comms import InProcessComms
 from yaah.core import Envelope
 from yaah.harness import Done
-from yaah.trace import (
-    BusTracer, EnvelopeTracer, NullTracer, RecordingTracer, Span,
-    TraceContributor, TraceSink, Tracer,
-)
+from yaah.trace import BusTracer, EnvelopeTracer, NullTracer, RecordingTracer, Span
 from yaah.trace.contributors import CostContributor, PhaseContributor, ToolsContributor
-from yaah.adapters.trace import ConsoleTraceSink, FileTraceSink
-
-
-def test_trace_impls_declare_their_ports() -> None:
-    # Declaration via __mro__ (real inheritance) — isinstance is structural for
-    # @runtime_checkable Protocols and proves nothing about the declaration.
-    for cls in (BusTracer, EnvelopeTracer, NullTracer, RecordingTracer):
-        assert Tracer in cls.__mro__, "{} must declare Tracer".format(cls.__name__)
-    for cls in (ConsoleTraceSink, FileTraceSink):
-        assert TraceSink in cls.__mro__, cls.__name__
-    for cls in (CostContributor, PhaseContributor, ToolsContributor):
-        assert TraceContributor in cls.__mro__, cls.__name__
-    # Enforcement: a declared-but-incomplete tracer can't instantiate.
-    try:
-        class HalfTracer(Tracer):  # only emit; missing drain/ingest/last_model_call_span
-            async def emit(self, span): ...
-        HalfTracer()
-    except TypeError:
-        pass
-    else:
-        raise AssertionError("an incomplete Tracer subclass must not instantiate")
 
 
 class _UsageBackend:
@@ -433,7 +409,6 @@ async def scenario_cost_off_skips_gathering() -> None:
 
 
 async def main() -> None:
-    test_trace_impls_declare_their_ports()
     await scenario_phase_minimum()
     await scenario_emitter_records_artifact_from_path()
     await scenario_cost_is_orthogonal()

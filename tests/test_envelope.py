@@ -39,7 +39,7 @@ def main() -> None:
     malformed = Verdict.from_envelope(Envelope(Kind.ERROR, {"oops": True}))
     assert not malformed.ok and malformed.severity == "hard"
 
-    # M4 foot-gun (slop-fix #9): a payload key named "sender" must stay in the PAYLOAD.
+    # The sender foot-gun: a payload key named "sender" must stay in the PAYLOAD.
     # reply_with treats the payload as opaque data, so nodes spread through it; the old
     # reply(**payload) would have bound the `sender` KWARG instead — dropping it from the
     # payload and lifting it into the header. This is why the nodes were converted.

@@ -33,14 +33,11 @@ class IdempotencyStore(StoreBackedFacade[StoreBackend]):  # core tier only
         return json.loads(raw.decode()) if raw is not None else None
 
     async def finalize(self, key: str, result: Dict[str, Any]) -> None:
-        """Record the result of the first (and only) run for `key`. Uses CAS
-        with expected=None (create-if-absent) when the backing store supports
-        it (assessment cluster 2 B4): two concurrent first-runs both called
-        `put` previously, so both wrote and both executed the side effect.
-        With CAS, only the first writer wins; the second `finalize` is a
-        no-op (the cached result is whatever the first writer recorded —
-        callers must lookup() to read it). Stores without `cas` fall back to
-        `put` (Phase A sequential-only guarantee per docs/durable-state.md)."""
+        """Record the first run's result. Uses CAS create-if-absent when the
+        backend supports it, so concurrent first-runs commit exactly one winner
+        (a losing finalize is a no-op; lookup() reads the winner). Core-tier
+        backends fall back to put — sequential-only guarantee, see
+        docs/durable-state.md."""
         encoded = json.dumps(result).encode()
         cas = getattr(self._store, "cas", None)
         if cas is not None:

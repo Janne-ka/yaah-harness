@@ -20,13 +20,13 @@ from __future__ import annotations
 import json
 from typing import List, Optional
 
-from ..store import ScannableStore, StoreBackedFacade
+from ..store import ScannableBackend, StoreBackedFacade
 from .baton import Baton
 
 
-class BatonStore(StoreBackedFacade[ScannableStore]):  # +SCAN: sweep/list need scan
+class BatonStore(StoreBackedFacade[ScannableBackend]):  # +SCAN: sweep/list need scan
     PREFIX = "baton:"
-    REQUIRES = ScannableStore  # checked at construction (fail fast)
+    REQUIRES = ScannableBackend  # checked at construction (fail fast)
 
     async def save(self, baton: Baton) -> None:
         await self._store.put(self.PREFIX + baton.id, json.dumps(baton.to_dict()).encode())

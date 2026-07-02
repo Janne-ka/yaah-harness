@@ -141,18 +141,9 @@ def test_native_backend_satisfies_apiprovider_protocol():
 
 
 def test_supports_turn_is_a_distinct_optional_capability():
-    # The tool-loop capability is EXPLICIT and separate from ApiProvider: a
-    # tool-capable backend is both; claude_cli is an ApiProvider but NOT
-    # SupportsTurn (it runs its own tool loop — Agent must check, not assume).
-    #
-    # Two things to verify, and they need DIFFERENT checks:
-    #   (a) runtime CAPABILITY — isinstance (structural: is `turn` present?). This
-    #       is what the engine actually keys on.
-    #   (b) explicit DECLARATION — `X in __mro__`. isinstance can't prove this: a
-    #       @runtime_checkable Protocol matches by shape, so isinstance would pass
-    #       even for a class that only conforms structurally (that made an earlier
-    #       version of this test vacuous w.r.t. the declaration).
-    # (a) capability:
+    # The tool-loop capability the engine keys on (isinstance = structural: is
+    # `turn` present?). claude_cli deliberately has none — it runs its own tool
+    # loop. The DECLARATION side (explicit bases, via __mro__) lives in test_ports.py.
     assert isinstance(FakeToolProvider(turns=[]), SupportsTurn)      # has turn()
     assert isinstance(FakeToolProvider(turns=[]), ApiProvider)
     claude = ClaudeCliProvider()
@@ -160,10 +151,6 @@ def test_supports_turn_is_a_distinct_optional_capability():
     assert not isinstance(claude, SupportsTurn), \
         "claude_cli has no native turn() — the capability must read as absent"
     assert not isinstance(FakeProvider(responses=["x"]), SupportsTurn)
-    # (b) declaration (falsifies if a backend drops the port from its bases):
-    assert SupportsTurn in FakeToolProvider.__mro__ and ApiProvider in FakeToolProvider.__mro__
-    assert ApiProvider in ClaudeCliProvider.__mro__ and SupportsTurn not in ClaudeCliProvider.__mro__
-    assert ApiProvider in FakeProvider.__mro__ and SupportsTurn not in FakeProvider.__mro__
 
 
 if __name__ == "__main__":

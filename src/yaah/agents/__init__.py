@@ -3,9 +3,8 @@ zero-dependency reference backends (Fake / Scripted / Routing). The external
 model providers (claude_cli, litellm) are swap-in adapters in
 yaah.adapters.providers. One class per file; re-exported for convenience.
 
-Every backend implements ApiProvider (`stream()`) natively. Backend type
-annotations use `Any` (structural duck-typing) — or `ApiProvider` where
-streaming is explicitly required.
+Every provider implements ApiProvider (`stream()`) natively and DECLARES it
+in its class header; tool-capable providers also declare SupportsTurn.
 """
 from .agent import Agent
 from .api_provider import ApiProvider

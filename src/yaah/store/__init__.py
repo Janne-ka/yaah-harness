@@ -10,7 +10,7 @@ from .envelope_store import EnvelopeStore
 from .facade import StoreBackedFacade
 from .idempotency import IdempotencyStore
 from .memory_backend import MemoryBackend
-from .store import CompareAndSet, Scannable, ScannableStore, StoreBackend
+from .store import CompareAndSet, Scannable, ScannableBackend, StoreBackend
 
-__all__ = ["StoreBackend", "Scannable", "CompareAndSet", "ScannableStore",
+__all__ = ["StoreBackend", "Scannable", "CompareAndSet", "ScannableBackend",
            "StoreBackedFacade", "MemoryBackend", "IdempotencyStore", "EnvelopeStore"]

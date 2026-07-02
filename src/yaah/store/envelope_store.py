@@ -20,12 +20,12 @@ from typing import List, Optional, Tuple
 
 from ..core import Envelope
 from .facade import StoreBackedFacade
-from .store import ScannableStore
+from .store import ScannableBackend
 
 
-class EnvelopeStore(StoreBackedFacade[ScannableStore]):  # +SCAN: `list` needs scan
+class EnvelopeStore(StoreBackedFacade[ScannableBackend]):  # +SCAN: `list` needs scan
     PREFIX = "env:"
-    REQUIRES = ScannableStore  # checked at construction (fail fast)
+    REQUIRES = ScannableBackend  # checked at construction (fail fast)
 
     async def save(self, key: str, envelope: Envelope, *, ttl: Optional[float] = None) -> None:
         """Park `envelope` under `key` (overwrites). `ttl` (where the backend honors it)

@@ -17,6 +17,12 @@ Pass `--no-coverage` for a fast LOCAL DEV LOOP only — it bypasses the
 gate entirely and is not safe for CI or pre-commit. `--coverage` is the
 explicit opt-in (kept for symmetry / readability) but matches the default.
 
+mypy RATCHET: when mypy is installed, the error count must not exceed
+scripts/mypy_baseline.txt. A ratchet (not zero-errors) so the gate is real
+TODAY while the legacy `Any`-seam tail is paid down batch by batch — lower
+the baseline as errors are fixed, never raise it. mypy missing = a NOTE,
+not a failure (the suite stays runnable offline with zero deps).
+
 Run: python scripts/run_tests.py               (from the yaah/ directory)
      python scripts/run_tests.py --no-coverage  (dev loop, skips the gate)
 
@@ -40,6 +46,34 @@ def _coverage_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def _mypy_ratchet(env: dict) -> int:
+    """Contract gate: mypy's error count must not EXCEED the recorded baseline
+    (scripts/mypy_baseline.txt). Returns 0 ok / 1 regression. Skips with a note
+    when mypy isn't installed — the ratchet is for envs that have the dev deps."""
+    try:
+        import mypy  # noqa: F401
+    except Exception:
+        print("NOTE: mypy not installed — contract ratchet skipped "
+              "(pip install mypy to enforce it).")
+        return 0
+    baseline_file = os.path.join(HERE, "mypy_baseline.txt")
+    baseline = int(open(baseline_file).read().strip())
+    r = subprocess.run([sys.executable, "-m", "mypy"], cwd=ROOT, env=env,
+                       capture_output=True, text=True)
+    count = sum(1 for line in r.stdout.splitlines() if ": error:" in line)
+    if count > baseline:
+        print("FAIL: mypy errors went {} -> {} (baseline {}). New type errors:"
+              .format(baseline, count, baseline_file))
+        print(r.stdout[-3000:])
+        return 1
+    if count < baseline:
+        print("mypy: {} errors (< baseline {}) — ratchet down: echo {} > {}"
+              .format(count, baseline, count, os.path.relpath(baseline_file, ROOT)))
+    else:
+        print("mypy: {} errors (= baseline, ok)".format(count))
+    return 0
 
 
 def main(argv=None) -> int:
@@ -89,6 +123,9 @@ def main(argv=None) -> int:
     print("PASS={} FAIL={}{}".format(
         passed, len(failed), (" " + " ".join(failed)) if failed else ""))
     if failed:
+        return 1
+
+    if _mypy_ratchet(env) != 0:
         return 1
 
     if not use_cov:

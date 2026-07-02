@@ -33,15 +33,14 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .node_contract import Flow, _as_key_set, apply, meet, resolve_contract
+from .node_contract import Flow, apply, meet, resolve_contract
 from .templating import PLACEHOLDER as _PLACEHOLDER   # the {{mustache}} a render fills — one copy
 
-# A provides value on an edge is either TOP (the fixpoint identity — "not yet reached") or a
+# A provides value on an edge is None (the fixpoint identity — "not yet reached") or a
 # concrete Flow (known keys + how exact the set is). This module holds NO per-node key
 # knowledge: each node's contract comes from `node_contract.resolve_contract`, and the
 # lattice just applies it (ADR-0006).
-_TOP = object()
-Provides = Any  # _TOP | Flow
+Provides = Optional[Flow]
 
 
 def _undeclared_envelope_transform(node: Dict[str, Any]) -> bool:
@@ -52,22 +51,13 @@ def _undeclared_envelope_transform(node: Dict[str, Any]) -> bool:
             and not isinstance(node.get("provides"), list))
 
 
-def _meet(a: Provides, b: Provides) -> Provides:
-    """Greatest lower bound over predecessor paths. TOP is the identity (an unreached pred)."""
-    if a is _TOP:
-        return b
-    if b is _TOP:
-        return a
-    return meet(a, b)
-
-
 def _transfer(node: Optional[Dict[str, Any]], pin: Provides, sticky: Set[str],
-              tainted: List[str], stage_name: str) -> Provides:
+              tainted: List[str], stage_name: str) -> Flow:
     """How this stage's node rewrites the incoming flow. A routing stage (no node) passes the
     payload through; every real node's effect comes from its resolved contract — the module
     has no per-type key table. An undeclared envelope-transform resolves to `opaque` (nothing
     checkable downstream) AND records a taint so its consumers get a companion nudge."""
-    if pin is _TOP:
+    if pin is None:
         pin = Flow()   # unreachable-safe; reachable stages get a concrete pin
     sticky_fs = frozenset(sticky)
     if node is None:
@@ -113,7 +103,7 @@ def compute_provides(nodes: Dict[str, Any], stages: Dict[str, Any], sticky: Set[
     (retry/`then` cycles) are handled by the fixpoint, not a special case. Unreached
     stages stay TOP. Returns ({stage: provides_in}, predecessor-map) — the caller reuses
     the predecessor map rather than recomputing it."""
-    pin: Dict[str, Provides] = {s: _TOP for s in stages}
+    pin: Dict[str, Provides] = {s: None for s in stages}
     if start in stages:
         pin[start] = Flow()   # the entry payload is the unknowable INPUT (incomplete)
     preds = _edges(stages)
@@ -129,14 +119,16 @@ def compute_provides(nodes: Dict[str, Any], stages: Dict[str, Any], sticky: Set[
             # from `start`, so it never runs and must not taint the merge (a real path that
             # provides the key would otherwise be intersected away → false warning).
             incoming = [_transfer(nodes.get(stages[p].get("node")), pin[p], sticky,
-                                  tainted, p) for p in preds[s] if pin[p] is not _TOP]
+                                  tainted, p) for p in preds[s] if pin[p] is not None]
             if not incoming:
                 continue  # no reachable predecessors: keep the seed (start) or TOP (unreached)
-            merged = incoming[0]
+            merged: Flow = incoming[0]
             for nxt in incoming[1:]:
-                merged = _meet(merged, nxt)
-            if start in stages and s == start:
-                merged = _meet(merged, pin[start])  # entry payload always joins the start
+                merged = meet(merged, nxt)          # all incoming are concrete Flows
+            if s == start:
+                entry = pin.get(s)                  # == pin[start]; s is the narrowed str
+                if entry is not None:
+                    merged = meet(merged, entry)    # entry payload always joins the start
             if merged != pin[s]:
                 pin[s] = merged
                 changed = True
@@ -251,8 +243,8 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
 
     for s_name, s in stages.items():
         node = nodes.get(s.get("node")) or {}
-        pin_here = pin.get(s_name, _TOP)
-        if pin_here is _TOP:
+        pin_here = pin.get(s_name)
+        if pin_here is None:
             continue  # unreachable stage — never runs, nothing to check
         # branch.on reads the payload AFTER this stage's node runs (the node's OUTPUT).
         on = (s.get("branch") or {}).get("on")

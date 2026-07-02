@@ -18,7 +18,7 @@ B = TypeVar("B", bound=StoreBackend)  # the backend tier THIS facade needs
 class StoreBackedFacade(Generic[B]):
     PREFIX = ""  # namespace this facade's keys carry into the shared backend
     # The tier the facade requires, VALIDATED at construction (fail fast, not
-    # mid-run): a facade whose list/sweep needs scan() sets REQUIRES = ScannableStore,
+    # mid-run): a facade whose list/sweep needs scan() sets REQUIRES = ScannableBackend,
     # so wiring it to a core-only backend raises here instead of AttributeError
     # deep in a baton sweep. isinstance works because the tiers are
     # @runtime_checkable Protocols.

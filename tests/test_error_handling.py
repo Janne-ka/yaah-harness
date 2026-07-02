@@ -132,7 +132,7 @@ async def scenario_on_error_compensate_node() -> None:
 
 
 async def scenario_compensate_failure_default_escalates() -> None:
-    # slop-fix #6: when the undo ITSELF fails and on_compensate_fail is unset,
+    # When the undo ITSELF fails and on_compensate_fail is unset,
     # the default is "error" — escalate, carrying the ORIGINAL failure PLUS a
     # compensation_failed one (masks nothing), and the parked set still flushes.
     import importlib
@@ -159,7 +159,7 @@ async def scenario_compensate_failure_default_escalates() -> None:
 
 
 async def scenario_compensate_failure_warn_tolerates() -> None:
-    # slop-fix #6: on_compensate_fail="warn" — a failed undo is NOTED, and the
+    # on_compensate_fail="warn": a failed undo is NOTED, and the
     # ORIGINAL StageFailed surfaces (not a compensation_failed one); flush runs.
     import importlib
     mod = importlib.import_module("test_error_handling")
@@ -185,7 +185,7 @@ async def scenario_compensate_failure_warn_tolerates() -> None:
 
 
 async def scenario_compensate_node_failure_escalates() -> None:
-    # slop-fix #6, node: path — a node: undo target that RAISES is caught the same
+    # node: path — a node: undo target that RAISES is caught the same
     # as an fn: one (comms.request awaits invoke directly), and escalates by default.
     # (A node target that instead RETURNS an error envelope does not raise, so it is
     # NOT detectable as a compensation failure — there is no engine contract for a

@@ -236,17 +236,15 @@ ContractFor = Callable[[Any, Dict[str, Any]], Optional[Contract]]
 
 
 def resolve_contract(ntype: Any, cfg: Dict[str, Any], *,
-                     contract_for: Optional[ContractFor] = None,
-                     manifest: Optional[ContractFor] = None,
-                     live: Optional[ContractFor] = None) -> Contract:
-    """Resolve a node's contract, in precedence order (ADR-0006 §D3). NEVER raises. Must NOT
-    be called for a routing stage (node is None) — the lattice short-circuits those to
-    `preserve()` before calling here (D4).
+                     contract_for: Optional[ContractFor] = None) -> Contract:
+    """Resolve a node's contract (ADR-0006 §D3). NEVER raises. Must NOT be called for a
+    routing stage (node is None) — the lattice short-circuits those to `preserve()`
+    before calling here (D4).
 
-    1. a registered/built-in contract for the type (the static `describe()` binding),
-    2. a frozen manifest (D7, later), 3. a live `describe()` (D7, later),
-    4. else: inline config `provides:` → a checkable preserve; otherwise OPAQUE (sound skip —
-       NEVER a preserve-with-complete default, which is the current soundness bug).
+    A registered/built-in contract for the type via `contract_for` (injectable — the
+    seam a frozen-manifest or live-describe source plugs into when D7 ships); else
+    inline config `provides:` → a checkable preserve; otherwise OPAQUE (sound skip —
+    NEVER a preserve-with-complete default, which was the soundness bug).
 
     Inline `provides:` on a KNOWN node AUGMENTS its contract (only grows `known`, so it can
     hide a gap — a documented escape hatch — never manufacture a false positive)."""
@@ -254,10 +252,6 @@ def resolve_contract(ntype: Any, cfg: Dict[str, Any], *,
         contract_for = builtin_contract_for
     try:
         base = contract_for(ntype, cfg)
-        if base is None and manifest is not None:
-            base = manifest(ntype, cfg)
-        if base is None and live is not None:
-            base = live(ntype, cfg)
         inline = cfg.get("provides") if isinstance(cfg, dict) else None
         inline_set = (frozenset(x for x in inline if isinstance(x, str))
                       if isinstance(inline, list) else None)

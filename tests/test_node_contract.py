@@ -156,10 +156,11 @@ def resolve_never_raises() -> None:
     assert isinstance(resolve_contract("agent", None), Contract)  # cfg not a dict
     assert isinstance(resolve_contract(None, {}), Contract)       # no type
 
-def resolve_manifest_then_live_fallback() -> None:
-    # unknown to built-ins, but a manifest supplies it → used; inline still augments.
-    man = lambda t, cfg: reset({"m1"}, closed=True) if t == "ext" else None
-    c = resolve_contract("ext", {"provides": ["m2"]}, manifest=man)
+def resolve_contract_for_is_injectable() -> None:
+    # the injection seam: a custom source (e.g. a future frozen manifest) supplies a
+    # contract for a type built-ins do not know → used; inline still augments.
+    src = lambda t, cfg: reset({"m1"}, closed=True) if t == "ext" else None
+    c = resolve_contract("ext", {"provides": ["m2"]}, contract_for=src)
     assert c.mode == "reset" and {"m1", "m2"} <= c.provides, c
 
 
@@ -205,43 +206,13 @@ def closed_implies_complete() -> None:
 
 
 def main() -> None:
-    agent_parse_false_is_closed_raw()
-    agent_parse_false_forwards_carry_and_cwd()
-    agent_parse_true_no_schema_is_incomplete()
-    agent_with_schema_is_complete_but_never_closed()
-    agent_never_closed_even_with_additionalProperties_false()
-    agent_provides_without_schema_is_complete()
-    shell_is_complete_not_closed()
-    shell_forwards_cwd_and_carry()
-    worktree_add_is_closed()
-    worktree_add_default_op()
-    worktree_add_carries()
-    worktree_remove_does_not_carry()
-    transform_args_preserves_into()
-    transform_envelope_declared_preserves_provides()
-    transform_envelope_undeclared_is_opaque()
-    render_provides_output_and_path()
-    human_gate_provides_decision()
-    get_default_into_is_data_not_result()
-    post_default_into_is_stored()
-    agent_loop_preserves_and_adds_three()
-    validators_reset_to_verdict_keys()
-    contracts_never_raise_on_malformed_cfg()
-    builtin_contract_for_unknown_is_none()
-    builtin_contract_for_matches_direct_call()
-    resolve_unknown_no_inline_is_opaque()
-    resolve_unknown_with_inline_is_checkable_preserve()
-    resolve_inline_augments_known_contract()
-    resolve_known_without_inline_is_the_base()
-    resolve_never_raises()
-    resolve_manifest_then_live_fallback()
-    apply_preserve_adds_and_keeps_flags()
-    apply_reset_replaces_and_sets_flags()
-    apply_preserve_declared_drops_closed_keeps_complete()
-    apply_sticky_survives_reset()
-    apply_opaque_drops_all_but_sticky_and_flags_false()
-    meet_intersects_and_ands()
-    closed_implies_complete()
+    # discovery, not a hand-list: every module-level test function runs (a new
+    # test can't be silently forgotten). Tests = public functions defined HERE.
+    for name, fn in sorted(globals().items()):
+        import types
+        if (isinstance(fn, types.FunctionType) and fn.__module__ == __name__
+                and not name.startswith("_") and name != "main"):
+            fn()
     print("ok")
 
 

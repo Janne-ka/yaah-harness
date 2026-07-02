@@ -18,10 +18,8 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import AsyncGenerator, Optional, Protocol, Tuple, runtime_checkable
 
-# The tier methods are @abstractmethod so a class that DECLARES a tier
-# (`class MemoryBackend(StoreBackend, Scannable, CompareAndSet)`) can't be instantiated
-# unless it implements every method — a visible, runtime-enforced contract.
-# Structural conformance still works for an impl that doesn't inherit the tier.
+# Tier methods are @abstractmethod — same declare-your-port enforcement as every
+# yaah port (the canonical explanation lives on core/node.py).
 
 
 @runtime_checkable
@@ -59,8 +57,8 @@ class CompareAndSet(Protocol):
 
 
 @runtime_checkable
-class ScannableStore(StoreBackend, Scannable, Protocol):
+class ScannableBackend(StoreBackend, Scannable, Protocol):
     """Core + SCAN, as ONE type — the tier the envelope/baton facades require (their
     `list`/`sweep` need `scan`). A backend implementing both tiers (MemoryBackend,
-    FileBackend) satisfies it structurally; `StoreBackedFacade[ScannableStore]` is how
+    FileBackend) satisfies it structurally; `StoreBackedFacade[ScannableBackend]` is how
     a facade declares it needs more than the core tier."""

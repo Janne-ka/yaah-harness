@@ -24,7 +24,7 @@ class Failure:
     # note "the two paths can't diverge"; these factories LOCK that — one `code` string and
     # (for schema_mismatch) the `errors[:8]` cap the harness retry loop reads — while each
     # caller keeps its own subject/fix_hint. See the three sites in agents/agent.py and
-    # validators/. (ADR-0006 slop-fix #4.)
+    # validators/.
 
     @classmethod
     def not_json(cls, exc: object, *, subject: str = "output",

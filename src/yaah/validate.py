@@ -719,7 +719,7 @@ def _gate_decision_outcomes(node: Dict[str, Any], forms: Dict[str, Any]) -> Opti
 
 def _lint_gate_ignores_rejection(nodes: Dict[str, Any], stages: Dict[str, Any],
                                  warnings: List[str]) -> None:
-    """Rule `gate-decision-ignored` (slop-fix #5). A human_gate whose form admits >= 2 decision
+    """Rule `gate-decision-ignored`. A human_gate whose form admits >= 2 decision
     outcomes (e.g. `approve_or_revise`) is only meaningful if the run ROUTES on `decision` — the
     harness's `_next_stage` returns `then` whenever a stage has no branch, so with nothing
     branching on `decision` a non-approve decision is silently ignored (the worst HITL failure).
@@ -729,12 +729,8 @@ def _lint_gate_ignores_rejection(nodes: Dict[str, Any], stages: Dict[str, Any],
     and we suppress the nudge if ANY stage branches on `decision` (assume it's handled → no false
     positive). `approve` (one outcome) and `free_text` (no decision) never trigger.
 
-    Known limitation: the suppression is pipeline-wide, not per-gate. A pipeline with two gates
-    where only ONE routes on `decision` suppresses the warning for BOTH — a false negative for the
-    unrouted gate. Accepted deliberately: gates sharing one `decision` key is the common shape, and
-    a per-gate reachability check (does a stage AFTER this gate branch on its decision) is more
-    engine than a lint nudge warrants. Revisit if multi-gate pipelines with independent decisions
-    become common."""
+    The suppression is pipeline-wide, so a SECOND gate whose decision goes unrouted is a false
+    negative — acceptable while gates share one `decision` key."""
     from .harness.decision_forms import FORMS
     branches_on_decision = any(
         (s.get("branch") or {}).get("on") == "decision" for s in stages.values())

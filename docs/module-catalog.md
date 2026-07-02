@@ -38,7 +38,7 @@ The structural interfaces the engine depends on. Each port has one or more concr
 | `McpSource` | `src/yaah/mcp/mcp_source.py` | `async get(key: str) -> Dict[str, Any]` |
 | `PromptSource` | `src/yaah/prompts/prompt_source.py` | `async get(key: str) -> str` |
 | `Scannable` | `src/yaah/store/store.py` | `scan(prefix: str) -> AsyncGenerator[Tuple[str, bytes], None]` |
-| `ScannableStore` | `src/yaah/store/store.py` | — |
+| `ScannableBackend` | `src/yaah/store/store.py` | — |
 | `StoreBackend` | `src/yaah/store/store.py` | `async get(key: str) -> Optional[bytes]`<br>`async put(key: str, value: bytes) -> None`<br>`async delete(key: str) -> None` |
 | `Subscription` | `src/yaah/comms/comms.py` | `cancel() -> None` |
 | `SupportsTurn` | `src/yaah/agents/api_provider.py` | `async turn(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]` |

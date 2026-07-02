@@ -735,20 +735,11 @@ class Harness:
             ctx = {"correlation_id": corr, "node": node_id,
                    "payload": dict(out.payload),
                    "error": [f.code for f in verdict.failures]}
-            # The undo can ITSELF fail (rollback target down / raises). The
-            # component declares how loud via `on_compensate_fail` (slop-fix #6):
-            #   "error" (default) → escalate: the un-undone side-effect is live, so
-            #                       fail loud, carrying the ORIGINAL failures PLUS a
-            #                       compensation_failed one (masks nothing).
-            #   "warn"            → tolerate: NOTE it in the trace, let the original
-            #                       StageFailed surface (caller re-raises it).
-            # `flush` (parked-set bookkeeping, independent of the external effect)
-            # always runs.
-            # Bounds: only a RAISED failure is caught (fn:/http: that raise, node:
-            # whose invoke raises) — a node: target that instead RETURNS an error
-            # envelope doesn't raise, so it reads as success (no engine contract for
-            # "a result payload means the undo failed"). An unknown on_compensate_fail
-            # value falls to the "error" branch (fail loud — the safe default).
+            # The undo can ITSELF fail; `on_compensate_fail` picks the severity
+            # (see docstring; unknown values fall to "error" — fail loud). Only a
+            # RAISED failure counts — a node: target RETURNING an error envelope
+            # reads as success (no payload-level failure contract). `flush`
+            # (bookkeeping) always runs.
             try:
                 await call_target(oe["compensate"], ctx, comms=self.comms)
             except Exception as ce:  # the undo failed

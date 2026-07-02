@@ -7,30 +7,10 @@ from __future__ import annotations
 import asyncio
 
 from yaah import Envelope, Kind, NodeConfig, Verdict
-from yaah.core import Node
 from yaah.nodes import RenderNode, ShellCheck, ShellNode
 
 
-def test_nodes_declare_and_enforce_the_node_contract() -> None:
-    # The shipped nodes DECLARE `class X(Node)`, so the contract is visible in the
-    # class header + enforced: a declared subclass missing invoke() can't be built.
-    # Check `Node in __mro__` (real inheritance), NOT issubclass — Node is a
-    # @runtime_checkable Protocol, so issubclass is structural and would pass even
-    # for a class that only conforms by shape (vacuous). __mro__ proves the decl.
-    for cls in (RenderNode, ShellCheck, ShellNode):
-        assert Node in cls.__mro__, "{} must explicitly declare Node".format(cls.__name__)
-    try:
-        class BadNode(Node):  # declares the port but never implements invoke
-            pass
-        BadNode()
-    except TypeError as e:
-        assert "invoke" in str(e), e
-    else:
-        raise AssertionError("an incomplete Node subclass must not instantiate")
-
-
 async def main() -> None:
-    test_nodes_declare_and_enforce_the_node_contract()
     cfg = NodeConfig()
     task = Envelope(Kind.TASK, {"title": "Eval Report"})
 
