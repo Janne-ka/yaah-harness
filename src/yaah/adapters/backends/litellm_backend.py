@@ -6,11 +6,10 @@ Where: hosts with `pip install litellm` + a provider key.
 Why: one provider-agnostic call for non-Claude models; litellm is imported
 lazily so it's only required if this backend is actually used.
 
-After B2.5 (provider unification): native ApiProvider. `stream()` is the
-canonical method — it calls litellm's acompletion once and projects the
-response into the StreamEvent vocabulary (text_delta + toolcall_end + done).
-`complete()` / `turn()` are thin wrappers over the module-level helpers so
-existing consumers stay green.
+A native ApiProvider: `stream()` is its completion method — it calls litellm's
+acompletion once and projects the response into the StreamEvent vocabulary
+(text_delta + toolcall_end + done). `turn()` is kept as the tool-loop entry.
+Collected-text callers use the module-level `api_provider.complete()`.
 
 Real chunk-by-chunk streaming (passing `stream=True` to acompletion and
 iterating the SSE chunks) is a FOLLOW-UP — the upgrade requires updating

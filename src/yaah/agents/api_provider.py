@@ -202,7 +202,11 @@ async def stream_of(provider: Any, context: Context, **opts: Any) -> AsyncIterat
     used as-is; a collected-only provider (just `complete()`/`turn()` — a test
     double or an external legacy backend, possibly sitting behind a router) is
     wrapped into a one-shot stream so any stream consumer (assemble_message,
-    RoutingBackend.stream) works against it uniformly."""
+    RoutingBackend.stream) works against it uniformly.
+
+    `**opts` (incl. the `on_usage` cost callback) is forwarded verbatim: a
+    collected-only provider is expected to accept `**opts` like every shipped
+    backend does, and MAY fire `on_usage` itself to report cost."""
     if hasattr(provider, "stream"):
         async for ev in provider.stream(context, **opts):
             yield ev

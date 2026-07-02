@@ -29,10 +29,9 @@ stream protocol because the exception propagates naturally — error events
 are for soft errors; truly exceptional cases raise); `"repeat_last"`
 restores the old behavior.
 
-After B2.2 (provider unification): native ApiProvider. `stream()` is the
-canonical method, `complete()` is a thin wrapper delegating to the module-
-level helper. Both share the same cursor state, so legacy callers and
-new consumers can interleave without surprise.
+A native ApiProvider: `stream()` is its only completion method. Collected-text
+callers go through the module-level `api_provider.complete()` (which drives
+stream()), so there is a single cursor state, no second path to sync.
 
 Targets Python 3.9+.
 """

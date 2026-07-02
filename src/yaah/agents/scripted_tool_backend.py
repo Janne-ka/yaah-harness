@@ -15,10 +15,9 @@ cluster 3 B2): same `on_exhaustion` knob as ScriptedBackend — `"default"`
 events are for soft errors, exhaustion is exceptional), or `"repeat_last"`
 (legacy). Default is `"default"`.
 
-After B2.4 (provider unification): native ApiProvider. `stream()` is the
-canonical method; `complete()` / `turn()` are thin wrappers (the legacy
-`complete()` always returned `self._default` regardless of script — that
-behavior is preserved since the script is loop-shaped).
+A native ApiProvider: `stream()` is its completion method and `turn()` is kept
+as the tool-loop entry (the capability marker AgentLoopNode / `supports_turn`
+key on). Collected-text callers use the module-level `api_provider.complete()`.
 
 Targets Python 3.9+.
 """

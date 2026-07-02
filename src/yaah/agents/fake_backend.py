@@ -5,11 +5,10 @@ Where: anywhere a real model isn't wanted (CI, local dev).
 Why: return scripted responses in turn (then repeat the last), so the retry
 loop and pipelines run reproducibly with no network.
 
-After B2 step 1 (provider unification): this is now a native ApiProvider —
-the canonical method is `stream()`, and `complete()` is a thin wrapper that
-delegates to the module-level helper so legacy callers keep working until
-B6 removes the wrapper. Both paths advance the SAME response cursor (one
-shared state machine), so tests can mix them without surprise.
+A native ApiProvider: `stream()` is its only completion method (the one model
+seam). Callers that want collected text go through the module-level
+`api_provider.complete()`, which drives stream() — so there is a single
+response cursor / state machine, no second path to keep in sync.
 
 Targets Python 3.9+.
 """

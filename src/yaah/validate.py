@@ -697,7 +697,14 @@ def _lint_gate_ignores_rejection(nodes: Dict[str, Any], stages: Dict[str, Any],
     Heuristic, hence a WARNING not a load error: the engine can't PROVE the decision is unhandled
     — a transform could consume it instead of a branch (opaque to the linter). So we only nudge,
     and we suppress the nudge if ANY stage branches on `decision` (assume it's handled → no false
-    positive). `approve` (one outcome) and `free_text` (no decision) never trigger."""
+    positive). `approve` (one outcome) and `free_text` (no decision) never trigger.
+
+    Known limitation: the suppression is pipeline-wide, not per-gate. A pipeline with two gates
+    where only ONE routes on `decision` suppresses the warning for BOTH — a false negative for the
+    unrouted gate. Accepted deliberately: gates sharing one `decision` key is the common shape, and
+    a per-gate reachability check (does a stage AFTER this gate branch on its decision) is more
+    engine than a lint nudge warrants. Revisit if multi-gate pipelines with independent decisions
+    become common."""
     from .harness.decision_forms import FORMS
     branches_on_decision = any(
         (s.get("branch") or {}).get("on") == "decision" for s in stages.values())

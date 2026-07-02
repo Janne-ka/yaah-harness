@@ -88,7 +88,9 @@ exclude_lines = [
 # engine package so an impl that breaks a port Protocol is caught before runtime.
 # Runs under PYTHONPATH=src (mypy_path). Default strictness for now; tighten as
 # the per-subsystem declarations land and the error count reaches zero.
-python_version = "3.9"
+# python_version is 3.10 (the floor mypy 2.x supports); the engine's actual 3.9
+# compatibility is validated by running the suite on 3.9, not by this gate.
+python_version = "3.10"
 mypy_path = "src"
 packages = ["yaah"]
 

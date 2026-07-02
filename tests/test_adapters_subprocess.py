@@ -437,6 +437,24 @@ async def claude_stream_passes_prompt_via_stdin() -> None:
     assert proc.stdin.data == b"latest", proc.stdin.data
 
 
+async def claude_stream_prepends_system_and_joins_content_blocks() -> None:
+    # Two prompt-shaping branches the deleted complete()-path tests used to cover
+    # and the stream tests did not: (1) a `system` preamble is prepended, and
+    # (2) an Anthropic content-block ARRAY user message is joined into one string
+    # (only type=="text" blocks; a thinking block is dropped). Both are common
+    # production shapes — a bug here silently feeds claude the wrong prompt.
+    lines = [b'{"type":"result","subtype":"success","stop_reason":"end_turn","usage":{}}\n']
+    proc = FakeStreamProc(stdout_lines=lines)
+    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    await _drain(be.stream({
+        "system": "SYS",
+        "messages": [{"role": "user",
+                      "content": [{"type": "text", "text": "a"},
+                                  {"type": "thinking", "text": "DROP"},
+                                  {"type": "text", "text": "b"}]}],
+    }))
+    assert proc.stdin.data == b"SYS\n\nab", proc.stdin.data
+
 
 async def claude_stream_handles_none_stdin_without_crashing() -> None:
     # CRIT-001 (opus bugs review): if the spawned process died before its
@@ -561,6 +579,7 @@ async def main() -> None:
         claude_stream_malformed_lines_skipped,
         claude_stream_nonzero_exit_yields_error_event,
         claude_stream_passes_prompt_via_stdin,
+        claude_stream_prepends_system_and_joins_content_blocks,
         claude_stream_handles_none_stdin_without_crashing,
         claude_stream_drains_stdin_before_closing,
         claude_stream_timeout_kills_proc_and_yields_error,

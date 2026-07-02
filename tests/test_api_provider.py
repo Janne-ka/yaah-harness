@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from yaah.agents.api_provider import (  # noqa: E402
-    ApiProvider, assemble_message, complete, turn,
+    ApiProvider, assemble_message, complete, stream_of, turn,
 )
 from yaah.agents.fake_backend import FakeBackend  # noqa: E402
 
@@ -48,6 +48,36 @@ class _StreamingToolBackend:
             yield {"type": "toolcall_end", "id": c["id"], "name": c["name"],
                    "args": c.get("args", {})}
         yield {"type": "done", "stop_reason": "tool_use" if self._calls else "end_turn"}
+
+
+class _CollectedOnlyToolBackend:
+    """A collected-only tool provider: has turn() but NO stream(). Exercises
+    stream_of's fallback branch that wraps turn() into a one-shot stream — the
+    forward-compat path RoutingBackend.stream documents for legacy/external tool
+    backends (no shipped backend hits it; all have native stream())."""
+
+    def __init__(self, *, text=None, calls=None):
+        self._text, self._calls = text, calls or []
+
+    async def turn(self, messages, tools, *, model=None, **opts):
+        return {"text": self._text, "calls": self._calls}
+
+
+def test_stream_of_wraps_collected_only_tool_backend():
+    be = _CollectedOnlyToolBackend(
+        text="done", calls=[{"id": "c1", "name": "read", "args": {"path": "/x"}}])
+    ctx = {"messages": [{"role": "user", "content": "go"}],
+           "tools": [{"name": "read", "description": "", "input_schema": {}}]}
+
+    async def _drain():
+        return [ev async for ev in stream_of(be, ctx)]
+
+    events = asyncio.run(_drain())
+    assert [e["type"] for e in events] == \
+        ["start", "toolcall_end", "text_delta", "done"], events
+    assert events[1] == {"type": "toolcall_end", "id": "c1", "name": "read",
+                         "args": {"path": "/x"}}
+    assert events[2]["delta"] == "done"
 
 
 def test_module_complete_collects_text_from_native_stream():
@@ -109,6 +139,7 @@ def test_native_backend_satisfies_apiprovider_protocol():
 
 
 if __name__ == "__main__":
+    test_stream_of_wraps_collected_only_tool_backend()
     test_module_complete_collects_text_from_native_stream()
     test_module_turn_roundtrips_tool_calls()
     test_assemble_message_merges_text_deltas()

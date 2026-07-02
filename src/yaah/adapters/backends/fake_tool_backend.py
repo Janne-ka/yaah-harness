@@ -12,13 +12,10 @@ parsing or a future Anthropic-API backend. If the fake works, the protocol is
 right; if a real backend doesn't, the bug is in that backend's translation,
 not in the loop.
 
-After B2.3 (provider unification): native ApiProvider. `stream()` walks the
-script one turn at a time, emitting start → optional text_delta → zero or
-more toolcall_end → done. `turn()` is preserved as a thin wrapper over the
-module-level helper (so AgentLoopNode keeps working). `complete()` retains
-its legacy "first text-bearing turn, no cursor advance" semantics — that
-behavior was a special accommodation for non-loop callers and shouldn't
-silently change under migration.
+A native ApiProvider: `stream()` walks the script one turn at a time, emitting
+start → optional text_delta → zero or more toolcall_end → done. `turn()` is
+kept as the tool-loop entry (the capability marker AgentLoopNode / `supports_turn`
+key on). Collected-text callers use the module-level `api_provider.complete()`.
 
 Targets Python 3.9+.
 """

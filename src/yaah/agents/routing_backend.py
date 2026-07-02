@@ -6,19 +6,16 @@ Where: the seam where `NodeConfig.model` selects a provider.
 Why: a model string 'provider:rest' routes to the backend registered for
 'provider' (called with model='rest'), so choosing fake/claude/litellm for a
 node is pure config. The prefix-dispatch lives in PrefixRouter (shared with the
-prompt/data/mcp routers); this class forwards three verbs — `stream`,
-`complete`, and the tool-loop `turn` — and maps an empty rest back to None
+prompt/data/mcp routers); this class forwards two verbs — `stream` (the one
+model seam) and the tool-loop `turn` — and maps an empty rest back to None
 (provider default model).
 
-After B2.7 (provider unification): `stream()` is the new routing verb, added
-alongside the legacy two. Every leaf backend implements stream() natively
-post-B2.1–B2.6, so stream-based consumers (the future operator UI, trace
-recorders, hedge logic) no longer need a capability check. `supports_turn()`
-remains a real signal because claude_cli still has no native turn() — that
-capability gap is preserved by design (claude handles its own tool loop) and
-isn't fixed by the migration. The "supports_turn goes away" outcome
-documented in docs/architecture/api-provider/use-cases.md lights up only if a
-future B-step adds a turn() shim for claude_cli; until then, the check stays.
+`stream()` is the single routing verb: every leaf backend implements it
+natively, so stream-based consumers (operator UI, trace recorders, hedge logic)
+never need a capability check. `supports_turn()` stays a real signal because
+claude_cli has no native turn() — that capability gap is by design (claude
+handles its own tool loop), so the check remains until (if ever) a turn() shim
+is added for claude_cli.
 
 Targets Python 3.9+.
 """
