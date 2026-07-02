@@ -13,7 +13,7 @@ Requirement IDs are `RQ-*` (distinct from the `R*` build-items in [TODO.md](TODO
 on YAAH, not part of it; a requirement must say which part is generic and which is
 app-specific, and we **generalize the component as far as possible**, pushing only
 irreducibly-domain bits to the app. **Generalize by COMPOSING existing core** —
-`Node`/`Envelope`/`Comms`/`Store`/baton/gates/`run_pool` — before adding anything new;
+`Node`/`Envelope`/`Comms`/`StoreBackend`/baton/gates/`run_pool` — before adding anything new;
 the engine gains a concept only when composition genuinely can't express it (keep it
 simple). Boundary test (design.md §10): harness vocabulary
 (node, envelope, comms, run, job, queue, slot, baton, gate, verdict) = **🔷 ENGINE**;
@@ -159,7 +159,7 @@ Tests fail before code, pass after — a deterministic, free quality gate.
 
 **RQ-O1 — Durable execution / resume after crash.** 🟡 ↘
 A parked or crashed run must resume without re-spending tokens on completed stages.
-- *YAAH:* durable **baton store** (FileStore), gate **suspend/resume**, **idempotency**
+- *YAAH:* durable **baton store** (FileBackend), gate **suspend/resume**, **idempotency**
   once-node — **Level 1 done** (cross-process resume proven). **Missing:** a per-run
   **step journal** so a resumed/crashed run *skips already-completed stages* (replay),
   which is the real token-saver (TODO durability "Level 2").
@@ -194,7 +194,7 @@ Run local, cloud, or split; pin resource-bound work; isolate tenants on a shared
 **RQ-O5 — Bounded durable job scheduler (🔷 ENGINE) + requirement backlog (🔶 APP).** ⛔
 Split deliberately so the engine stays domain-free and **maximally reuses existing core**:
 - 🔷 **ENGINE — a bounded durable job scheduler over opaque `(pipeline, input)` jobs.**
-  Build it from EXISTING components, no new concepts (keep it simple): the **`Store`** for
+  Build it from EXISTING components, no new concepts (keep it simple): the **`StoreBackend`** for
   the backlog (a new namespace, not a new store type); the **baton AS the run record**
   (running/parked/done is already baton status + durable + resumable — no parallel state
   model); the existing **suspend/resume + `--list`/`--resume` mailbox** for gate-wait. The

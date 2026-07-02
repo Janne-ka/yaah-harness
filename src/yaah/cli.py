@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 from typing import Any, Callable, Dict
 
@@ -485,8 +486,15 @@ def _dispatch_validate(spec: Dict[str, Any], root: Dict[str, Any], base: str) ->
     # makes ANY warning FAIL with exit code 2 — distinct from the hard-error path (so CI
     # can tell 'invalid config' from 'valid-but-weak'). Default stays advisory so a
     # mid-migration pipeline still validates and runs.
+    # Each lint message carries its rule id as a "[lint: id]" trailer; present it
+    # UP FRONT ("warning[id]: ...") — on a long unwrapped stderr line the rule name
+    # is what the author scans for, and the trailer would be the last thing seen.
     for w in warnings:
-        print("warning: " + w, file=sys.stderr)
+        m = re.search(r"\s*\[lint: ([a-z0-9-]+)\]$", w)
+        if m:
+            print("warning[{}]: {}".format(m.group(1), w[:m.start()]), file=sys.stderr)
+        else:
+            print("warning: " + w, file=sys.stderr)
     if warnings and spec.get("strict"):
         print("strict: {} lint warning(s) — failing with exit 2 (rerun without --strict "
               "to treat as advisory)".format(len(warnings)), file=sys.stderr)

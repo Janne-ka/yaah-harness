@@ -392,6 +392,34 @@ def test_pipeline_typo_then_surfaces() -> None:
     raise AssertionError("typo'd then should raise")
 
 
+def test_pipeline_on_error_shape_is_hard_checked() -> None:
+    # A typo'd on_error would otherwise be a SILENT no-op ("claer" matches no
+    # recovery branch) or silently flip rollback-failure severity ("warning" ->
+    # the "error" default) — recovery the author believes exists must not
+    # quietly disappear, so these are load errors.
+    import copy
+    cases = [
+        ("claer", "on_error must be"),
+        ({"compensate": ""}, "non-empty"),
+        ({"compensate": "fn:m:f", "on_compensate_fail": "warning"}, "on_compensate_fail"),
+        ({"compensate": "fn:m:f", "on_compensat_fail": "warn"}, "unknown on_error key"),
+    ]
+    for bad, expect in cases:
+        p = _valid_pipeline()
+        p["graph"]["stages"]["s1"]["on_error"] = copy.deepcopy(bad)
+        try:
+            validate_pipeline(p)
+        except ValueError as e:
+            assert expect in str(e), (bad, str(e))
+        else:
+            raise AssertionError("bad on_error {!r} should raise".format(bad))
+    for good in ("clear", None, {"compensate": "fn:m:f"},
+                 {"compensate": "fn:m:f", "on_compensate_fail": "warn"}):
+        p = _valid_pipeline()
+        p["graph"]["stages"]["s1"]["on_error"] = good
+        validate_pipeline(p)  # must not raise
+
+
 def test_pipeline_unknown_node_role() -> None:
     p = _valid_pipeline()
     p["graph"]["stages"]["s1"]["node"] = "notdeclared"
@@ -634,6 +662,7 @@ def main() -> None:
     test_multiple_errors_gathered()
     test_pipeline_valid_passes()
     test_pipeline_typo_then_surfaces()
+    test_pipeline_on_error_shape_is_hard_checked()
     test_pipeline_unknown_node_role()
     test_pipeline_typeless_node_names_stale_overlay()
     test_constraint_precedes_holds()
@@ -643,7 +672,7 @@ def main() -> None:
     test_budget_node_timeout_exceeds_transport_window()
     test_budget_inproc_has_no_reply_window()
     test_budget_fork_wait_smaller_than_branch_node_timeout()
-    print("test_validate: PASS (39 scenarios)")
+    print("test_validate: PASS (40 scenarios)")
 
 
 if __name__ == "__main__":

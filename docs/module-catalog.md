@@ -37,9 +37,11 @@ The structural interfaces the engine depends on. Each port has one or more concr
 | `Filter` | `src/yaah/filters/filter.py` | `async apply(value: Any) -> Any` |
 | `McpSource` | `src/yaah/mcp/mcp_source.py` | `async get(key: str) -> Dict[str, Any]` |
 | `PromptSource` | `src/yaah/prompts/prompt_source.py` | `async get(key: str) -> str` |
-| `Scannable` | `src/yaah/store/store.py` | `scan(prefix: str) -> AsyncIterator[Tuple[str, bytes]]` |
-| `Store` | `src/yaah/store/store.py` | `async get(key: str) -> Optional[bytes]`<br>`async put(key: str, value: bytes) -> None`<br>`async delete(key: str) -> None` |
+| `Scannable` | `src/yaah/store/store.py` | `scan(prefix: str) -> AsyncGenerator[Tuple[str, bytes], None]` |
+| `ScannableStore` | `src/yaah/store/store.py` | — |
+| `StoreBackend` | `src/yaah/store/store.py` | `async get(key: str) -> Optional[bytes]`<br>`async put(key: str, value: bytes) -> None`<br>`async delete(key: str) -> None` |
 | `Subscription` | `src/yaah/comms/comms.py` | `cancel() -> None` |
+| `SupportsTurn` | `src/yaah/agents/api_provider.py` | `async turn(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]` |
 | `TraceContributor` | `src/yaah/trace/contributor.py` | `contribute(span: Span) -> Dict[str, Any]` |
 | `TraceSink` | `src/yaah/trace/sink.py` | `async handle(env: Envelope) -> None` |
 | `Tracer` | `src/yaah/trace/tracer.py` | `async emit(span: Span) -> None`<br>`async drain(corr: str) -> List[Dict[str, Any]]`<br>`async ingest(records: List[Dict[str, Any]]) -> None`<br>`last_model_call_span(correlation_id: str) -> Optional[Dict[str, Any]]` |
@@ -62,6 +64,16 @@ The structural interfaces the engine depends on. Each port has one or more concr
 
 | Class | Summary | Constructor |
 |---|---|---|
+| `Scanner` (src/yaah/jsonio.py) | Case 2 — the string- and bracket-aware scanning PRIMITIVE. | `(brackets = None, separators = (',',), quotes = ('"',))` |
+| `BareValueResolver` (src/yaah/jsonio.py) | Case 3 ∩ schema — decide whether an unquoted bare value is safe to accept. | `(no constructor args)` |
+| `ParseStrategy` (src/yaah/jsonio.py) | A single tolerant-parse strategy. `parse` returns the recovered object, or None to DEFER to the next strategy (never a wrong guess). Subclass + inject dependencies for reuse; the HardenedParser runs the subclasses in order. | `(no constructor args)` |
+| `UnquotedKeyValue` (src/yaah/jsonio.py) | Case 3 — the bare `verdict: FIX, confidence: high` shape (keys and/or values unquoted), AND the line-protocol shape (one `key: value` per line). Composes an injected `Scanner` (field + key:value splitting, bracket- and string-aware) and an injected `BareValueResolver` (gate bare-word values). All-or-nothing: any field that can't be safely resolved -> None, so the caller falls through rather than accept a partial/fabricated object. Separators + the depth cap are constructor params (`field_seps`, `kv_seps`, `line_sep`, `max_depth`) — extend = one entry. | `(scanner = None, resolver = None, field_seps = (',',), kv_seps = (':',), line_sep = '\n', max_depth = 2)` |
+| `DecoyKeyDetector` (src/yaah/jsonio.py) | Case 1 — tell a prompt's format-EXAMPLE object apart from the model's real answer. | `(prefixes = ('n_o_',), suffixes = ('_o_n',))` |
+| `PureJson` (src/yaah/jsonio.py) | Tier 1 — strict `json.loads`. Returns any JSON value (object/array/scalar/null), or `_DEFER` when the candidate is not valid JSON. | `(no constructor args)` |
+| `KeyValueRepair` (src/yaah/jsonio.py) | Tier 2 — a weak executor's Python-dict / single-quoted style (`{'k': 'v'}`, `True/None`, trailing commas). `ast.literal_eval` is SAFE (literals only, never code). Accepts ONLY a dict/list (we want the object, not a stray quoted scalar) that is JSON-serialisable — a Python-only shape (tuple keys, set/bytes values) is rejected so it can't raise a later TypeError when the payload is json.dumps'd. | `(no constructor args)` |
+| `HardenedParser` (src/yaah/jsonio.py) | The single tolerant-parse implementation `extract_json` delegates to. Composes the pieces built around it instead of inlining their logic: | `(strategies = None, scanner = None, decoy = None)` |
+| `Contract` (src/yaah/node_contract.py) | node_contract — a node's output contract, as data (ADR-0006). | `(no constructor args)` |
+| `Flow` (src/yaah/node_contract.py) | The lattice value on an edge: keys guaranteed present on EVERY path here, plus how exact that set is (see Contract.complete/closed). | `(no constructor args)` |
 | `PrefixRouter` (src/yaah/prefix_router.py) | PrefixRouter — dispatch a 'name:rest' key to one of several backends. | `(targets: Dict[str, T], *, default: Optional[str] = None)` |
 
 ## Data adapters (`adapters/data/`)
@@ -90,7 +102,7 @@ The structural interfaces the engine depends on. Each port has one or more concr
 
 | Class | Summary | Constructor |
 |---|---|---|
-| `FileStore` (src/yaah/adapters/stores/file_store.py) | FileStore — a durable Store extender backed by one file per key. | `(base_dir: str)` |
+| `FileBackend` (src/yaah/adapters/stores/file_backend.py) | FileBackend — a durable StoreBackend extender backed by one file per key. | `(base_dir: str)` |
 
 ## Trace-sink adapters (`adapters/trace/`)
 

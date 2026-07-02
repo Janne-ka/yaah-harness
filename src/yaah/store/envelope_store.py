@@ -25,6 +25,7 @@ from .store import ScannableStore
 
 class EnvelopeStore(StoreBackedFacade[ScannableStore]):  # +SCAN: `list` needs scan
     PREFIX = "env:"
+    REQUIRES = ScannableStore  # checked at construction (fail fast)
 
     async def save(self, key: str, envelope: Envelope, *, ttl: Optional[float] = None) -> None:
         """Park `envelope` under `key` (overwrites). `ttl` (where the backend honors it)

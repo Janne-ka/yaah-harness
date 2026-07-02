@@ -169,7 +169,7 @@ dispatches a `source:key` string (e.g. `file:eval`, `git:`, `registry:acme-prod`
 | `PromptSource` (prompts/) | `StaticPromptSource` | a prompt body |
 | `DataSource`/`DataSink` (data/) | — | **get**/**post** payloads |
 | `McpSource` (mcp/) | `StaticMcpSource` | an agent's MCP server set |
-| `Store` (store/) | `MemoryStore` | durable baton state + idempotency (`store/idempotency.py`, the `once` node) |
+| `StoreBackend` (store/) | `MemoryBackend` | durable baton state + idempotency (`store/idempotency.py`, the `once` node) |
 | `ApiProvider` (agents/) | `FakeBackend`/`ScriptedBackend` | a provider via `provider:model` |
 
 ### 6. Assembly — `build/`, `runtime.py` (+ `runtime_factories.py`)
@@ -302,7 +302,7 @@ A `spec` stage with a JSON validator and a human gate, to see the layers coopera
    recorded on the baton as `concerns`; a hard fail re-invokes the Agent with the
    verdict as feedback, up to `max_attempts`.
 5. On pass, the stage's `escalate: human` gate returns `await` → **Harness**
-   persists the **Baton** via the **Store** port (5) and returns `Suspended`.
+   persists the **Baton** via the **StoreBackend** port (5) and returns `Suspended`.
 6. `drive()` (3) asks the injected decider (config map / stdin / a UI node's
    mailbox) for the decision and calls `resume(baton, decision)` → the run
    continues at the next stage. State survived because the baton is durable.

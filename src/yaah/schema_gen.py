@@ -186,11 +186,26 @@ def build_pipeline_schema() -> Dict[str, Any]:
         "additionalProperties": True,
     }
 
+    # Stage keys with a pinned schema (autocomplete for enum-valued knobs; the
+    # matching hard check lives in validate.py — _check_on_error).
+    typed_stage_keys: Dict[str, Any] = {
+        "on_error": {"oneOf": [
+            {"type": "null"},
+            {"const": "clear"},
+            {"type": "object",
+             "required": ["compensate"],
+             "properties": {
+                 "compensate": {"type": "string", "minLength": 1},
+                 "on_compensate_fail": {"enum": ["error", "warn"]},
+             },
+             "additionalProperties": False},
+        ]},
+    }
     stage_props: Dict[str, Any] = {}
     for k in v._STAGE_KEYS:
         # leave most stage keys un-typed — they vary (string / int / bool /
         # array / object). The runtime checks shapes per key.
-        stage_props[k] = {}
+        stage_props[k] = typed_stage_keys.get(k, {})
     stage_schema = {
         "type": "object",
         "properties": stage_props,

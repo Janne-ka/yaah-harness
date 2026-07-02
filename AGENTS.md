@@ -109,6 +109,16 @@ which is which.
 
 **Convention (author discipline + pre-submission rubric checks):**
 
+- **Declare your port.** Every shipped impl names its port in the class
+  header — `class MemoryBackend(StoreBackend, Scannable, CompareAndSet)`,
+  `class RenderNode(Node)`, `class FakeBackend(ApiProvider)`. The ports are
+  `@runtime_checkable` Protocols with `@abstractmethod`, so a DECLARED
+  subclass missing a method fails at instantiation, and mypy checks the
+  signatures. Structural (non-declaring) impls still work — external
+  extenders and test doubles aren't forced to import yaah — but shipped
+  code declares. Caveat: Protocol *attributes* (e.g. `Tracer.captures`)
+  are checked by mypy only, not at instantiation. Frozen by the
+  `__mro__` port tests (test_store/test_nodes/test_bus/test_trace).
 - **Domain-free engine prose.** Nothing in `src/yaah/` may *name* a
   stage, tenant field, test runner, or anything app-specific.
   Caught by `scripts/review_my_pr.py`'s grep checks, not by runtime.
@@ -151,7 +161,7 @@ don't propose either as a "fix":
   engine has.
 - **There is no `run_dir`, `task_dir`, or "current run's directory"
   concept in the engine — and there won't be one.** `state.dir` is a string
-  passed to the `FileStore` adapter (`runtime_factories.py:289`); the engine
+  passed to the `FileBackend` adapter (`runtime_factories.py:308`); the engine
   has no opinion about its parent, its siblings, or how a consumer nests
   per-task artifacts under it. Proposals to add `{run_dir}` (defined as
   "`state.dir`'s parent" or similar) are domain leaks: they bake an

@@ -59,6 +59,32 @@ def test_backends_declare_tiers_and_facades_declare_the_base() -> None:
         raise AssertionError("an incomplete StoreBackend subclass must not instantiate")
 
 
+def test_facade_rejects_backend_missing_its_tier_at_construction() -> None:
+    # "Validated up front" (store.py docstring): a facade whose verbs need +SCAN
+    # must reject a core-only backend AT CONSTRUCTION — not AttributeError deep
+    # in a baton sweep. This is the extender path the tiers exist for (e.g. a
+    # blob store with no scan).
+    class CoreOnly:  # structural core tier: get/put/delete, no scan
+        async def get(self, key): return None
+        async def put(self, key, value, *, ttl=None): pass
+        async def delete(self, key): pass
+
+    try:
+        EnvelopeStore(CoreOnly())
+    except TypeError as e:
+        assert "ScannableStore" in str(e) and "CoreOnly" in str(e), e
+    else:
+        raise AssertionError("EnvelopeStore must reject a scan-less backend up front")
+    try:
+        BatonStore(CoreOnly())
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("BatonStore must reject a scan-less backend up front")
+    # IdempotencyStore needs only the core tier — a core-only backend is FINE there.
+    IdempotencyStore(CoreOnly())
+
+
 async def scenario_memory_store() -> None:
     s = MemoryBackend()
     assert await s.get("a") is None

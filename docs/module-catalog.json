@@ -95,9 +95,9 @@
         "async get(key: str) -> Dict[str, Any]"
       ]
     },
-    "Store": {
+    "StoreBackend": {
       "module": "src/yaah/store/store.py",
-      "summary": "Store \u2014 the durable key->bytes substrate, in capability tiers.",
+      "summary": "StoreBackend \u2014 the durable key->bytes substrate, in capability tiers.",
       "methods": [
         "async get(key: str) -> Optional[bytes]",
         "async put(key: str, value: bytes) -> None",
@@ -106,18 +106,23 @@
     },
     "Scannable": {
       "module": "src/yaah/store/store.py",
-      "summary": "Store \u2014 the durable key->bytes substrate, in capability tiers.",
+      "summary": "StoreBackend \u2014 the durable key->bytes substrate, in capability tiers.",
       "methods": [
-        "scan(prefix: str) -> AsyncIterator[Tuple[str, bytes]]"
+        "scan(prefix: str) -> AsyncGenerator[Tuple[str, bytes], None]"
       ]
     },
     "CompareAndSet": {
       "module": "src/yaah/store/store.py",
-      "summary": "Store \u2014 the durable key->bytes substrate, in capability tiers.",
+      "summary": "StoreBackend \u2014 the durable key->bytes substrate, in capability tiers.",
       "methods": [
         "async get_rev(key: str) -> Tuple[Optional[bytes], Optional[int]]",
         "async cas(key: str, value: bytes) -> Optional[int]"
       ]
+    },
+    "ScannableStore": {
+      "module": "src/yaah/store/store.py",
+      "summary": "StoreBackend \u2014 the durable key->bytes substrate, in capability tiers.",
+      "methods": []
     },
     "TraceContributor": {
       "module": "src/yaah/trace/contributor.py",
@@ -168,9 +173,16 @@
     },
     "ApiProvider": {
       "module": "src/yaah/agents/api_provider.py",
-      "summary": "ApiProvider \u2014 the streaming model interface (replaced the legacy ModelBackend).",
+      "summary": "ApiProvider \u2014 the streaming model interface.",
       "methods": [
         "stream(context: Context) -> AsyncIterator[StreamEvent]"
+      ]
+    },
+    "SupportsTurn": {
+      "module": "src/yaah/agents/api_provider.py",
+      "summary": "ApiProvider \u2014 the streaming model interface.",
+      "methods": [
+        "async turn(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> Dict[str, Any]"
       ]
     }
   },
@@ -342,9 +354,9 @@
     ],
     "stores": [
       {
-        "module": "src/yaah/adapters/stores/file_store.py",
-        "name": "FileStore",
-        "doc": "FileStore \u2014 a durable Store extender backed by one file per key.",
+        "module": "src/yaah/adapters/stores/file_backend.py",
+        "name": "FileBackend",
+        "doc": "FileBackend \u2014 a durable StoreBackend extender backed by one file per key.",
         "args": [
           {
             "name": "base_dir",

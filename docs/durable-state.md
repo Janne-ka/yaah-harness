@@ -42,14 +42,14 @@ full workflow-engine event log (we checkpoint cursors, not every event).
                 └──────────────────────┬───────────────────────────┘
                                        │  one interface
                                 ┌──────▼──────┐
-                                │  KVStore    │  get/put/delete/scan/cas + ttl
+                                │  StoreBackend    │  get/put/delete/scan/cas + ttl
                                 └──────┬──────┘
                   ┌──────────┬─────────┼──────────┬─────────────┐
                memory      file      sqlite     nats_kv      (redis…)
               (default)   (debug)  (1 host)   (distributed)
 ```
 
-The substrate is `KVStore`; `BatonStore`, `IdempotencyStore`, and the durable
+The substrate is `StoreBackend`; `BatonStore`, `IdempotencyStore`, and the durable
 `DataSource`/`DataSink` are thin typed views over it (distinct key namespaces).
 
 ## 4. The substrate — a base store + capability tiers, backends are EXTENDERS
@@ -65,7 +65,7 @@ prefix-scan; a KV store can), so the contract is **capability-tiered** rather th
 one fat interface every extender must stub:
 
 ```python
-class Store(Protocol):                 # CORE — every extender provides this
+class StoreBackend(Protocol):                 # CORE — every extender provides this
     async def get(self, key: str) -> Optional[bytes]: ...
     async def put(self, key: str, value: bytes, *, ttl: Optional[float] = None) -> None: ...
     async def delete(self, key: str) -> None: ...
@@ -190,7 +190,7 @@ the app sets it (e.g. `task-123:commit`).
 
 Durable working memory is just a `get`/`post` whose source/sink is KV-backed:
 
-- A `KvDataSource` / `KvDataSink` over the same `KVStore` (namespace `mem:`),
+- A `KvDataSource` / `KvDataSink` over the same `StoreBackend` (namespace `mem:`),
   registered as a data source/sink so `get`/`post` nodes use the normal
   `source:key` routing (`"source": "mem:run-123/scratch"`).
 - **`stateRef`** is just that handle string. Convention: a node receives/returns a

@@ -370,6 +370,34 @@ _GRAPH_KEYS = frozenset({"start", "stages", "sticky", "constraints", "note"})
 _CONSTRAINT_KEYS = frozenset({"precedes", "note"})
 
 
+def _check_on_error(stage: str, oe: Any, errs: List[str]) -> None:
+    """Hard-check the `on_error` recovery shape (the contract harness._handle_error
+    executes): "clear" | null | {"compensate": target, "on_compensate_fail"?:
+    "error"|"warn"}. A typo here would otherwise silently DISABLE recovery
+    ("claer" matches no branch — no clear, no compensate, ever) or silently flip
+    the rollback-failure severity ("warning" -> the "error" default). Recovery an
+    author believes is configured must not be a no-op, so this is a load ERROR,
+    not a lint."""
+    if oe == "clear":
+        return
+    if isinstance(oe, dict):
+        target = oe.get("compensate")
+        if not (isinstance(target, str) and target):
+            errs.append("stage {!r}: on_error object needs a non-empty `compensate` "
+                        "target string (fn:/node:/http:)".format(stage))
+        ocf = oe.get("on_compensate_fail", "error")
+        if ocf not in ("error", "warn"):
+            errs.append("stage {!r}: on_compensate_fail must be \"error\" or \"warn\", "
+                        "got {!r}".format(stage, ocf))
+        unknown = sorted(set(oe) - {"compensate", "on_compensate_fail"})
+        if unknown:
+            errs.append("stage {!r}: unknown on_error key(s) {}; known: compensate, "
+                        "on_compensate_fail".format(stage, unknown))
+        return
+    errs.append("stage {!r}: on_error must be \"clear\", null, or "
+                "{{\"compensate\": target}}, got {!r}".format(stage, oe))
+
+
 def _successor_edges(stages: Dict[str, Any]) -> Dict[str, set]:
     """stage -> set of possible NEXT stages, from every routing key build_graph
     reads (then, branch routes + default, fork targets). The fanin `expect`
@@ -549,6 +577,8 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
         ci = s.get("concerns_into")
         if ci is not None and not (isinstance(ci, str) and ci):
             errs.append("stage {!r}: concerns_into must be a non-empty payload-key string".format(name))
+        if s.get("on_error") is not None:  # absent -> default "clear"; null -> opt out
+            _check_on_error(name, s["on_error"], errs)
         for k in s:
             if k not in _STAGE_KEYS and not k.startswith("_"):
                 errs.append("stage {!r}: unknown key {!r}; known: {}".format(

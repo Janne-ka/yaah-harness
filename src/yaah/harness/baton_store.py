@@ -26,6 +26,7 @@ from .baton import Baton
 
 class BatonStore(StoreBackedFacade[ScannableStore]):  # +SCAN: sweep/list need scan
     PREFIX = "baton:"
+    REQUIRES = ScannableStore  # checked at construction (fail fast)
 
     async def save(self, baton: Baton) -> None:
         await self._store.put(self.PREFIX + baton.id, json.dumps(baton.to_dict()).encode())
