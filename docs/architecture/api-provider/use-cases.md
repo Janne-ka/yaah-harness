@@ -187,6 +187,6 @@ plumbing hidden.
 | 1 — Token UI | future `yaah ui live` (Phase 2+) |
 | 2 — Tool-call surfacing | `tests/test_agent_loop.py` (B5 regression) |
 | 3 — Per-token trace | Phase 2 outcome capture |
-| 4 — Capability simplification | `tests/test_routing_backend.py` (B7) |
+| 4 — Capability simplification | `tests/test_api_provider.py` + `tests/test_ports.py` (B7) |
 | 5 — Provider hedge | Phase 3 H6 sibling (not yet scoped) |
 | 6 — Audit replay | Phase 2 outcome capture |

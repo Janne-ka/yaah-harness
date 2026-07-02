@@ -64,7 +64,7 @@ This file is the compressed essence, not the source of truth.
         "escalate":     "human" | "fail",
         "clearable":    false,
         "concerns_from":"<payload-key>",
-        "on_error":     {target: "fn:...", retry: N}
+        "on_error":     "clear" | null | {"compensate": "fn:...", "on_compensate_fail": "error"|"warn"}
       }
     }
   }

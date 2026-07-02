@@ -28,9 +28,9 @@ from .attacher import Attacher
 
 class AttachingAgent(Node):
     def __init__(self, inner: Node, attachers: List[Attacher], tracer: Tracer) -> None:
-        # `inner` is an Agent; typed Any to avoid an import cycle (Agent is in
-        # the same package but the wrapper doesn't need its full surface, only
-        # `invoke()`).
+        # `inner` is usually an Agent, typed as the Node PORT: the wrapper only
+        # needs `invoke()`, and Node (from core) avoids the same-package cycle
+        # that typing it as Agent would create.
         self._inner = inner
         self._attachers = list(attachers)
         self._tracer = tracer
