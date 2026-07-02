@@ -15,7 +15,26 @@ import json
 from yaah import Done, Envelope, Kind
 from yaah.agents import FakeBackend, RoutingBackend
 from yaah.build import build
+from yaah.comms import Comms, InMemorySubscription, InProcessComms, Subscription
 from yaah.adapters.transports import LocalBus
+
+
+def test_transports_declare_the_comms_port() -> None:
+    # Declaration via __mro__ (real inheritance) — isinstance would be structural
+    # for these @runtime_checkable Protocols and prove nothing about the decl.
+    # NatsComms/_NatsSubscription declare too (checked where the NATS tests import).
+    for cls in (InProcessComms, LocalBus):
+        assert Comms in cls.__mro__, "{} must declare Comms".format(cls.__name__)
+    assert Subscription in InMemorySubscription.__mro__
+    # Enforcement: a declared-but-incomplete transport can't instantiate.
+    try:
+        class HalfComms(Comms):  # missing publish/subscribe
+            async def request(self, target, envelope): ...
+        HalfComms()
+    except TypeError as e:
+        assert "publish" in str(e) or "subscribe" in str(e), e
+    else:
+        raise AssertionError("an incomplete Comms subclass must not instantiate")
 
 CONFIG = {
     "nodes": {
@@ -91,6 +110,7 @@ async def test_cancelled_request_no_inbox_leak() -> None:
 
 
 async def main() -> None:
+    test_transports_declare_the_comms_port()
     test_serialization()
     await test_pipeline_over_bus()
     await test_cancelled_request_no_inbox_leak()

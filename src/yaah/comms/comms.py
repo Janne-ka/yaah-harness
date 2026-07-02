@@ -11,6 +11,7 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
+from abc import abstractmethod
 from typing import Awaitable, Callable, Protocol, runtime_checkable
 
 from ..core import Envelope
@@ -31,17 +32,21 @@ class Subscription(Protocol):
     every adapter's return type is bound to it; a future transport that doesn't
     expose `.cancel()` fails to typecheck rather than at runtime."""
 
+    @abstractmethod
     def cancel(self) -> None:
         ...
 
 
 @runtime_checkable
 class Comms(Protocol):
+    @abstractmethod
     async def request(self, target: str, envelope: Envelope) -> Envelope:
         ...
 
+    @abstractmethod
     async def publish(self, topic: str, envelope: Envelope) -> None:
         ...
 
+    @abstractmethod
     async def subscribe(self, topic: str, handler: Handler) -> Subscription:
         ...

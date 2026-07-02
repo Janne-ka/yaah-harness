@@ -18,11 +18,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 
-from .comms import Handler
+from .comms import Handler, Subscription
 
 
 @dataclass
-class InMemorySubscription:
+class InMemorySubscription(Subscription):
     topic: str
     _handlers: List[Handler]
     _handler: Handler
