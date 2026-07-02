@@ -144,6 +144,15 @@ def test_supports_turn_is_a_distinct_optional_capability():
     # The tool-loop capability is EXPLICIT and separate from ApiProvider: a
     # tool-capable backend is both; claude_cli is an ApiProvider but NOT
     # SupportsTurn (it runs its own tool loop — Agent must check, not assume).
+    #
+    # Two things to verify, and they need DIFFERENT checks:
+    #   (a) runtime CAPABILITY — isinstance (structural: is `turn` present?). This
+    #       is what the engine actually keys on.
+    #   (b) explicit DECLARATION — `X in __mro__`. isinstance can't prove this: a
+    #       @runtime_checkable Protocol matches by shape, so isinstance would pass
+    #       even for a class that only conforms structurally (that made an earlier
+    #       version of this test vacuous w.r.t. the declaration).
+    # (a) capability:
     assert isinstance(FakeToolBackend(turns=[]), SupportsTurn)      # has turn()
     assert isinstance(FakeToolBackend(turns=[]), ApiProvider)
     claude = ClaudeCliBackend()
@@ -151,6 +160,10 @@ def test_supports_turn_is_a_distinct_optional_capability():
     assert not isinstance(claude, SupportsTurn), \
         "claude_cli has no native turn() — the capability must read as absent"
     assert not isinstance(FakeBackend(responses=["x"]), SupportsTurn)
+    # (b) declaration (falsifies if a backend drops the port from its bases):
+    assert SupportsTurn in FakeToolBackend.__mro__ and ApiProvider in FakeToolBackend.__mro__
+    assert ApiProvider in ClaudeCliBackend.__mro__ and SupportsTurn not in ClaudeCliBackend.__mro__
+    assert ApiProvider in FakeBackend.__mro__ and SupportsTurn not in FakeBackend.__mro__
 
 
 if __name__ == "__main__":

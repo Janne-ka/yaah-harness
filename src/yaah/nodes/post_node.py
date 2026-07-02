@@ -15,11 +15,11 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from ..core import Envelope, NodeConfig
+from ..core import Node, Envelope, NodeConfig
 from ..cwd import resolve_cwd
 
 
-class PostNode:
+class PostNode(Node):
     def __init__(self, data_sink: Any, key: str, *, field: str = "data",
                  into: str = "stored", cwd_from: Optional[str] = None) -> None:
         if data_sink is None:

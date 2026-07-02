@@ -13,12 +13,12 @@ from __future__ import annotations
 
 from typing import List, Optional, Union
 
-from ..core import Envelope, Failure, NodeConfig, Verdict
+from ..core import Node, Envelope, Failure, NodeConfig, Verdict
 from ..cwd import resolve_cwd
 from ._shell import _run, ShellTimeout
 
 
-class ShellCheck:
+class ShellCheck(Node):
     def __init__(self, command: Union[str, List[str]], *, expect_exit: int = 0,
                  expect_nonzero: bool = False, cwd: Optional[str] = None,
                  cwd_from: Optional[str] = None, timeout: Optional[float] = None,

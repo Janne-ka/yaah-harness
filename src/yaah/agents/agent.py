@@ -18,7 +18,7 @@ import time
 from typing import Any, Optional
 
 from ..comms import Comms
-from ..core import Envelope, Failure, NodeConfig, Verdict
+from ..core import Node, Envelope, Failure, NodeConfig, Verdict
 from ..cwd import carry_cwd, resolve_cwd
 from ..jsonio import extract_json
 from ..jsonschema import check_schema
@@ -102,7 +102,7 @@ def _neutralize_fence_mimics(value: str) -> str:
 _RESERVED_REPLY_KWARGS = frozenset({"raw"})
 
 
-class Agent:
+class Agent(Node):
     def __init__(
         self,
         backend: Any,

@@ -27,8 +27,36 @@ from yaah import (
 from yaah.harness import BatonStore
 from yaah.harness.baton import Baton
 from yaah.nodes import OnceNode
-from yaah.store import EnvelopeStore, IdempotencyStore, MemoryBackend
+from yaah.store import (
+    CompareAndSet,
+    EnvelopeStore,
+    IdempotencyStore,
+    MemoryBackend,
+    Scannable,
+    StoreBackedFacade,
+    StoreBackend,
+)
 from yaah.adapters.stores import FileBackend
+
+
+def test_backends_declare_tiers_and_facades_declare_the_base() -> None:
+    # Declaration is checked via __mro__ (real inheritance), NOT isinstance —
+    # these are @runtime_checkable Protocols, so isinstance is structural and
+    # would pass for a class that only conforms by shape (vacuous for "declares").
+    for be in (MemoryBackend, FileBackend):
+        for tier in (StoreBackend, Scannable, CompareAndSet):
+            assert tier in be.__mro__, "{} must declare {}".format(be.__name__, tier.__name__)
+    for facade in (EnvelopeStore, IdempotencyStore, BatonStore):
+        assert StoreBackedFacade in facade.__mro__, facade.__name__
+    # Enforcement: a declared-but-incomplete backend can't instantiate.
+    try:
+        class HalfBackend(StoreBackend):  # missing put/delete
+            async def get(self, key): ...
+        HalfBackend()
+    except TypeError as e:
+        assert "put" in str(e) or "delete" in str(e), e
+    else:
+        raise AssertionError("an incomplete StoreBackend subclass must not instantiate")
 
 
 async def scenario_memory_store() -> None:
@@ -266,6 +294,7 @@ async def scenario_idempotency_finalize_uses_cas_when_available() -> None:
 
 
 async def main() -> None:
+    test_backends_declare_tiers_and_facades_declare_the_base()
     await scenario_memory_store()
     await scenario_file_store()
     await scenario_baton_store()

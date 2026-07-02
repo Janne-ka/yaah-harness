@@ -14,11 +14,11 @@ from __future__ import annotations
 import json
 from typing import List, Optional
 
-from ..core import Envelope, Failure, NodeConfig, Verdict
+from ..core import Node, Envelope, Failure, NodeConfig, Verdict
 from ..jsonio import extract_json
 
 
-class JsonObjectValidator:
+class JsonObjectValidator(Node):
     """Passes if payload[key] parses as a JSON object with the required keys."""
 
     def __init__(self, required: Optional[List[str]] = None, *, key: str = "raw") -> None:

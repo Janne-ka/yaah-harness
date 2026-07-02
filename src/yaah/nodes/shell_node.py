@@ -18,12 +18,12 @@ from __future__ import annotations
 
 from typing import List, Optional, Union
 
-from ..core import Envelope, Kind, NodeConfig
+from ..core import Node, Envelope, Kind, NodeConfig
 from ..cwd import carry_cwd, resolve_cwd
 from ._shell import _run, ShellTimeout
 
 
-class ShellNode:
+class ShellNode(Node):
     def __init__(self, command: Union[str, List[str]], *, cwd: Optional[str] = None,
                  cwd_from: Optional[str] = None, timeout: Optional[float] = None,
                  shell: bool = False, tail_only: bool = False, tail: int = 2000,

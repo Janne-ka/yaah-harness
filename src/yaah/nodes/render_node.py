@@ -12,11 +12,11 @@ from __future__ import annotations
 import os
 from typing import Optional, Tuple
 
-from ..core import Envelope, Failure, Kind, NodeConfig, Verdict
+from ..core import Node, Envelope, Failure, Kind, NodeConfig, Verdict
 from ..templating import fill as _fill
 
 
-class RenderNode:
+class RenderNode(Node):
     def __init__(self, *, template: Optional[str] = None, template_file: Optional[str] = None,
                  out_path: Optional[str] = None, allow_unfilled: bool = False) -> None:
         if template is None and template_file is None:

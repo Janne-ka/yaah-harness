@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..core import Envelope, Kind, NodeConfig
+from ..core import Node, Envelope, Kind, NodeConfig
 
 
 def _is_committed_success(env: Envelope) -> bool:
@@ -37,7 +37,7 @@ def _is_committed_success(env: Envelope) -> bool:
     return True
 
 
-class OnceNode:
+class OnceNode(Node):
     def __init__(self, inner: Any, store: Any) -> None:  # store: yaah.store.IdempotencyStore
         self._inner = inner
         self._store = store

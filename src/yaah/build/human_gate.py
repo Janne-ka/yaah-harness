@@ -11,11 +11,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from ..core import Envelope, Kind, NodeConfig
+from ..core import Node, Envelope, Kind, NodeConfig
 from ..templating import fill
 
 
-class HumanGate:
+class HumanGate(Node):
     def __init__(self, ask: str = "", awaiting: Optional[str] = None,
                  form: Optional[str] = None,
                  decision_schema: Optional[Dict[str, Any]] = None) -> None:

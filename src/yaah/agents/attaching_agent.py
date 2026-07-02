@@ -21,11 +21,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from ..core import Envelope, Kind, NodeConfig
+from ..core import Node, Envelope, Kind, NodeConfig
 from .attacher import Attacher
 
 
-class AttachingAgent:
+class AttachingAgent(Node):
     def __init__(self, inner: Any, attachers: List[Attacher], tracer: Any) -> None:
         # `inner` is an Agent; typed Any to avoid an import cycle (Agent is in
         # the same package but the wrapper doesn't need its full surface, only

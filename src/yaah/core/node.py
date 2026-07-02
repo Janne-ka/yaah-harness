@@ -11,6 +11,7 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
+from abc import abstractmethod
 from typing import Protocol, runtime_checkable
 
 from .envelope import Envelope
@@ -19,5 +20,8 @@ from .node_config import NodeConfig
 
 @runtime_checkable
 class Node(Protocol):
+    # @abstractmethod so a class that DECLARES `class X(Node)` can't instantiate
+    # without invoke(); structural conformance still holds for a non-declaring impl.
+    @abstractmethod
     async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
         ...

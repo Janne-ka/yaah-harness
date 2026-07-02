@@ -22,12 +22,12 @@ from __future__ import annotations
 import json
 from typing import Any, Dict
 
-from ..core import Envelope, Failure, NodeConfig, Verdict
+from ..core import Node, Envelope, Failure, NodeConfig, Verdict
 from ..jsonio import extract_json
 from ..jsonschema import check_schema
 
 
-class JsonSchemaValidator:
+class JsonSchemaValidator(Node):
     """Passes if payload[key] parses as JSON matching a JSON-Schema SUBSET."""
 
     def __init__(self, schema: Dict[str, Any], *, key: str = "raw") -> None:

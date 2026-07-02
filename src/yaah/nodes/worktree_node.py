@@ -31,7 +31,7 @@ import re
 import shutil
 from typing import Optional
 
-from ..core import Envelope, Failure, Kind, NodeConfig, Verdict
+from ..core import Node, Envelope, Failure, Kind, NodeConfig, Verdict
 from ._shell import _run
 
 # `task` comes from PAYLOAD — the one place payload data reaches a destructive
@@ -61,7 +61,7 @@ def _safe_task_name(raw: str) -> str:
     return raw
 
 
-class WorktreeNode:
+class WorktreeNode(Node):
     def __init__(self, *, repo: str, base: str = "HEAD", root: Optional[str] = None,
                  branch_prefix: str = "yaah/", op: str = "add", task_key: str = "task",
                  timeout: Optional[float] = None, carry: Optional[list] = None,

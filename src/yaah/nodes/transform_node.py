@@ -32,11 +32,11 @@ from __future__ import annotations
 import inspect
 from typing import Any, Optional
 
-from ..core import Envelope, NodeConfig
+from ..core import Node, Envelope, NodeConfig
 from ..external_call import call_target, import_callable
 
 
-class TransformNode:
+class TransformNode(Node):
     def __init__(self, target: str, *, comms: Any = None, args_from: Optional[str] = None,
                  into: str = "result", call: str = "args") -> None:
         self._target = target
