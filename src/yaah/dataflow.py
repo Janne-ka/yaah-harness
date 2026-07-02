@@ -1,5 +1,5 @@
-"""dataflow — the requires↔provides graph analysis behind the broad data-flow lint
-(ADR-0005). Author-time, advisory, NEVER raises.
+"""dataflow — the requires↔provides graph analysis behind the data-flow lint (ADR-0005 +
+ADR-0006). Author-time; NEVER raises.
 
 The problem (the silent-dataflow class, `.notes/silent-dataflow-class-2026-06-29.md`):
 every node REPLACES the payload, so a key a downstream `render` / `branch` needs can
@@ -7,168 +7,76 @@ simply not be there — failing silently or late. This computes, per stage, the 
 payload keys GUARANTEED present when it runs, then flags a consumer that reads a key the
 graph doesn't guarantee.
 
-Soundness model — a `(known, complete)` lattice:
-  - `known`  : frozenset of keys guaranteed present on EVERY path to this point.
-  - `complete`: True iff `known` is the EXACT key set (a key not in `known` is ABSENT).
-    Reached only AFTER a node that REPLACES the payload with a known set (an agent, or a
-    declared envelope-transform). Before that the payload still carries unknowable INPUT
-    keys, so `complete` is False and we cannot prove any key absent.
-We WARN on a required key only when `complete` is True and the key is missing — i.e. some
-path definitely lacks it. Merge is INTERSECTION (a key counts only if every path provides
-it) with `complete = AND` (sound: a key present on one path but provably absent on another
-still fails on that other path). UNION would be unsound (false negatives that defeat the
-lint). An UNDECLARED envelope-transform spreads unknown keys → its output is incomplete
-(it "taints" downstream, which then can't be checked) AND earns its own actionable warning
-so the non-coverage is never silent.
+This module holds ONLY the graph math. What each node PROVIDES comes from its contract
+(`node_contract.resolve_contract`) — there is no per-node key table here (that hand-mirror
+was ADR-0006's biggest slop). The lattice value on an edge is a `Flow(known, complete, closed)`:
+  - `known`   : keys guaranteed present on EVERY path to this point.
+  - `complete`: `known` is the DECLARED-exact set (a contract, e.g. an agent's output_schema).
+  - `closed`  : `known` is the RUNTIME-exact set — provably (a parse=false agent, a worktree,
+                carried through built-in preserve nodes). closed ⟹ complete.
+Merge over predecessors is INTERSECTION of `known` with `complete`/`closed` AND-ed (a key on
+one path but provably absent on another still fails there; UNION would be unsound).
 
-Honest framing (the 1a lesson, ADR-0005 §6): `check_schema` doesn't enforce
-additionalProperties, so an agent MAY emit keys it didn't declare and a run MAY pass — a
-warning flags a CONTRACT gap (an undeclared dependency), it does not predict a certain crash.
+Two severities (ADR-0006 §D5), both from `analyze_dataflow`:
+  - a consumer reads a key missing where the set is `closed` → ERROR (fail-loud;
+    `validate_pipeline` rejects at load — the run WOULD fail/misroute).
+  - missing where only `complete` → WARNING (a contract gap; `lint_pipeline`). Honest framing
+    (the 1a lesson): `check_schema` ignores additionalProperties and an agent merges its whole
+    reply, so a declared set is `complete` not `closed` — a warning, not a certain crash.
+An UNDECLARED envelope-transform is `opaque` (unknown output) → downstream can't be checked,
+and it earns one consolidated warning so the non-coverage is never silent.
 
 Targets Python 3.9+.
 """
 from __future__ import annotations
 
 import os
-import re
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-# Mirror of render_node._PLACEHOLDER (the {{mustache}} the render node fills). Duplicated,
-# not imported, to keep this module cheap to import — same convention validate.py uses.
-_PLACEHOLDER = re.compile(r"{{\s*(\w+)\s*}}")
+from .node_contract import Flow, _as_key_set, apply, meet, resolve_contract
+from .templating import PLACEHOLDER as _PLACEHOLDER   # the {{mustache}} a render fills — one copy
 
-# A provides value is either TOP (the fixpoint identity — "not yet constrained") or a
-# concrete (known: frozenset, complete: bool).
+# A provides value on an edge is either TOP (the fixpoint identity — "not yet reached") or a
+# concrete Flow (known keys + how exact the set is). This module holds NO per-node key
+# knowledge: each node's contract comes from `node_contract.resolve_contract`, and the
+# lattice just applies it (ADR-0006).
 _TOP = object()
-Provides = Any  # _TOP | Tuple[frozenset, bool]
-
-def _as_key_set(val: Any) -> Set[str]:
-    """A config field meant to be a list of key NAMES → the set of its string entries; any
-    malformed shape (non-list, or non-string items) contributes nothing. Keeps the lint
-    NEVER-RAISES on unvalidated input (e.g. `carry: true`, `required: 5`)."""
-    if not isinstance(val, list):
-        return set()
-    return {v for v in val if isinstance(v, str)}
+Provides = Any  # _TOP | Flow
 
 
-# Built-in nodes that REPLACE the payload with a GUARANTEED, engine-defined key set (N6).
-# Unlike an undeclared envelope-transform (arbitrary fn output), the lint can model these
-# EXACTLY, so downstream consumers ARE checkable. Conditional keys (shell's `stdout`/`timed_out`,
-# emitted only on some run paths) are deliberately EXCLUDED — a consumer of one reads a
-# not-guaranteed key, which the lint then correctly flags.
-def _shell_keys(node: Dict[str, Any]) -> Set[str]:
-    keys = {"exit_code", "ok", "stdout_tail"}    # shell_node.py:47 (success) ∩ :54 (timeout)
-    cwd_from = node.get("cwd_from")              # carry_cwd forwards the workdir key, if bound
-    if isinstance(cwd_from, str) and cwd_from:
-        keys.add(cwd_from)
-    return keys
-
-
-def _worktree_keys(node: Dict[str, Any]) -> Set[str]:
-    if node.get("op") == "remove":               # worktree_node.py:161
-        return {"removed", "ok"}
-    return {"workdir", "branch", "repo", "base"}  # worktree_node.py:153 (op="add", the default)
+def _undeclared_envelope_transform(node: Dict[str, Any]) -> bool:
+    """An envelope-transform with no `provides` — the one opaque node worth NAGGING about
+    (the author can fix it by declaring `provides`), as opposed to an unknown custom type
+    (opaque and silently skipped). This is lint POLICY, not node key knowledge."""
+    return (node.get("type") == "transform" and node.get("call") == "envelope"
+            and not isinstance(node.get("provides"), list))
 
 
 def _meet(a: Provides, b: Provides) -> Provides:
-    """Greatest lower bound over predecessor paths: intersect guaranteed keys, AND the
-    completeness flags. TOP is the identity (an unprocessed predecessor)."""
+    """Greatest lower bound over predecessor paths. TOP is the identity (an unreached pred)."""
     if a is _TOP:
         return b
     if b is _TOP:
         return a
-    ak, ac = a
-    bk, bc = b
-    return (ak & bk, ac and bc)
-
-
-def _agent_provides_keys(node: Dict[str, Any], sticky: Set[str]) -> Set[str]:
-    """Keys a `parse:true` agent's reply DECLARES (mirrors agent.py:388 +
-    harness re-applying sticky): output_schema props ∪ required ∪ {raw} ∪ carry ∪
-    cwd_from ∪ sticky. NOT the runtime set (check_schema allows undeclared emitted keys);
-    counting only declared keys is what makes the lint a contract check (ADR-0005 §6)."""
-    schema = node.get("output_schema")
-    if not isinstance(schema, dict):     # a malformed (non-dict) output_schema must NOT crash
-        schema = {}                       # the lint (never-raises) — treat as no declared shape
-    props = schema.get("properties")
-    props_keys = set(props.keys()) if isinstance(props, dict) else set()   # `properties: [...]`
-    keys = (props_keys | _as_key_set(schema.get("required"))               # `required: 5` → {}
-            | {"raw"} | _as_key_set(node.get("carry")) | set(sticky))
-    cwd_from = node.get("cwd_from")
-    if isinstance(cwd_from, str) and cwd_from:
-        keys.add(cwd_from)
-    return keys
+    return meet(a, b)
 
 
 def _transfer(node: Optional[Dict[str, Any]], pin: Provides, sticky: Set[str],
               tainted: List[str], stage_name: str) -> Provides:
-    """provides_out = how this stage's node rewrites the incoming provides. RESET nodes
-    (agent, declared envelope-transform) yield a COMPLETE known set regardless of `pin`;
-    PRESERVE nodes add their keys to `pin` and keep its completeness; an UNDECLARED
-    envelope-transform resets to INCOMPLETE (unknown keys) and records a taint."""
+    """How this stage's node rewrites the incoming flow. A routing stage (no node) passes the
+    payload through; every real node's effect comes from its resolved contract — the module
+    has no per-type key table. An undeclared envelope-transform resolves to `opaque` (nothing
+    checkable downstream) AND records a taint so its consumers get a companion nudge."""
     if pin is _TOP:
-        pin = (frozenset(), False)   # unreachable-safe; reachable stages get a concrete pin
-    known, complete = pin
-    explicit = node.get("provides") if isinstance(node, dict) else None
-    explicit_set = set(explicit) if isinstance(explicit, list) else set()
-
+        pin = Flow()   # unreachable-safe; reachable stages get a concrete pin
+    sticky_fs = frozenset(sticky)
     if node is None:
         # a pure routing stage (fork/fanin with no node) passes the payload through
-        return (known | explicit_set | sticky, complete)
-
-    ntype = node.get("type")
-    if ntype == "agent":
-        carry = _as_key_set(node.get("carry"))
-        # `carry_cwd` forwards the cwd_from key onto EVERY agent reply (agent.py:342,
-        # before the parse branch), so it's provided regardless of parse / output_schema.
-        cwd_from = node.get("cwd_from")
-        cwd = {cwd_from} if isinstance(cwd_from, str) and cwd_from else set()
-        if node.get("parse", True) is False:
-            # parse:false → exactly {raw} (+carry +cwd_from); the full set is KNOWN.
-            return (frozenset({"raw"} | carry | cwd | explicit_set | sticky), True)
-        if isinstance(node.get("output_schema"), dict) or explicit_set:
-            # a declared contract: treat its keys as the complete provides (an
-            # undeclared-but-emitted key is the gap the lint flags; ADR-0005 §6).
-            # `_agent_provides_keys` already folds in cwd_from.
-            return (frozenset(_agent_provides_keys(node, sticky) | explicit_set), True)
-        # parse:true with NO contract: the parsed keys are unknown → INCOMPLETE, so
-        # we can't prove any consumer's key absent (the weak-output-schema lint nudges
-        # declaring output_schema first). Skip, never false-warn.
-        return (frozenset({"raw"} | carry | cwd | sticky), False)
-    if ntype == "transform" and node.get("call") == "envelope":
-        if isinstance(node.get("provides"), list):   # declared (a list, possibly empty)
-            # PRESERVE + ADD, not reset: the dominant pattern is
-            # `return {**envelope.payload, "k": ...}` (merge inbound, add keys), so `provides`
-            # declares the ADDED keys and inbound is kept; completeness rides through. (A fn
-            # that truly RESETS — returns only its own keys — is then over-stated: a safe
-            # false-NEGATIVE, never a false warning.)
-            return (known | explicit_set | sticky, complete)
-        tainted.append(stage_name)                                # undeclared → taint (companion warn)
-        return (frozenset(sticky), False)                         # only sticky survives, INCOMPLETE
-    if ntype == "agent_loop":
-        # reply_with({**payload, answer, turns, outcome}) (agent_loop_node.py:122) — PRESERVES
-        # all inbound, ADDS these three. Completeness rides through (preserve+add, like a
-        # declared envelope-transform), so it is NOT an opaque reset.
-        return (known | {"answer", "turns", "outcome"} | explicit_set | sticky, complete)
-    if ntype in ("shell", "worktree"):
-        # RESET to the node's GUARANTEED keys (+carry +author-declared), COMPLETE: the set is
-        # engine-known, so a downstream consumer of an unguaranteed key IS flagged — fail-loud
-        # stands on accurate ground. Over-declared carry/`provides` only over-states `known`
-        # (a safe false-negative), never a false warning.
-        base = _shell_keys(node) if ntype == "shell" else _worktree_keys(node)
-        return (frozenset(base | _as_key_set(node.get("carry")) | explicit_set | sticky), True)
-    # PRESERVE nodes: add the keys this node type puts on the payload, keep completeness.
-    added: Set[str] = set(explicit_set)
-    if ntype == "transform":                 # call:"args" → result nested under `into`
-        added.add(node.get("into", "result"))
-    elif ntype in ("get", "post"):
-        added.add(node.get("into", "result"))
-    elif ntype == "render":
-        added |= {"output", "path"}
-    elif ntype == "human_gate":
-        added.add("decision")
-    # validators (json_object/json_schema/expect_field) and anything else: pass-through.
-    return (known | added | sticky, complete)
+        return Flow(pin.known | sticky_fs, pin.complete, pin.closed)
+    contract = resolve_contract(node.get("type"), node)
+    if contract.mode == "opaque" and _undeclared_envelope_transform(node):
+        tainted.append(stage_name)
+    return apply(contract, pin, sticky_fs)
 
 
 def _edges(stages: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -207,7 +115,7 @@ def compute_provides(nodes: Dict[str, Any], stages: Dict[str, Any], sticky: Set[
     the predecessor map rather than recomputing it."""
     pin: Dict[str, Provides] = {s: _TOP for s in stages}
     if start in stages:
-        pin[start] = (frozenset(), False)   # the entry payload is the unknowable INPUT
+        pin[start] = Flow()   # the entry payload is the unknowable INPUT (incomplete)
     preds = _edges(stages)
     # Iterate to convergence. The meet is monotone (preserve-transfers only grow `known`
     # as TOP collapses; reset-transfers are constant), so it descends from TOP to a least
@@ -262,12 +170,23 @@ def _render_template_text(rnode: Dict[str, Any], base_path: Optional[str]) -> Op
         return None
 
 
-def lint_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list: Any,
-                  start: Optional[str], base_path: Optional[str],
-                  warnings: List[str]) -> None:
-    """The broad requires↔provides lint (ADR-0005 slice B). Absorbs the 1a single-hop
-    render/branch checks (a 1-length path) and extends them across transform chains. Emits
-    ACTIONABLE warnings only; never raises."""
+def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list: Any,
+                     start: Optional[str], base_path: Optional[str]) -> "Tuple[List[str], List[str]]":
+    """The requires↔provides graph analysis (ADR-0005 slice B + ADR-0006 §D5). ONE pass, two
+    severities, split by how exact the provided set is where a consumer reads it:
+
+      - a key read but provably ABSENT on a `closed` path (a parse=false agent, a worktree —
+        the runtime set is exactly known) → an ERROR: the run WILL fail/misroute, so
+        `validate_pipeline` fails loud at load.
+      - a key read but missing where the set is `complete` (declared-exact, e.g. an agent's
+        output_schema — the model MAY still emit it) → a WARNING: a contract gap.
+      - where the set is incomplete because an undeclared envelope-transform upstream hid its
+        keys → one consolidated WARNING naming the transform(s) to fix.
+
+    Returns (errors, warnings). Never raises. `validate_pipeline` consumes the errors,
+    `lint_pipeline` the warnings (it runs on an already-valid config, so it sees only warnings)."""
+    errors: List[str] = []
+    warnings: List[str] = []
     sticky = set(k for k in sticky_list if isinstance(k, str)) if isinstance(sticky_list, list) else set()
     tainted: List[str] = []
     pin, preds = compute_provides(nodes, stages, sticky, start, tainted)
@@ -285,10 +204,9 @@ def lint_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list: An
                 todo.extend(preds.get(p, []))
         return sorted(seen & tainted_set)
 
-    # Collect consumers we CAN'T check because an undeclared envelope-transform upstream
-    # made their provides unknown — then emit ONE consolidated nudge (a per-transform or
-    # per-consumer warning floods a real pipeline; a parse transform with no downstream
-    # consumer stays silent because nothing is actually lost).
+    # Consumers we CAN'T check because an undeclared envelope-transform upstream made their
+    # provides unknown → ONE consolidated nudge (a per-transform/consumer warning floods a
+    # real pipeline; a parse transform with no downstream consumer stays silent — nothing lost).
     blocked_consumers: List[str] = []
     blocking_transforms: Set[str] = set()
 
@@ -298,6 +216,39 @@ def lint_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list: An
             blocked_consumers.append(consumer)
             blocking_transforms.update(culprits)
 
+    def branch_msg(s_name: str, on: str, known: "frozenset", hard: bool) -> str:
+        if hard:
+            return (
+                "stage {!r}: branches on {!r}, which is provably ABSENT here — the payload is a "
+                "fixed set providing {}. `branch.on` reads as missing, so the run takes "
+                "`branch.default` EVERY time. Provide {!r} before it (a transform with "
+                "`call: \"envelope\"` that parses + merges, an agent output_schema, or graph "
+                "`sticky`). [dataflow: branch-key-absent]".format(
+                    s_name, on, sorted(known - {"raw"}), on))
+        return (
+            "stage {!r}: branches on {!r}, but nothing on the path to it provides that key "
+            "(provides {}). The branch then depends on UNDECLARED output — it falls through to "
+            "branch.default on any run where {!r} is absent. Declare {!r} (in the producing "
+            "agent's output_schema, a transform's `provides`, or graph `sticky`). "
+            "[lint: branch-key-unprovided]".format(s_name, on, sorted(known - {"raw"}), on, on))
+
+    def render_msg(s_name: str, missing: List[str], known: "frozenset", hard: bool) -> str:
+        if hard:
+            return (
+                "stage {!r}: render template needs {} which is provably ABSENT here — the payload "
+                "is a fixed set providing {}. This render FAILS with render_unfilled_placeholders "
+                "EVERY run. Provide them (a transform with `call: \"envelope\"` that parses + "
+                "merges, an agent output_schema, or graph `sticky`), or set allow_unfilled:true if "
+                "the literal is intentional. [dataflow: render-key-absent]".format(
+                    s_name, missing, sorted(known - {"raw"})))
+        return (
+            "stage {!r}: render template needs {} which nothing on the path to it provides "
+            "(provides {}). The render then depends on undeclared output — it FAILS with "
+            "render_unfilled_placeholders on any run where they're absent. Declare them (in the "
+            "producing agent's output_schema, a transform's `provides`, or graph `sticky`), or set "
+            "allow_unfilled:true if intentionally literal. [lint: render-key-unprovided]".format(
+                s_name, missing, sorted(known - {"raw"})))
+
     for s_name, s in stages.items():
         node = nodes.get(s.get("node")) or {}
         pin_here = pin.get(s_name, _TOP)
@@ -306,16 +257,13 @@ def lint_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list: An
         # branch.on reads the payload AFTER this stage's node runs (the node's OUTPUT).
         on = (s.get("branch") or {}).get("on")
         if isinstance(on, str) and on:
-            known, complete = _transfer(node, pin_here, sticky, [], s_name)
-            if complete:
-                if on not in known:
-                    warnings.append(
-                        "stage {!r}: branches on {!r}, but nothing on the path to it provides "
-                        "that key (provides {}). The branch then depends on UNDECLARED output "
-                        "— it falls through to branch.default on any run where {!r} is absent. "
-                        "Declare {!r} (in the producing agent's output_schema, a transform's "
-                        "`provides`, or graph `sticky`). [lint: branch-key-unprovided]".format(
-                            s_name, on, sorted(known - {"raw"}), on, on))
+            flow = _transfer(node, pin_here, sticky, [], s_name)
+            if flow.closed:
+                if on not in flow.known:
+                    errors.append(branch_msg(s_name, on, flow.known, hard=True))
+            elif flow.complete:
+                if on not in flow.known:
+                    warnings.append(branch_msg(s_name, on, flow.known, hard=False))
             else:
                 note_blocked(s_name)
         # a render reads the payload that flows INTO it (provides_in).
@@ -324,18 +272,14 @@ def lint_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list: An
             needs = sorted(set(_PLACEHOLDER.findall(text))) if text is not None else []
             if not needs:
                 continue  # nothing read (no template / no placeholders) — nothing to check
-            known, complete = pin_here
-            if complete:
-                missing = [ph for ph in needs if ph not in known]
+            if pin_here.closed:
+                missing = [ph for ph in needs if ph not in pin_here.known]
                 if missing:
-                    warnings.append(
-                        "stage {!r}: render template needs {} which nothing on the path to it "
-                        "provides (provides {}). The render then depends on undeclared output — "
-                        "it FAILS with render_unfilled_placeholders on any run where they're "
-                        "absent. Declare them (in the producing agent's output_schema, a "
-                        "transform's `provides`, or graph `sticky`), or set allow_unfilled:true "
-                        "if intentionally literal. [lint: render-key-unprovided]".format(
-                            s_name, missing, sorted(known - {"raw"})))
+                    errors.append(render_msg(s_name, missing, pin_here.known, hard=True))
+            elif pin_here.complete:
+                missing = [ph for ph in needs if ph not in pin_here.known]
+                if missing:
+                    warnings.append(render_msg(s_name, missing, pin_here.known, hard=False))
             else:
                 note_blocked(s_name)
 
@@ -347,3 +291,4 @@ def lint_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list: An
             "checks. [lint: transform-provides-undeclared]".format(
                 ", ".join(repr(t) for t in sorted(blocking_transforms)),
                 ", ".join(repr(c) for c in sorted(set(blocked_consumers)))))
+    return errors, warnings

@@ -556,8 +556,13 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
     cons = g.get("constraints")
     if cons is not None:
         _check_constraints(cons, start, stages, errs)
-    _check_data_flow_contract(config.get("nodes") or {}, stages, errs,
-                              sticky=g.get("sticky") or [], base_path=base_path)
+    # The data-flow contract (ADR-0005 + ADR-0006 §D5): fail loud at LOAD on a consumer that
+    # reads a key provably ABSENT on a closed path. One analysis, shared with lint_pipeline —
+    # validate takes the ERRORS (here), the lint takes the WARNINGS.
+    from .dataflow import analyze_dataflow
+    df_errors, _ = analyze_dataflow(config.get("nodes") or {}, stages,
+                                    g.get("sticky") or [], g.get("start"), base_path)
+    errs.extend(df_errors)
     if errs:
         raise ValueError("invalid pipeline:\n  - " + "\n  - ".join(errs))
 
@@ -620,8 +625,9 @@ def lint_pipeline(config: Dict[str, Any], base_path: Optional[str] = None,
     # single-hop render/branch checks as the 1-length-path case). Lives in its own module
     # (the dataflow lattice + fixpoint are independently testable); imported lazily to keep
     # this module cheap to import.
-    from .dataflow import lint_dataflow
-    lint_dataflow(nodes, stages, sticky, g.get("start"), base_path, warnings)
+    from .dataflow import analyze_dataflow
+    _, df_warnings = analyze_dataflow(nodes, stages, sticky, g.get("start"), base_path)
+    warnings.extend(df_warnings)
     return warnings
 
 
@@ -660,93 +666,6 @@ def _lint_weak_output_schema(nodes: Dict[str, Any], warnings: List[str]) -> None
                 "type/enum). A parseable-but-wrong value then passes check_schema and "
                 "surfaces far downstream — declare type/enum on each so bad output is "
                 "caught here. [lint: weak-output-schema]".format(role, required, untyped))
-
-
-def _check_data_flow_contract(
-    nodes_dict: Dict[str, Any],
-    stages: Dict[str, Any],
-    errs: List[str],
-    sticky: Iterable[str] = (),
-    base_path: Optional[str] = None,
-) -> None:
-    """The data-flow contract (AGENTS.md §rules-that-bite): an agent's reply
-    is a STRING in payload['raw']. Nothing merges it until a `transform`
-    with `call: "envelope"` does. So an `agent` stage flowing directly to a
-    `render` or `branch` that reads a key the agent never produced is
-    silent-wrong: render finds {{placeholders}} it cannot fill; branch reads a
-    missing key and takes `default` every time.
-
-    Fails ACCURATELY: a parse=false agent DOES provide `raw` (+ `carry`,
-    `cwd_from`, sticky), so a render of only those — `{{raw}}` — is fine and is
-    NOT rejected. We read the render template (inline, or `template_file` via
-    `base_path`) and the branch key and flag ONLY a genuinely-unprovided key.
-    When a `template_file` can't be read (no `base_path`), the edge is left to
-    the runtime's own fail-loud rather than guessed at.
-
-    This check catches at LOAD what would otherwise surface mid-run
-    (the CHECK 8 footgun in the pre-submission rubric)."""
-    from .dataflow import _PLACEHOLDER, _as_key_set, _render_template_text
-    sticky_set = {k for k in sticky if isinstance(k, str)}
-    for s_name, s in stages.items():
-        s_node_name = s.get("node")
-        if not s_node_name:
-            continue
-        s_node = nodes_dict.get(s_node_name) or {}
-        if s_node.get("type") != "agent":
-            continue
-        # ADR-0004: an agent with parse=True (the default) runs extract_json
-        # on its own output and merges parsed keys onto the reply. The
-        # data-flow contract is satisfied by the agent itself; downstream
-        # render/branch find the keys they expect. Only flag when the user
-        # explicitly opts out via parse=False.
-        if s_node.get("parse", True):
-            continue
-        # What a parse=false agent actually provides (no merge step): `raw` plus
-        # carry / cwd_from / sticky (agent.py:342 forwards cwd_from regardless of parse).
-        provided = {"raw"} | _as_key_set(s_node.get("carry")) | sticky_set
-        cwd_from = s_node.get("cwd_from")
-        if isinstance(cwd_from, str) and cwd_from:
-            provided.add(cwd_from)
-        t_name = s.get("then")
-        if t_name is None or t_name not in stages:
-            continue  # terminal or already-flagged by the .then validity check
-        t = stages[t_name]
-        t_node_name = t.get("node")
-        t_node = nodes_dict.get(t_node_name) or {} if t_node_name else {}
-        t_type = t_node.get("type") or ""
-        # Agent → render: fail only if the template needs a key the agent does NOT
-        # provide (so `{{raw}}` is fine). `allow_unfilled: true` opts out entirely.
-        if t_type == "render" and not t_node.get("allow_unfilled"):
-            text = _render_template_text(t_node, base_path)
-            if text is None:
-                continue  # `template_file` unreadable here → leave it to runtime fail-loud
-            missing = sorted(set(_PLACEHOLDER.findall(text)) - provided)
-            if missing:
-                errs.append(
-                    "stage {!r} (agent, parse=false) → stage {!r} (render) needs "
-                    "{} which the agent does not provide (its reply is a STRING in "
-                    "payload['raw']; it provides {}). Insert a `transform` stage with "
-                    "`call: \"envelope\"` that parses + merges (e.g. "
-                    "`examples/hello-yaah/hello_transforms.py:parse`), OR set "
-                    "`allow_unfilled: true` if the unparsed payload is intentional".format(
-                        s_name, t_name, missing, sorted(provided)))
-            continue
-        # Agent → stage-with-branch: `transform`/`human_gate` merge keys, so they're
-        # exempt; for any other node the branch reads the agent's payload directly, so
-        # fail only if `branch.on` is a key the agent does NOT provide (branching on
-        # `raw` is fine).
-        branch = t.get("branch")
-        if branch and t_type not in ("transform", "human_gate"):
-            on = branch.get("on") if isinstance(branch, dict) else None
-            if isinstance(on, str) and on in provided:
-                continue
-            errs.append(
-                "stage {!r} (agent, parse=false) → stage {!r} (type {!r}) branches on "
-                "{!r}, which the agent does not merge onto the payload (it provides {}), "
-                "so `branch.on` reads as missing and the run takes `branch.default` every "
-                "time. Insert a `transform` stage with `call: \"envelope\"` between them "
-                "that parses + merges (see `examples/hello-yaah/hello_transforms.py:parse`).".format(
-                    s_name, t_name, t_type or "?", on, sorted(provided)))
 
 
 def validate_budgets(root: Dict[str, Any], pipeline: Dict[str, Any]) -> None:

@@ -560,25 +560,54 @@ def test_parse_false_render_of_unprovided_key_still_fails_loud() -> None:
     raise AssertionError("parse=false → render needing an unprovided key must still raise")
 
 
-def test_parse_false_branch_on_raw_ok_but_other_key_fails() -> None:
-    on_raw = _parse_false_to({"type": "json_object"},
-                             {"branch": {"on": "raw", "routes": {}, "default": "a"}})
-    validate_pipeline(on_raw)  # branches on `raw`, which the agent provides → fine
-    on_key = _parse_false_to({"type": "json_object"},
-                             {"branch": {"on": "verdict", "routes": {}, "default": "a"}})
+def test_parse_false_branch_after_validator_reset() -> None:
+    # A validator used as a MAIN node returns a Verdict → its output payload is a FRESH
+    # {status, severity, failures} (core/verdict.py to_envelope) — it RESETS, so the agent's
+    # `raw` is GONE downstream. Branching on `status` (which the validator DOES provide) is
+    # fine; branching on `raw`/`verdict` (reset away) fails loud. (The old model wrongly treated
+    # the validator as a passthrough and blessed `branch on raw` — a runtime-broken pipeline.)
+    on_status = _parse_false_to({"type": "json_object"},
+                                {"branch": {"on": "status", "routes": {}, "default": "a"}})
+    validate_pipeline(on_status)  # `status` IS in the validator's fresh payload
+    for absent in ("raw", "verdict"):
+        bad = _parse_false_to({"type": "json_object"},
+                              {"branch": {"on": absent, "routes": {}, "default": "a"}})
+        try:
+            validate_pipeline(bad)
+        except ValueError as e:
+            assert absent in str(e), str(e)
+        else:
+            raise AssertionError(
+                "branch on {!r} (reset away by the validator) must fail loud".format(absent))
+
+
+def test_validator_main_node_render_status_ok_inbound_fails() -> None:
+    # the code-eval's repro: agent(parse=false) → json_object(main) → render. The validator
+    # RESETS the payload to {status,...}, so `{{status}}` renders fine and must NOT be blocked
+    # (the false positive we fixed), while `{{raw}}` (reset away) correctly fails loud.
+    def chain(tpl: str) -> Dict[str, Any]:
+        return {"nodes": {"ask": {"type": "agent", "parse": False},
+                          "chk": {"type": "json_object"},
+                          "rep": {"type": "render", "template_text": tpl}},
+                "graph": {"start": "a", "stages": {
+                    "a": {"node": "ask", "then": "b"},
+                    "b": {"node": "chk", "then": "c"},
+                    "c": {"node": "rep"}}}}
+    validate_pipeline(chain("Result: {{status}}"))   # provided by the validator → must pass
     try:
-        validate_pipeline(on_key)
+        validate_pipeline(chain("{{raw}}"))
     except ValueError as e:
-        assert "verdict" in str(e), str(e)
-        return
-    raise AssertionError("parse=false → branch on an unprovided key must still raise")
+        assert "raw" in str(e), str(e)
+    else:
+        raise AssertionError("render of reset-away {{raw}} after a validator must fail loud")
 
 
 def main() -> None:
     test_valid_root_passes()
+    test_validator_main_node_render_status_ok_inbound_fails()
     test_parse_false_render_of_raw_is_accepted()
     test_parse_false_render_of_unprovided_key_still_fails_loud()
-    test_parse_false_branch_on_raw_ok_but_other_key_fails()
+    test_parse_false_branch_after_validator_reset()
     test_unknown_top_level_key_with_did_you_mean()
     test_underscore_keys_treated_as_comments()
     test_bare_string_transport_suggests_typed_block()

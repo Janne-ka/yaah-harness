@@ -386,8 +386,11 @@ def scenario_data_flow_contract_load_time() -> None:
         validate_pipeline(bad_branch)
     except ValueError as e:
         msg = str(e)
-        assert "agent" in msg and "branch" in msg, msg
-        assert "expect_field" in msg, msg
+        # ADR-0006 §D5: the check is now consumer-centric and graph-wide — it names the branch
+        # stage + the provably-absent key + the tag (not the specific upstream agent). The
+        # expect_field passthrough keeps the parse=false agent's CLOSED set, so `ok` is absent.
+        assert "branch" in msg and "'ok'" in msg, msg
+        assert "branch-key-absent" in msg, msg
     else:
         raise AssertionError(
             "agent → expect_field-with-branch must fail (the validator doesn't merge)")

@@ -14,7 +14,7 @@ import io
 import sys
 
 from yaah.cli import _dispatch_validate
-from yaah.validate import lint_pipeline
+from yaah.validate import lint_pipeline, validate_pipeline
 
 
 def _node(schema=None, parse=True, type_="agent"):
@@ -168,11 +168,17 @@ def quiet_branch_no_schema_or_non_agent() -> None:
     assert not _has_branch_warn(_branch_cfg("verdict", {"properties": {}}, node_type="transform"))
 
 
-def warns_branch_parse_false_provides_only_raw() -> None:
-    # a parse:false agent provides exactly {raw} -> branching on `verdict` is a real gap the
-    # single-hop 1a lint skipped; the broad lint now flags it (the producing-side hard error
-    # only covers agent -> SEPARATE branch stage, not a same-stage branch).
-    assert _has_branch_warn(_branch_cfg("verdict", {"properties": {}}, parse=False))
+def fails_loud_branch_parse_false_provides_only_raw() -> None:
+    # a parse:false agent provides exactly {raw} — a CLOSED (runtime-exact) set. Branching on
+    # `verdict` reads a PROVABLY-ABSENT key, so it is a hard ERROR now (fail-loud), not an
+    # advisory warning (ADR-0006 §D5 broadening — closed-path miss → validate rejects at load).
+    cfg = _branch_cfg("verdict", {"properties": {}}, parse=False)
+    try:
+        validate_pipeline(cfg)
+    except ValueError as e:
+        assert "verdict" in str(e) and "branch-key-absent" in str(e), str(e)
+        return
+    raise AssertionError("parse=false branch on a provably-absent key must fail loud")
 
 
 # ── 1a-render contract completeness: render needs a key the agent doesn't DECLARE ─
@@ -548,15 +554,16 @@ def lint_never_raises_on_malformed_output_schema() -> None:
     lint_pipeline(cfg)   # must not raise
 
 
-def placeholder_regex_matches_the_render_node() -> None:
-    # The lint extracts a render's {{keys}} with dataflow._PLACEHOLDER and feeds them to BOTH
-    # the advisory render check AND the hard data-flow fail-loud (validate.py imports this copy).
-    # If it ever diverges from the regex the render node ACTUALLY fills, the lint reasons about a
-    # different key set than runtime → the silent-misroute class reopens. render_node owns its own
-    # copy (deliberately un-imported for cheap import), so guard the equivalence here.
+def placeholder_regex_is_single_source() -> None:
+    # The lint extracts a render's {{keys}} with the SAME regex the render node ACTUALLY fills —
+    # if they diverged, the lint would reason about a different key set than runtime and the
+    # silent-misroute class reopens. Since ADR-0006 slice B5 there is ONE copy in `templating`;
+    # guard that the lint and the runtime both use that exact object (not a re-introduced copy).
+    from yaah.templating import PLACEHOLDER, fill
     from yaah.dataflow import _PLACEHOLDER as lint_re
-    from yaah.nodes.render_node import _PLACEHOLDER as render_re
-    assert lint_re.pattern == render_re.pattern, (lint_re.pattern, render_re.pattern)
+    from yaah.nodes.render_node import _fill as render_fill
+    assert lint_re is PLACEHOLDER, "the lint must use the shared templating.PLACEHOLDER"
+    assert render_fill is fill, "the render node must use the shared templating.fill"
 
 
 def opaque_nodes_provide_their_real_keys() -> None:
@@ -581,11 +588,41 @@ def opaque_nodes_provide_their_real_keys() -> None:
                     "render-key-unprovided")                                          # author-declared
     # worktree: add (default) → workdir/branch/repo/base; remove → removed/ok
     assert not _has(chain({"type": "worktree"}, "{{workdir}}"), "render-key-unprovided")
-    assert _has(chain({"type": "worktree", "op": "remove"}, "{{workdir}}"),
-                "render-key-unprovided")                                              # add-only key
+    # worktree is a CLOSED reset — a render of an add-only key after `remove` is now FAIL-LOUD
+    # (a hard ERROR), not an advisory warning (ADR-0006 §D5 broadening).
+    try:
+        validate_pipeline(chain({"type": "worktree", "op": "remove"}, "{{workdir}}"))
+        raise AssertionError("worktree-remove render of add-only {{workdir}} must fail loud")
+    except ValueError as e:
+        assert "workdir" in str(e) and "render-key-absent" in str(e), str(e)
     assert not _has(chain({"type": "worktree", "op": "remove"}, "{{removed}}"), "render-key-unprovided")
     # agent_loop preserves inbound v and adds answer
     assert not _has(chain({"type": "agent_loop"}, "{{v}} {{answer}}"), "render-key-unprovided")
+
+
+def quiet_render_default_into_for_get_and_post() -> None:
+    # ADR-0006 eval fix: get/post builder defaults are `into="data"` / `"stored"`, NOT "result".
+    # dataflow once modeled "result" for both, false-warning a downstream {{data}} / {{stored}}.
+    for role, node, key in (("g", {"type": "get"}, "data"), ("p", {"type": "post"}, "stored")):
+        cfg = _chain(("a", {"type": "agent", "output_schema": {"required": ["v"]}}),
+                     (role, node), template="{{" + key + "}}")
+        assert not _has(cfg, "render-key-unprovided"), key
+
+
+def custom_node_type_is_opaque_not_false_positive() -> None:
+    # ADR-0006 soundness fix: a custom register()'d type is unknown to the lint → it must
+    # resolve to OPAQUE (downstream uncheckable), NOT the old PRESERVE default that kept
+    # completeness and FALSE-POSITIVEd a downstream read of a key the custom node adds. Under
+    # the old code this warned; it must not now.
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False},
+        "x": {"type": "my_custom_node"},
+        "r": {"type": "render", "template_text": "{{custom_key}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "x", "then": "s3"},
+            "s3": {"node": "r"}}}}
+    assert not _has(cfg, "render-key-unprovided")
 
 
 def main() -> None:
@@ -604,7 +641,7 @@ def main() -> None:
     quiet_branch_key_sticky()
     quiet_branch_on_raw()
     quiet_branch_no_schema_or_non_agent()
-    warns_branch_parse_false_provides_only_raw()
+    fails_loud_branch_parse_false_provides_only_raw()
     teeth_default_warns_but_passes()
     teeth_strict_fails_with_exit_2()
     teeth_strict_passes_on_typed_schema()
@@ -639,8 +676,10 @@ def main() -> None:
     loop_converges_and_keeps_key()
     quiet_render_parse_false_agent_forwards_cwd_from()
     lint_never_raises_on_malformed_output_schema()
-    placeholder_regex_matches_the_render_node()
+    placeholder_regex_is_single_source()
     opaque_nodes_provide_their_real_keys()
+    quiet_render_default_into_for_get_and_post()
+    custom_node_type_is_opaque_not_false_positive()
     print("ok")
 
 
