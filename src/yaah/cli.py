@@ -63,6 +63,7 @@ Debug:
                                 add --corr ID to zoom in on one specific run
 
 Diagnose:
+  manual                        print the generated agent manual (for LLM authors)
   validate <root>               validate root + referenced pipeline file (no run)
                                   [--strict] [--from-code] [--json (machine-readable diagnostics)]
   doctor                        diagnose install: Python version, optional deps, packaged base configs
@@ -166,6 +167,12 @@ def _parse_init(rest: list) -> dict:
     if len(rest) > 1:
         _usage_exit("init takes one argument (the target directory)")
     return {"action": "scaffold", "target_dir": rest[0], "archetype": "linear"}
+
+
+def _parse_manual(rest: list) -> dict:
+    if rest:
+        _usage_exit("manual takes no arguments")
+    return {"action": "manual"}
 
 
 def _parse_scaffold(rest: list) -> dict:
@@ -295,6 +302,7 @@ def _parse_baton_schema(rest: list) -> dict:
 # CLI surface — adding a verb is one entry here + the matching dispatcher.
 _VERB_PARSERS: Dict[str, Callable[[list], dict]] = {
     "init":          _parse_init,
+    "manual":        _parse_manual,
     "scaffold":      _parse_scaffold,
     "run":           _parse_run,
     "list":          _parse_via_flag("--list"),
@@ -414,6 +422,14 @@ def _dispatch_scaffold_list(spec: Dict[str, Any]) -> None:
     print("\nUse: yaah scaffold <archetype> <dir>")
 
 
+def _dispatch_manual(spec: Dict[str, Any]) -> None:
+    """Print the generated agent manual — ONE token-budgeted document an LLM
+    needs in context to author valid configs (generated from the same tables
+    validate/build read, so it cannot drift)."""
+    from .manual import build_manual
+    print(build_manual())
+
+
 def _dispatch_scaffold(spec: Dict[str, Any]) -> None:
     """Write the named archetype's template into target_dir. `yaah init <dir>`
     enters here with archetype="linear" (back-compat)."""
@@ -436,6 +452,7 @@ _SELF_CONTAINED_DISPATCH: Dict[str, Callable[[Dict[str, Any]], None]] = {
     "completion":    _dispatch_completion,
     "trace":         _dispatch_trace,
     "scaffold-list": _dispatch_scaffold_list,
+    "manual":        _dispatch_manual,
     "scaffold":      _dispatch_scaffold,
 }
 
