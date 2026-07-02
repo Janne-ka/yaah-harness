@@ -59,6 +59,16 @@ def main() -> None:
     # prose mode unchanged: same bad config still exits nonzero without --json
     rc, out, err = _run(d, "bad2.json")
     assert rc != 0 and "claer" in (out + err), (rc, out, err)
+
+    # the shared seam both surfaces consume (validate.validate_config +
+    # split_lint_id): a valid root with NO pipeline yields zero warnings, and
+    # a warning without the "[lint: id]" trailer splits to (None, itself).
+    sys.path.insert(0, "src")
+    from yaah.validate import split_lint_id, validate_config
+    assert validate_config({"state": {"type": "memory"}}, d) == []
+    assert split_lint_id("plain text warning") == (None, "plain text warning")
+    wid, msg = split_lint_id("stage 'x': weak [lint: weak-output-schema]")
+    assert wid == "weak-output-schema" and msg == "stage 'x': weak", (wid, msg)
     print("ok")
 
 

@@ -202,11 +202,12 @@ async def _drive(d: str, cert: str) -> None:
     from yaah.runtime import _read_json, run_root
 
     # positive: orchestrator (serves local-tag) drives; remote-eval runs in the
-    # WORKER process, reached over authed TLS NATS. run_root returns the final
-    # stage's output envelope.
+    # WORKER process, reached over authed TLS NATS. run_root returns the
+    # Outcome; a completed run's Done carries the final stage's output envelope.
     out = await run_root(_read_json(os.path.join(d, "orch.json")), d)
-    assert out is not None, "expected a result from the orchestrator run"
-    raw = out.payload.get("raw") if hasattr(out, "payload") else None
+    env = getattr(out, "output", None)
+    assert env is not None, "expected a completed run from the orchestrator, got {!r}".format(out)
+    raw = env.payload.get("raw")
     assert raw is not None, out
     assert json.loads(raw) == {"v": "tagged-locally"}, raw
 

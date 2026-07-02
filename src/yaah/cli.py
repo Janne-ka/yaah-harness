@@ -29,12 +29,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import sys
 from typing import Any, Callable, Dict
 
 from .harness import StageFailed
-from .runtime_factories import _read_json, _rel
+from .runtime_factories import _read_json
 from .validate import validate_root
 
 
@@ -490,27 +489,13 @@ def _dispatch_explain(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> 
     explain_root(raw_user, root, base, root_path=spec["root"], fake=spec.get("fake", False))
 
 
-def _diagnostics(exc_text: str) -> list:
-    """Split a validate ValueError's bulleted message into per-item diagnostics.
-    Best-effort structure: `stage` is extracted where the message follows the
-    "stage '<name>': ..." convention (full code/path taxonomy is a follow-up —
-    it needs per-site changes at every errs.append)."""
-    header, sep, rest = exc_text.partition(":\n  - ")
-    items = rest.split("\n  - ") if sep else [exc_text]
-    out = []
-    for msg in items:
-        d = {"message": msg}
-        m = re.match(r"stage '([^']+)':", msg)
-        if m:
-            d["stage"] = m.group(1)
-        out.append(d)
-    return out
-
-
 def _dispatch_validate(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
     """Validate root + the referenced pipeline file. Closes the gap where the
     pre-batch `yaah validate` only checked the root and pronounced "ok" while
-    the referenced pipeline had unresolved targets or was malformed.
+    the referenced pipeline had unresolved targets or was malformed. The check
+    itself is `validate.validate_config` — shared with the MCP `validate` tool
+    so the two operator surfaces can't drift; this dispatcher owns the terminal
+    rendering and exit codes.
 
     `--json` prints ONE machine-readable object on stdout —
     {ok, root, errors: [{message, stage?}], warnings: [{id, message}]} —
@@ -518,11 +503,8 @@ def _dispatch_validate(spec: Dict[str, Any], root: Dict[str, Any], base: str) ->
     without prose parsing. Exit codes unchanged: 0 ok / 1 invalid / 2 strict.
     Root validation happens HERE (this action dispatches before the
     orchestrator's validate_root) so root errors become diagnostics too."""
-    from .validate import validate_pipeline, lint_pipeline, validate_root
+    from .validate import split_diagnostics, split_lint_id, validate_config
     as_json = spec.get("json", False)
-    errors: list = []
-    pipeline_ref = root.get("pipeline")
-    warnings: list = []
     # --from-code (ADR-0005 slice D): read @provides off fn: transforms so the lint sees
     # across them without hand-written `provides`. OPT-IN because it IMPORTS app code; the
     # default lint stays pure.
@@ -530,35 +512,17 @@ def _dispatch_validate(spec: Dict[str, Any], root: Dict[str, Any], base: str) ->
     if spec.get("from_code"):
         from .contract import fn_provides_resolver
         resolve = fn_provides_resolver(base)
+    errors: list = []
+    warnings: list = []
     try:
-        validate_root(root)
-        if isinstance(pipeline_ref, str):
-            pipeline_cfg = _read_json(_rel(base, pipeline_ref))
-            validate_pipeline(pipeline_cfg, base_path=base)
-            # render `template_file` paths resolve against the ROOT config's dir
-            # (`base`) — the runtime builds the pipeline with `base_dir=base`
-            # (runtime.py: _assemble_harness), so _build_render joins template_file
-            # onto `base`, NOT the pipeline file's own dir. The lint MUST match, or it
-            # reads the wrong path whenever `root["pipeline"]` points into a subdir.
-            warnings = lint_pipeline(pipeline_cfg, base_path=base, resolve=resolve)
-            ok_msg = "ok: {} is valid (root + pipeline {})".format(spec["root"], pipeline_ref)
-        elif isinstance(pipeline_ref, dict):
-            validate_pipeline(pipeline_ref, base_path=base)
-            warnings = lint_pipeline(pipeline_ref, base_path=base, resolve=resolve)
-            ok_msg = "ok: {} is valid (root + inline pipeline)".format(spec["root"])
-        else:
-            # Root validation caught the missing/bad-type case if any.
-            ok_msg = "ok: {} is a valid root config".format(spec["root"])
+        warnings = validate_config(root, base, resolve=resolve)
     except ValueError as e:
-        errors = _diagnostics(str(e))
         if not as_json:
             raise                      # prose mode: same loud failure as before
+        errors = split_diagnostics(str(e))
     if as_json:
-        warn_items = []
-        for w in warnings:
-            m = re.search(r"\s*\[lint: ([a-z0-9-]+)\]$", w)
-            warn_items.append({"id": m.group(1) if m else None,
-                               "message": w[:m.start()] if m else w})
+        warn_items = [{"id": wid, "message": msg}
+                      for wid, msg in map(split_lint_id, warnings)]
         print(json.dumps({"ok": not errors, "root": spec["root"],
                           "errors": errors, "warnings": warn_items}, indent=2))
         if errors:
@@ -574,42 +538,128 @@ def _dispatch_validate(spec: Dict[str, Any], root: Dict[str, Any], base: str) ->
     # UP FRONT ("warning[id]: ...") — on a long unwrapped stderr line the rule name
     # is what the author scans for, and the trailer would be the last thing seen.
     for w in warnings:
-        m = re.search(r"\s*\[lint: ([a-z0-9-]+)\]$", w)
-        if m:
-            print("warning[{}]: {}".format(m.group(1), w[:m.start()]), file=sys.stderr)
+        wid, msg = split_lint_id(w)
+        if wid:
+            print("warning[{}]: {}".format(wid, msg), file=sys.stderr)
         else:
-            print("warning: " + w, file=sys.stderr)
+            print("warning: " + msg, file=sys.stderr)
     if warnings and spec.get("strict"):
         print("strict: {} lint warning(s) — failing with exit 2 (rerun without --strict "
               "to treat as advisory)".format(len(warnings)), file=sys.stderr)
         raise SystemExit(2)
-    print(ok_msg)
+    pipeline_ref = root.get("pipeline")
+    if isinstance(pipeline_ref, str):
+        print("ok: {} is valid (root + pipeline {})".format(spec["root"], pipeline_ref))
+    elif isinstance(pipeline_ref, dict):
+        print("ok: {} is valid (root + inline pipeline)".format(spec["root"]))
+    else:
+        print("ok: {} is a valid root config".format(spec["root"]))
+
+
+# ---------- outcome / mailbox rendering ---------------------------------------
+# The runtime actions RETURN data (Outcome / Batons / dicts); how that data
+# reads on a terminal is this surface's concern. The MCP server renders the
+# same returns as JSON (adapters/mcp_server/tools.py) — two renderings, one
+# source of truth for the data itself.
+
+_RESULT_PRINT_MAX = 4000
+
+
+def _short(out: object) -> str:
+    """Truncated render of an Outcome for the console. The payload can carry
+    large fields (a full diff, a spec); an operator — especially an AI in a
+    session — polls state via this print, so it must stay cheap to read.
+    Artifacts live on disk by reference (`*_path` keys); fetch on demand."""
+    s = str(out)
+    if len(s) <= _RESULT_PRINT_MAX:
+        return s
+    return s[:_RESULT_PRINT_MAX] + " … [{} chars truncated — artifacts are on disk via *_path keys]".format(
+        len(s) - _RESULT_PRINT_MAX)
+
+
+def _print_concerns(concerns: list) -> None:
+    """The concern TEXTS, one line each — a count alone is not actionable; the
+    whole point of soft/sceptic concerns is that the human reads them AT the gate."""
+    for c in concerns:
+        line = "  concern [{}/{}]: {}".format(c.get("stage", "?"), c.get("code", "?"),
+                                              c.get("message", ""))
+        if c.get("fix_hint"):
+            line += " ({})".format(c["fix_hint"])
+        print(line)
+
+
+def _render_outcome(out: Any) -> None:
+    """One run/resume Outcome on the console: the GATE banner when parked
+    (durable state lets another process resume it), then the RESULT line."""
+    from .harness import Suspended
+    if isinstance(out, Suspended):
+        print("GATE baton_id={} awaiting={} concerns={}".format(
+            out.baton_id, out.awaiting, len(out.concerns)))
+        _print_concerns(out.concerns)
+    print("RESULT:", _short(out))
 
 
 def _dispatch_baton_schema(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
-    from .runtime import baton_schema
-    asyncio.run(baton_schema(root, base, spec["baton_id"]))
+    from .runtime import ActionError, baton_schema
+    try:
+        out = asyncio.run(baton_schema(root, base, spec["baton_id"]))
+    except ActionError as e:
+        # ONLY the action's domain errors (no such baton / not a gate / no
+        # form) get the documented exit code 1 — a driver skill can tell
+        # "wrong baton" from "broken root/store" (which stays exit 2 via
+        # main()'s boundary; catching all ValueError would net e.g. a
+        # corrupted store's JSONDecodeError into the wrong class).
+        print("error: {}".format(e), file=sys.stderr)
+        raise SystemExit(1) from None
+    print(json.dumps(out, indent=2))
 
 
 def _dispatch_list(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
-    from .runtime import list_gates
-    asyncio.run(list_gates(root, base, as_json=bool(spec.get("json"))))
+    from .runtime import list_gates, _baton_json
+    gates = asyncio.run(list_gates(root, base))
+    if spec.get("json"):
+        # one JSON document with the same fields the prose view shows — so a
+        # driver skill can parse instead of interpret (shape: _baton_json).
+        print(json.dumps({"batons": [_baton_json(b) for b in gates]}, indent=2))
+        return
+    for b in gates:
+        print("GATE baton_id={} stage={} awaiting={} concerns={}".format(
+            b.id, b.stage, b.awaiting, len(b.concerns)))
+        _print_concerns(b.concerns)
+        if b.pending is not None:
+            # surface the failed verdict that escalated this stage (Y3) — the
+            # failure that broke the stage, shown where the human first looks...
+            for f in (b.pending.payload.get("escalation") or {}).get("failures", []):
+                print("  failed: {}: {}".format(f.get("code", "?"), f.get("message", "")))
+            # ...and the pending question/ask, so they know what to answer.
+            q = b.pending.payload.get("question") or b.pending.payload.get("ask")
+            if q:
+                print("  question: {}".format(q))
+    if not gates:
+        print("(no suspended gates)")
 
 
 def _dispatch_clear(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
     from .runtime import clear_state
-    asyncio.run(clear_state(root, base))
+    print("CLEARED:", asyncio.run(clear_state(root, base)))
 
 
 def _dispatch_resume(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
     from .runtime import resume_gate
     decision = _read_json(spec["decision_file"]) if spec["decision_file"] else {}
-    asyncio.run(resume_gate(root, base, spec["baton_id"], decision))
+    # The originally-detached engine exited at the park; THIS process now runs
+    # the engine until the next gate or completion. Banner sets expectations
+    # (was previously silently blocking).
+    print("[yaah resume] engine running in this process until next gate or completion",
+          file=sys.stderr)
+    _render_outcome(asyncio.run(resume_gate(root, base, spec["baton_id"], decision)))
 
 
 def _dispatch_run(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
     from .runtime import run_root
-    asyncio.run(run_root(root, base))
+    out = asyncio.run(run_root(root, base))
+    if out is not None:   # None = the serve-only path (which normally never returns)
+        _render_outcome(out)
 
 
 _ROOT_DISPATCH: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], str], None]] = {

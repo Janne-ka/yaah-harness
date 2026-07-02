@@ -28,6 +28,7 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 import difflib
+import re
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 # Lazy imports for enum tables that depend on third-party modules — pulled inside
@@ -819,3 +820,64 @@ def is_fork_config(stage_config: Dict[str, Any], stage_names: set) -> bool:
     the `fork` key (no more target-sniffing); `stage_names` kept for signature
     compatibility."""
     return _is_fork(stage_config, stage_names)
+
+
+# ---------- the whole-config check + its machine-readable diagnostics ---------
+# Shared by the two operator surfaces (`yaah validate [--json]` in cli.py, the
+# MCP `validate` tool in adapters/mcp_server/tools.py) so their diagnostics
+# can never drift — they were hand-copied before, with a "kept in step" comment
+# doing the synchronization.
+
+def validate_config(root: Dict[str, Any], base_path: str,
+                    resolve: Optional[Callable[[Any], Optional[List[str]]]] = None) -> List[str]:
+    """Validate a loaded root AND the pipeline it references — the full check
+    behind `yaah validate` and the MCP `validate` tool. Raises ValueError on the
+    first invalid layer (root, then pipeline); returns the pipeline's lint
+    WARNINGS when everything is valid.
+
+    The one I/O here: `root["pipeline"]` as a string is read as a JSON file
+    relative to `base_path` (the ROOT config's dir — the same base the runtime
+    builds with, so `template_file` lint paths match `_build_render`'s
+    resolution). An inline pipeline dict is validated as-is; an absent/bad
+    `pipeline` key is validate_root's to report. `resolve` is the opt-in
+    `--from-code` @provides resolver, passed through to lint_pipeline."""
+    validate_root(root)
+    pipeline_ref = root.get("pipeline")
+    if isinstance(pipeline_ref, str):
+        from .runtime_factories import _read_json, _rel
+        pipeline_cfg = _read_json(_rel(base_path, pipeline_ref))
+    elif isinstance(pipeline_ref, dict):
+        pipeline_cfg = pipeline_ref
+    else:
+        return []   # no pipeline to check; root validation already vouched for the shape
+    validate_pipeline(pipeline_cfg, base_path=base_path)
+    return lint_pipeline(pipeline_cfg, base_path=base_path, resolve=resolve)
+
+
+def split_diagnostics(exc_text: str) -> List[Dict[str, Any]]:
+    """A validate ValueError's bulleted message as per-item diagnostics:
+    [{message, stage?}]. Best-effort structure — `stage` is extracted where the
+    message follows this module's "stage '<name>': ..." convention (a full
+    code/path taxonomy is a follow-up; it needs per-site changes at every
+    errs.append). The `{ok, errors, warnings}` shapes both operator surfaces
+    emit are built from this."""
+    header, sep, rest = exc_text.partition(":\n  - ")
+    items = rest.split("\n  - ") if sep else [exc_text]
+    out: List[Dict[str, Any]] = []
+    for msg in items:
+        d: Dict[str, Any] = {"message": msg}
+        m = re.match(r"stage '([^']+)':", msg)
+        if m:
+            d["stage"] = m.group(1)
+        out.append(d)
+    return out
+
+
+def split_lint_id(warning: str) -> "Tuple[Optional[str], str]":
+    """A lint warning's (rule_id, message) — the "[lint: id]" trailer every
+    lint_pipeline message carries, parsed HERE because this module owns that
+    format. (None, warning) when there is no trailer."""
+    m = re.search(r"\s*\[lint: ([a-z0-9-]+)\]$", warning)
+    if m:
+        return m.group(1), warning[:m.start()]
+    return None, warning

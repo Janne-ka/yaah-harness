@@ -50,12 +50,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .build import build, harness_from_config, serve_from_config
 from .core import Envelope, Kind
-from .harness import Baton, BatonStore, StageFailed, Suspended, build_decider as _build_decider, drive
+from .harness import Baton, BatonStore, Outcome, build_decider as _build_decider, drive
 from .store import EnvelopeStore, IdempotencyStore
 # Config-block → runtime-leaf factories (the maps + builders, split out so this
 # module is just assembly + entrypoints). _read_json is re-exported here because
@@ -156,7 +155,37 @@ async def _assemble_harness(root: Dict[str, Any], base: str) -> Any:
                  live_config_path=live_path)
 
 
-async def run_root(root: Dict[str, Any], base: str) -> Optional[Envelope]:
+def _seed_task(root: Dict[str, Any], base: str) -> "Tuple[Envelope, Dict[str, Any]]":
+    """The ONE starting message of a run + the run kwargs. Everything in YAAH is
+    an Envelope (one message shape, used everywhere), and the run begins by
+    dropping a single Kind.TASK envelope into the harness; the graph's `start`
+    stage receives it and each stage's output becomes the next stage's input.
+    The envelope's `payload` is whatever the FIRST stage's prompt/template reads
+    (e.g. {"task": "...", "request": "..."}); the harness adds the headers
+    (correlation_id, etc.) itself.
+
+    That payload is the root's `input`, supplied two ways (hug-the-world): an
+    inline object for small demos/tests (no one-line fixture file needed), or a
+    path to a JSON fixture for real inputs. A dict is used verbatim; a string is
+    read as a base-relative fixture path. Absent `input` -> an empty payload (a
+    pipeline whose start stage needs no seed data).
+
+    Used by: run_root and the MCP `run` tool — the two run entrypoints seed
+    identically and differ only in gate handling (driver vs mailbox)."""
+    raw_input = root.get("input", {})
+    payload = raw_input if isinstance(raw_input, dict) else _read_json(_rel(base, raw_input))
+    run_kw = {"ttl": root["baton_ttl"]} if "baton_ttl" in root else {}
+    return Envelope(Kind.TASK, payload), run_kw
+
+
+async def run_root(root: Dict[str, Any], base: str) -> "Optional[Outcome]":
+    """Run the root config's pipeline and RETURN the Outcome — Done, Suspended
+    (parked at a gate; durable state lets another process resume it), or
+    Cleared. Returns None only on the serve-only path, which never exits in
+    normal operation. No RESULT rendering here (GATE/RESULT lines belong to the
+    caller's surface, yaah.cli), so programmatic callers — the MCP server, an
+    embedding app, tests — consume the Outcome directly; the serve paths still
+    print their operational banners ("served:", "serving; awaiting requests")."""
     load_plugins(root.get("plugins"), base)   # no-op when the CLI already did
     harness = await _assemble_harness(root, base)
 
@@ -167,59 +196,12 @@ async def run_root(root: Dict[str, Any], base: str) -> Optional[Envelope]:
         await asyncio.Event().wait()
         return None
 
-    # Build the ONE starting message of the run. Everything in YAAH is an Envelope
-    # (one message shape, used everywhere), and the run begins by dropping a single
-    # Kind.TASK envelope into the harness; the graph's `start` stage receives it and
-    # each stage's output becomes the next stage's input. The envelope's `payload`
-    # is whatever the FIRST stage's prompt/template reads (e.g. {"task": "...",
-    # "request": "..."}); the harness adds the headers (correlation_id, etc.) itself.
-    #
-    # That payload is the root's `input`, supplied two ways (hug-the-world): an inline
-    # object for small demos/tests (no one-line fixture file needed), or a path to a
-    # JSON fixture for real inputs. A dict is used verbatim; a string is read as a
-    # base-relative fixture path. Absent `input` -> an empty payload (a pipeline whose
-    # start stage needs no seed data).
-    raw_input = root.get("input", {})
-    payload = raw_input if isinstance(raw_input, dict) else _read_json(_rel(base, raw_input))
-    run_kw = {"ttl": root["baton_ttl"]} if "baton_ttl" in root else {}
-    task = Envelope(Kind.TASK, payload)
+    task, run_kw = _seed_task(root, base)
     decider = _build_decider(root)
     if decider is not None:  # drive gates to completion (resume at each Suspended)
-        out = await drive(harness, task, decider, **run_kw)
-    else:  # default: run once; a gated pipeline stops (Suspended) at the first gate
-        out = await harness.run(task, **run_kw)
-    if isinstance(out, Suspended):  # parked — durable state lets another process resume it
-        print("GATE baton_id={} awaiting={} concerns={}".format(
-            out.baton_id, out.awaiting, len(out.concerns)))
-        _print_concerns(out.concerns)
-    print("RESULT:", _short(out))
-    return getattr(out, "output", None)
-
-
-_RESULT_PRINT_MAX = 4000
-
-
-def _short(out: object) -> str:
-    """Truncated render of an Outcome for the console. The payload can carry
-    large fields (a full diff, a spec); an operator — especially an AI in a
-    session — polls state via this print, so it must stay cheap to read.
-    Artifacts live on disk by reference (`*_path` keys); fetch on demand."""
-    s = str(out)
-    if len(s) <= _RESULT_PRINT_MAX:
-        return s
-    return s[:_RESULT_PRINT_MAX] + " … [{} chars truncated — artifacts are on disk via *_path keys]".format(
-        len(s) - _RESULT_PRINT_MAX)
-
-
-def _print_concerns(concerns: list) -> None:
-    """The concern TEXTS, one line each — a count alone is not actionable; the
-    whole point of soft/sceptic concerns is that the human reads them AT the gate."""
-    for c in concerns:
-        line = "  concern [{}/{}]: {}".format(c.get("stage", "?"), c.get("code", "?"),
-                                              c.get("message", ""))
-        if c.get("fix_hint"):
-            line += " ({})".format(c["fix_hint"])
-        print(line)
+        return await drive(harness, task, decider, **run_kw)
+    # default: run once; a gated pipeline stops (Suspended) at the first gate
+    return await harness.run(task, **run_kw)
 
 
 def _baton_json(b: "Baton") -> Dict[str, Any]:
@@ -241,98 +223,74 @@ def _baton_json(b: "Baton") -> Dict[str, Any]:
             "question": q}
 
 
-async def list_gates(root: Dict[str, Any], base: str, *, as_json: bool = False) -> None:
-    """The mailbox view: print every suspended run waiting on a decision. Needs a
-    durable `state:` to see gates parked by other processes. `--list` entrypoint.
-
-    `as_json=True` emits a single JSON document `{"batons": [...]}` with the
-    same fields the prose view shows — so a driver skill can parse instead of
-    interpret. Per-baton shape lives in `_baton_json`.
-    """
+async def list_gates(root: Dict[str, Any], base: str) -> "List[Baton]":
+    """The mailbox view: every suspended run waiting on a decision, as Batons.
+    Needs a durable `state:` to see gates parked by other processes. `--list`
+    entrypoint (the CLI renders prose or `--json`; the MCP `list_gates` tool
+    returns the same batons as JSON — per-baton shape in `_baton_json`)."""
     load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
     bstore = BatonStore(_build_store(root.get("state"), base))
-    gates = await bstore.list_suspended()
-    if as_json:
-        print(json.dumps({"batons": [_baton_json(b) for b in gates]}, indent=2))
-        return
-    for b in gates:
-        print("GATE baton_id={} stage={} awaiting={} concerns={}".format(
-            b.id, b.stage, b.awaiting, len(b.concerns)))
-        _print_concerns(b.concerns)
-        # surface the failed verdict that escalated this stage (Y3) — the failure
-        # that broke the stage, printed at the gate where the human first sees it.
-        if b.pending is not None:
-            for f in (b.pending.payload.get("escalation") or {}).get("failures", []):
-                print("  failed: {}: {}".format(f.get("code", "?"), f.get("message", "")))
-        # surface the pending question/ask so the human knows what to answer
-        if b.pending is not None:
-            q = b.pending.payload.get("question") or b.pending.payload.get("ask")
-            if q:
-                print("  question: {}".format(q))
-    if not gates:
-        print("(no suspended gates)")
+    return await bstore.list_suspended()
 
 
 async def resume_gate(root: Dict[str, Any], base: str, baton_id: str,
-                      decision: Dict[str, Any]) -> Optional[Envelope]:
-    """Deliver a human decision to a parked gate and drive the rest to completion —
-    possibly in a different process than the one that suspended it (the durable
-    store is the rendezvous). `--resume` entrypoint."""
+                      decision: Dict[str, Any]) -> "Outcome":
+    """Deliver a human decision to a parked gate and run to the next gate or
+    completion — possibly in a different process than the one that suspended it
+    (the durable store is the rendezvous). Returns the Outcome (rendering is the
+    caller's job, same contract as run_root). `--resume` entrypoint. NOTE for
+    callers: the originally-detached engine exited at the park; the CALLING
+    process runs the engine until the next gate or completion."""
     load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
     harness = await _assemble_harness(root, base)
-    # The originally-detached engine has exited at the park; THIS process
-    # now runs the engine in-process until the next gate or completion.
-    # Banner sets expectations (was previously silently blocking).
-    print("[yaah resume] engine running in this process until next gate or completion",
-          file=sys.stderr)
-    out = await harness.resume(baton_id, Envelope(Kind.RESUME, decision))
-    if isinstance(out, Suspended):  # hit the next gate
-        print("GATE baton_id={} awaiting={} concerns={}".format(
-            out.baton_id, out.awaiting, len(out.concerns)))
-        _print_concerns(out.concerns)
-    print("RESULT:", _short(out))
-    return getattr(out, "output", None)
+    return await harness.resume(baton_id, Envelope(Kind.RESUME, decision))
 
 
-async def baton_schema(root: Dict[str, Any], base: str, baton_id: str) -> None:
+class ActionError(ValueError):
+    """A runtime action's DOMAIN error — the operator asked something the
+    current state can't answer (e.g. no baton with that id), as opposed to a
+    broken config/store. Surfaces catch THIS type, not ValueError: netting all
+    ValueError would reclassify e.g. a corrupted store's JSONDecodeError (a
+    ValueError subclass) from the CLI's config exit 2 into the domain exit 1.
+    Subclasses ValueError so callers that only know ValueError still work."""
+
+
+async def baton_schema(root: Dict[str, Any], base: str, baton_id: str) -> Dict[str, Any]:
     """Surface a parked baton's decision-form shape — the contract a driver
     skill composes decision.json against. Reads form/decision_schema off
     baton.pending.payload (HumanGate stamps them on the AWAIT envelope; the
-    harness parks that envelope as baton.pending). Exit 1 if no such baton, or
-    if the baton wasn't parked by a HumanGate (no `form` declared)."""
+    harness parks that envelope as baton.pending). Returns {form, schema,
+    example, baton_id, awaiting}; raises ActionError if no such baton, or if
+    the baton wasn't parked by a HumanGate (no `form` declared) — the CLI maps
+    those to `error: ...` + exit 1, the MCP tool to isError:true."""
     load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
     from .harness.decision_forms import lookup
     bstore = BatonStore(_build_store(root.get("state"), base))
     baton = await bstore.load(baton_id)
     if baton is None:
-        print("error: no baton with id {!r}".format(baton_id), file=sys.stderr)
-        raise SystemExit(1)
+        raise ActionError("no baton with id {!r}".format(baton_id))
     if baton.pending is None:
-        print("error: baton {!r} has no parked envelope (not a human gate?)".format(baton_id),
-              file=sys.stderr)
-        raise SystemExit(1)
+        raise ActionError("baton {!r} has no parked envelope (not a human gate?)".format(baton_id))
     form = baton.pending.payload.get("form")
-    inline = baton.pending.payload.get("decision_schema")
     if form is None:
-        print("error: baton {!r} parked without a declared form — add `form: \"...\"` "
-              "to the human_gate node to surface its decision shape".format(baton_id),
-              file=sys.stderr)
-        raise SystemExit(1)
-    out = lookup(form, inline_schema=inline)
+        raise ActionError(
+            "baton {!r} parked without a declared form — add `form: \"...\"` "
+            "to the human_gate node to surface its decision shape".format(baton_id))
+    out = lookup(form, inline_schema=baton.pending.payload.get("decision_schema"))
     out["baton_id"] = baton_id
     out["awaiting"] = baton.awaiting
-    print(json.dumps(out, indent=2))
+    return out
 
 
-async def clear_state(root: Dict[str, Any], base: str) -> None:
+async def clear_state(root: Dict[str, Any], base: str) -> Any:
     """CLEAR the harness instead of killing the process: broadcast a `*` clear (every
     in-flight clearable node cancels, every waiting gate releases), flush the parked
     set, and drop suspended batons — a graceful reset over the SAME store/transport
-    the runs use. `--clear` entrypoint."""
+    the runs use. Returns the clear result (what was released/dropped).
+    `--clear` entrypoint."""
     load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
     harness = await _assemble_harness(root, base)
-    result = await harness.clear()
-    print("CLEARED:", result)
+    return await harness.clear()
 
 
 # R15: root-config validation (unknown-key, shape, enum did-you-mean, cross-field)
