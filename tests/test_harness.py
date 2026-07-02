@@ -219,9 +219,9 @@ async def scenario_baton_ttl_cross_instance() -> None:
     baton looked either eternally-fresh or instantly-expired. Here two harnesses
     share one store; B (started 'later') sweeps using its own wall clock."""
     from yaah.harness import BatonStore
-    from yaah.store import MemoryStore
+    from yaah.store import MemoryBackend
 
-    store = MemoryStore()  # stands in for a shared durable store across processes
+    store = MemoryBackend()  # stands in for a shared durable store across processes
 
     def mk(now_holder):
         comms = InProcessComms()

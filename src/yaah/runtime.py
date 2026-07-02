@@ -137,7 +137,7 @@ async def _assemble_harness(root: Dict[str, Any], base: str) -> Any:
     store = _build_store(root.get("state"), base)
     baton_store = BatonStore(store)
     idem_store = IdempotencyStore(store)
-    env_store = EnvelopeStore(store)  # gate parking (fan-in arrivals) over the same Store
+    env_store = EnvelopeStore(store)  # gate parking (fan-in arrivals) over the same StoreBackend
 
     if hasattr(comms, "serve_node"):  # bus / NATS: serve, then orchestrate
         served = await serve_from_config(pipeline, comms, backend=backend, prompt_source=prompts,

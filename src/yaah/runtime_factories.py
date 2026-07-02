@@ -25,7 +25,7 @@ from .comms import InProcessComms
 from .data import RoutingDataSink, RoutingDataSource
 from .mcp import RoutingMcpSource, StaticMcpSource
 from .prompts import RoutingPromptSource, StaticPromptSource
-from .store import MemoryStore
+from .store import MemoryBackend
 from .trace import BusTracer, NullTracer
 from .trace.contributors import BUILTIN_CONTRIBUTORS
 # ... and the swap-in adapters (the only place the assembly layer reaches into adapters/).
@@ -34,7 +34,7 @@ from .adapters.backends.fake_tool_backend import FakeToolBackend
 from .adapters.data import FileDataSource, FileSink, GitDiffSource
 from .adapters.mcp import FileMcpSource
 from .adapters.prompts import FilePromptSource, HttpPromptSource, LangfusePromptSource
-from .adapters.stores import FileStore
+from .adapters.stores import FileBackend
 from .adapters.trace import (
     ConsoleTraceSink,
     FileTraceSink,
@@ -304,14 +304,14 @@ def _build_mcp_source(cfg: Dict[str, Any], base: str) -> Optional[RoutingMcpSour
 # durable extenders (file / nats_kv / sqlite / ...) are added here per-deployment
 # (see docs/durable-state.md) — none is baked in.
 _STATE_TYPES = {
-    "memory": (lambda spec, base: MemoryStore(), frozenset()),
-    "file": (lambda spec, base: FileStore(_rel(base, spec.get("dir", "state"))),
+    "memory": (lambda spec, base: MemoryBackend(), frozenset()),
+    "file": (lambda spec, base: FileBackend(_rel(base, spec.get("dir", "state"))),
              frozenset({"dir"})),
 }
 
 
 def _build_store(spec: Any, base: str) -> Any:
-    """Build the durable-state Store from the root `state:` block (default memory).
+    """Build the durable-state StoreBackend from the root `state:` block (default memory).
     One store instance backs both the BatonStore and the IdempotencyStore (distinct
     key prefixes). Used by: run_root."""
     spec = spec or {"type": "memory"}

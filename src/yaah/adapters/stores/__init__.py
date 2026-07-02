@@ -1,7 +1,7 @@
-"""Durable state stores (adapters). External-system implementations of the Store
-port (which, with the in-memory MemoryStore default, stays in yaah.store).
+"""Durable state stores (adapters). External-system implementations of the StoreBackend
+port (which, with the in-memory MemoryBackend default, stays in yaah.store).
 Deferred: nats_kv, blob, sqlite — see docs/durable-state.md.
 """
-from .file_store import FileStore
+from .file_backend import FileBackend
 
-__all__ = ["FileStore"]
+__all__ = ["FileBackend"]

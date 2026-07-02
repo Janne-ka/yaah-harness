@@ -16,7 +16,7 @@ import asyncio
 from yaah import Envelope, Graph, Harness, InProcessComms, Stage, StageFailed
 from yaah.core import Failure, Kind, NodeConfig, Verdict
 from yaah.build import build
-from yaah.store import EnvelopeStore, MemoryStore
+from yaah.store import EnvelopeStore, MemoryBackend
 
 # module-level sink so an `fn:` compensation target (imported by call_target) can record
 COMPENSATED = []
@@ -78,7 +78,7 @@ async def scenario_on_error_clear_publishes_and_flushes() -> None:
         clears.append(env.headers.get("clear_id"))
     await comms.subscribe("clear", on_clear)
 
-    es = EnvelopeStore(MemoryStore())
+    es = EnvelopeStore(MemoryBackend())
     # something parked at this node's address that the recovery should drop
     await es.save("agent1:RID:branch", Envelope(Kind.RESULT, {"stale": True}))
 
@@ -141,7 +141,7 @@ async def scenario_compensate_failure_default_escalates() -> None:
     comms = InProcessComms()
     comms.register("role:writer", Writer())
     comms.register("role:check", FailValidator())
-    es = EnvelopeStore(MemoryStore())
+    es = EnvelopeStore(MemoryBackend())
     await es.save("agent1:RID:branch", Envelope(Kind.RESULT, {"stale": True}))
     h = Harness(comms, _failing_graph(
         {"compensate": "fn:test_error_handling:failing_compensate_fn"}), envelope_store=es)
@@ -167,7 +167,7 @@ async def scenario_compensate_failure_warn_tolerates() -> None:
     comms = InProcessComms()
     comms.register("role:writer", Writer())
     comms.register("role:check", FailValidator())
-    es = EnvelopeStore(MemoryStore())
+    es = EnvelopeStore(MemoryBackend())
     await es.save("agent1:RID:branch", Envelope(Kind.RESULT, {"stale": True}))
     h = Harness(comms, _failing_graph(
         {"compensate": "fn:test_error_handling:failing_compensate_fn",
@@ -219,7 +219,7 @@ async def scenario_no_on_error_fails_through() -> None:
 
 
 async def scenario_flush_drops_parked_set() -> None:
-    es = EnvelopeStore(MemoryStore())
+    es = EnvelopeStore(MemoryBackend())
     await es.save("g1:R:a", Envelope(Kind.RESULT, {"n": 1}))
     await es.save("g1:R:b", Envelope(Kind.RESULT, {"n": 2}))
     await es.save("g2:R:a", Envelope(Kind.RESULT, {"n": 3}))

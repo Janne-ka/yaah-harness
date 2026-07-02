@@ -1,4 +1,4 @@
-"""FileStore — a durable Store extender backed by one file per key.
+"""FileBackend — a durable StoreBackend extender backed by one file per key.
 
 Used by: the runtime when root `state: {type: file, dir: ...}` is set. Makes a
 parked human gate (and execute-once results) survive process exit, so a run
@@ -26,10 +26,10 @@ import os
 from typing import Any, AsyncGenerator, Dict, Optional, Tuple
 from urllib.parse import quote, unquote
 
-from ...store import CompareAndSet, Scannable, Store
+from ...store import CompareAndSet, Scannable, StoreBackend
 
 
-class FileStore(Store, Scannable, CompareAndSet):
+class FileBackend(StoreBackend, Scannable, CompareAndSet):
     def __init__(self, base_dir: str) -> None:
         self._dir = base_dir
         os.makedirs(base_dir, exist_ok=True)

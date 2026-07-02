@@ -20,7 +20,7 @@ from typing import Any, Awaitable, Callable, List, Optional, Union
 from ..comms import Comms
 from ..core import Envelope, Failure, Kind, Verdict
 from ..external_call import call_target
-from ..store import EnvelopeStore, MemoryStore
+from ..store import EnvelopeStore, MemoryBackend
 from ..trace import NullTracer
 from .baton import Baton
 from .baton_store import BatonStore
@@ -113,13 +113,13 @@ class Harness:
         self.comms = comms
         self.graph = graph
         # Run state lives behind a BatonStore (default in-memory = today's behavior;
-        # a durable Store extender makes parked gates survive restart and resumable
+        # a durable StoreBackend extender makes parked gates survive restart and resumable
         # cross-process). The harness only calls save/load/delete/sweep/list.
-        self.batons = baton_store or BatonStore(MemoryStore())
+        self.batons = baton_store or BatonStore(MemoryBackend())
         # Gate parking (fan-in arrivals) goes through EnvelopeStore — memory default
-        # (behaviour-neutral), a durable Store extender makes parked envelopes survive
+        # (behaviour-neutral), a durable StoreBackend extender makes parked envelopes survive
         # + inspectable + flushable. The "gates park envelopes via one utility" seam.
-        self._envelopes = envelope_store or EnvelopeStore(MemoryStore())
+        self._envelopes = envelope_store or EnvelopeStore(MemoryBackend())
         # TWO time sources, deliberately distinct (bug review H1):
         #  - `clock` (monotonic) for in-process SPAN DURATIONS — accurate, immune to
         #    wall-clock jumps, but its zero point is process-local.

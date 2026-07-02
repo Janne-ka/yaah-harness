@@ -18,7 +18,7 @@ from yaah.core import Kind
 from yaah.build import build, validate_pipeline
 from yaah.harness.reduce import default_reduce
 from yaah.store import EnvelopeStore
-from yaah.adapters.stores import FileStore
+from yaah.adapters.stores import FileBackend
 
 
 class Emit:
@@ -282,7 +282,7 @@ async def scenario_node_clears_gate() -> None:
 
 
 async def scenario_fanin_parks_durably() -> None:
-    # the SAME fan-in over a durable (FileStore) EnvelopeStore: arrivals park to disk,
+    # the SAME fan-in over a durable (FileBackend) EnvelopeStore: arrivals park to disk,
     # the join completes, and the parked set is flushed afterward.
     seen = []
     comms = InProcessComms()
@@ -297,7 +297,7 @@ async def scenario_fanin_parks_durably() -> None:
         Stage("summary", node="role:summary", then=None),
     )
     with tempfile.TemporaryDirectory() as d:
-        es = EnvelopeStore(FileStore(d))
+        es = EnvelopeStore(FileBackend(d))
         out = await Harness(comms, graph, envelope_store=es).run(
             Envelope(Kind.TASK, {}, {"correlation_id": "R"}))
         assert isinstance(out, Done) and len(seen) == 1, seen

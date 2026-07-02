@@ -1,8 +1,8 @@
-"""Store — the durable key->bytes substrate, in capability tiers.
+"""StoreBackend — the durable key->bytes substrate, in capability tiers.
 
 Used by: the typed facades (BatonStore, IdempotencyStore, and a KV-backed
 DataSource/Sink later) — they layer meaning on top of these raw bytes ops.
-Implemented by: MemoryStore now; file / nats_kv / sqlite / blob / ... are
+Implemented by: MemoryBackend now; file / nats_kv / sqlite / blob / ... are
 deferred drop-in EXTENDERS chosen per-deployment (see docs/durable-state.md).
 Where: the bundled-stdlib substrate behind durable run state, execute-once, and
 working memory — NOT the kernel (the kernel is still only Node/Envelope/Comms).
@@ -19,13 +19,13 @@ from abc import abstractmethod
 from typing import AsyncGenerator, Optional, Protocol, Tuple, runtime_checkable
 
 # The tier methods are @abstractmethod so a class that DECLARES a tier
-# (`class MemoryStore(Store, Scannable, CompareAndSet)`) can't be instantiated
+# (`class MemoryBackend(StoreBackend, Scannable, CompareAndSet)`) can't be instantiated
 # unless it implements every method — a visible, runtime-enforced contract.
 # Structural conformance still works for an impl that doesn't inherit the tier.
 
 
 @runtime_checkable
-class Store(Protocol):
+class StoreBackend(Protocol):
     """CORE tier — every extender provides this (enough for working-memory get/post)."""
     @abstractmethod
     async def get(self, key: str) -> Optional[bytes]: ...
@@ -56,3 +56,11 @@ class CompareAndSet(Protocol):
     @abstractmethod
     async def cas(self, key: str, value: bytes, *, expected: Optional[int],
                   ttl: Optional[float] = None) -> Optional[int]: ...
+
+
+@runtime_checkable
+class ScannableStore(StoreBackend, Scannable, Protocol):
+    """Core + SCAN, as ONE type — the tier the envelope/baton facades require (their
+    `list`/`sweep` need `scan`). A backend implementing both tiers (MemoryBackend,
+    FileBackend) satisfies it structurally; `StoreBackedFacade[ScannableStore]` is how
+    a facade declares it needs more than the core tier."""

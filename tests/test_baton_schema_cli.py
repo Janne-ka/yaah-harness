@@ -1,7 +1,7 @@
 """The `yaah baton-schema <root> <id>` CLI surface.
 
 What it proves: an end-to-end round trip — save a Baton with a HumanGate-style
-AWAIT envelope into a FileStore-backed BatonStore, then call `baton_schema`
+AWAIT envelope into a FileBackend-backed BatonStore, then call `baton_schema`
 with a root pointing at that dir and verify the emitted JSON carries the form's
 schema + example + baton_id. Plus the error paths: unknown baton id, baton
 with no `pending`, baton parked without a `form` (legacy gate).
@@ -19,7 +19,7 @@ import shutil
 import sys
 import tempfile
 
-from yaah.adapters.stores.file_store import FileStore
+from yaah.adapters.stores.file_backend import FileBackend
 from yaah.core import Envelope, Kind
 from yaah.harness.baton import Baton
 from yaah.harness.baton_store import BatonStore
@@ -31,7 +31,7 @@ def _root_for(state_dir: str) -> dict:
 
 
 def _save_baton(state_dir: str, baton: Baton) -> None:
-    asyncio.run(BatonStore(FileStore(state_dir)).save(baton))
+    asyncio.run(BatonStore(FileBackend(state_dir)).save(baton))
 
 
 def _capture(coro) -> tuple:
