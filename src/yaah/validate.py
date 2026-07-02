@@ -84,8 +84,9 @@ _NAMED_MAP_KEYS = (
 _STRING_KEYS = (
     "default_provider", "default_prompt_source",
     "default_data_source", "default_data_sink", "default_mcp_source",
-    "pipeline",
 )
+# `pipeline` (like `input`) is a path string OR an inline object — the schema,
+# the runtime, and `yaah validate` all accept both; checked separately below.
 _BOOL_KEYS = ("run", "interactive", "live_config")
 
 # Type enums and per-type spec keys are NOT hand-copied here: they are read from
@@ -190,6 +191,10 @@ def _check_shapes(root: Dict[str, Any], errs: List[str]) -> None:
     if "input" in root and not isinstance(root["input"], (str, dict)):
         errs.append("'input': expected a fixture path or an inline payload object, got {} {!r}".format(
             type(root["input"]).__name__, root["input"]))
+    pipe = root.get("pipeline")
+    if pipe is not None and not isinstance(pipe, (str, dict)):
+        errs.append("'pipeline': expected a path string or an inline pipeline "
+                    "object, got {} {!r}".format(type(pipe).__name__, pipe))
     plugins = root.get("plugins")
     if plugins is not None and not (isinstance(plugins, list)
                                     and all(isinstance(m, str) and m for m in plugins)):

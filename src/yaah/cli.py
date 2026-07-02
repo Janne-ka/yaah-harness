@@ -64,6 +64,7 @@ Debug:
 
 Diagnose:
   validate <root>               validate root + referenced pipeline file (no run)
+                                  [--strict] [--from-code] [--json (machine-readable diagnostics)]
   doctor                        diagnose install: Python version, optional deps, packaged base configs
   completion <bash|zsh>         emit a shell completion script (`source <(yaah completion bash)`)
 
@@ -217,10 +218,14 @@ def _parse_validate(rest: list) -> dict:
     from_code = "--from-code" in rest
     if from_code:
         rest.remove("--from-code")  # --from-code: read @provides off fn: transforms (imports app code)
+    as_json = "--json" in rest
+    if as_json:
+        rest.remove("--json")      # --json: ONE machine-readable diagnostics object on stdout
     spec = _parse_cli(rest)        # parse root + --fake/--debug, then
     spec["action"] = "validate"    # check-only (never runs the pipeline)
     spec["strict"] = strict
     spec["from_code"] = from_code
+    spec["json"] = as_json
     return spec
 
 
@@ -451,11 +456,37 @@ def _dispatch_explain(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> 
     explain_root(raw_user, root, base, root_path=spec["root"], fake=spec.get("fake", False))
 
 
+def _diagnostics(exc_text: str) -> list:
+    """Split a validate ValueError's bulleted message into per-item diagnostics.
+    Best-effort structure: `stage` is extracted where the message follows the
+    "stage '<name>': ..." convention (full code/path taxonomy is a follow-up —
+    it needs per-site changes at every errs.append)."""
+    header, sep, rest = exc_text.partition(":\n  - ")
+    items = rest.split("\n  - ") if sep else [exc_text]
+    out = []
+    for msg in items:
+        d = {"message": msg}
+        m = re.match(r"stage '([^']+)':", msg)
+        if m:
+            d["stage"] = m.group(1)
+        out.append(d)
+    return out
+
+
 def _dispatch_validate(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
     """Validate root + the referenced pipeline file. Closes the gap where the
     pre-batch `yaah validate` only checked the root and pronounced "ok" while
-    the referenced pipeline had unresolved targets or was malformed."""
-    from .validate import validate_pipeline, lint_pipeline
+    the referenced pipeline had unresolved targets or was malformed.
+
+    `--json` prints ONE machine-readable object on stdout —
+    {ok, root, errors: [{message, stage?}], warnings: [{id, message}]} —
+    so a generate->validate->repair loop (an LLM author) consumes diagnostics
+    without prose parsing. Exit codes unchanged: 0 ok / 1 invalid / 2 strict.
+    Root validation happens HERE (this action dispatches before the
+    orchestrator's validate_root) so root errors become diagnostics too."""
+    from .validate import validate_pipeline, lint_pipeline, validate_root
+    as_json = spec.get("json", False)
+    errors: list = []
     pipeline_ref = root.get("pipeline")
     warnings: list = []
     # --from-code (ADR-0005 slice D): read @provides off fn: transforms so the lint sees
@@ -465,23 +496,42 @@ def _dispatch_validate(spec: Dict[str, Any], root: Dict[str, Any], base: str) ->
     if spec.get("from_code"):
         from .contract import fn_provides_resolver
         resolve = fn_provides_resolver(base)
-    if isinstance(pipeline_ref, str):
-        pipeline_cfg = _read_json(_rel(base, pipeline_ref))
-        validate_pipeline(pipeline_cfg, base_path=base)
-        # render `template_file` paths resolve against the ROOT config's dir
-        # (`base`) — the runtime builds the pipeline with `base_dir=base`
-        # (runtime.py: _assemble_harness), so _build_render joins template_file
-        # onto `base`, NOT the pipeline file's own dir. The lint MUST match, or it
-        # reads the wrong path whenever `root["pipeline"]` points into a subdir.
-        warnings = lint_pipeline(pipeline_cfg, base_path=base, resolve=resolve)
-        ok_msg = "ok: {} is valid (root + pipeline {})".format(spec["root"], pipeline_ref)
-    elif isinstance(pipeline_ref, dict):
-        validate_pipeline(pipeline_ref, base_path=base)
-        warnings = lint_pipeline(pipeline_ref, base_path=base, resolve=resolve)
-        ok_msg = "ok: {} is valid (root + inline pipeline)".format(spec["root"])
-    else:
-        # Root validation already caught the missing/bad-type case above.
-        ok_msg = "ok: {} is a valid root config".format(spec["root"])
+    try:
+        validate_root(root)
+        if isinstance(pipeline_ref, str):
+            pipeline_cfg = _read_json(_rel(base, pipeline_ref))
+            validate_pipeline(pipeline_cfg, base_path=base)
+            # render `template_file` paths resolve against the ROOT config's dir
+            # (`base`) — the runtime builds the pipeline with `base_dir=base`
+            # (runtime.py: _assemble_harness), so _build_render joins template_file
+            # onto `base`, NOT the pipeline file's own dir. The lint MUST match, or it
+            # reads the wrong path whenever `root["pipeline"]` points into a subdir.
+            warnings = lint_pipeline(pipeline_cfg, base_path=base, resolve=resolve)
+            ok_msg = "ok: {} is valid (root + pipeline {})".format(spec["root"], pipeline_ref)
+        elif isinstance(pipeline_ref, dict):
+            validate_pipeline(pipeline_ref, base_path=base)
+            warnings = lint_pipeline(pipeline_ref, base_path=base, resolve=resolve)
+            ok_msg = "ok: {} is valid (root + inline pipeline)".format(spec["root"])
+        else:
+            # Root validation caught the missing/bad-type case if any.
+            ok_msg = "ok: {} is a valid root config".format(spec["root"])
+    except ValueError as e:
+        errors = _diagnostics(str(e))
+        if not as_json:
+            raise                      # prose mode: same loud failure as before
+    if as_json:
+        warn_items = []
+        for w in warnings:
+            m = re.search(r"\s*\[lint: ([a-z0-9-]+)\]$", w)
+            warn_items.append({"id": m.group(1) if m else None,
+                               "message": w[:m.start()] if m else w})
+        print(json.dumps({"ok": not errors, "root": spec["root"],
+                          "errors": errors, "warnings": warn_items}, indent=2))
+        if errors:
+            raise SystemExit(1)
+        if warnings and spec.get("strict"):
+            raise SystemExit(2)
+        return
     # Advisory lint: print warnings to stderr (stdout stays clean for "ok"). `--strict`
     # makes ANY warning FAIL with exit code 2 — distinct from the hard-error path (so CI
     # can tell 'invalid config' from 'valid-but-weak'). Default stays advisory so a
@@ -572,6 +622,11 @@ def _dispatch(spec: Dict[str, Any]) -> None:
         # plugins run code at IMPORT time, even for validate/explain — say so.
         print("note: imported plugins: {}".format(", ".join(root["plugins"])),
               file=sys.stderr)
+    if action == "validate":
+        # validates the root ITSELF (inside its error collection) so `--json`
+        # reports root errors as diagnostics instead of a traceback.
+        _dispatch_validate(spec, root, base)
+        return
     if action == "explain":
         # `explain_root` runs `validate_root` itself with extra provenance
         # context, so it has to bypass the orchestrator's validate call.
