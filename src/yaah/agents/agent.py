@@ -27,6 +27,7 @@ from ..trace import NullTracer, Span
 # `complete` / `turn` at call time. That runtime check is what this Agent
 # actually relies on; a static Protocol annotation would only duplicate it
 # without adding any guarantee.
+from . import api_provider as _ap
 from .tool import Tool
 from .tool_loop import run_tool_loop
 
@@ -325,7 +326,10 @@ class Agent:
                                        tracer=self._tracer, corr=input.correlation_id,
                                        parent=input.id, **opts)
         else:
-            text = await self._backend.complete(prompt, model=config.model, **opts)
+            # Plain (non-tool) path: collect the stream into a string. Stream-first
+            # via the bridge — a collected-only backend/double falls back to its
+            # native complete() inside _ap.complete (see api_provider).
+            text = await _ap.complete(self._backend, prompt, model=config.model, **opts)
         t1 = time.monotonic()
         await self._tracer.emit(Span.timed(
             "model_call", corr=input.correlation_id, parent=input.id, t0=t0, t1=t1,

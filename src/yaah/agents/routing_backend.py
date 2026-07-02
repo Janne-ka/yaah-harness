@@ -49,11 +49,9 @@ class RoutingBackend(PrefixRouter[Any]):
         # we don't mutate the caller's context.
         new_ctx: _ap.Context = dict(context)  # type: ignore[assignment]
         new_ctx["model"] = (rest or None)
-        return backend.stream(new_ctx, **opts)
-
-    async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
-        backend, rest = self._select(model)
-        return await backend.complete(prompt, model=(rest or None), **opts)
+        # stream_of adapts a collected-only leaf (no native stream(), e.g. an
+        # external legacy backend) into a one-shot stream, so routing to it works.
+        return _ap.stream_of(backend, new_ctx, **opts)
 
     async def turn(self, messages: List[dict], tools: List[dict], *,
                    model: Optional[str] = None, **opts: Any) -> dict:

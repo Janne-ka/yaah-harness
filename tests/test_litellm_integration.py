@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import sys
 
+from yaah.agents import api_provider as _ap
+
 
 def main() -> None:
     try:
@@ -35,7 +37,7 @@ async def _run() -> None:
     usage = {}
     be = LiteLLMBackend()  # no stub -> real litellm.acompletion (lazy import)
 
-    out = await be.complete(
+    out = await _ap.complete(be, 
         "ping", model="gpt-4o-mini",
         mock_response="pong",
         on_usage=lambda u: usage.update(u),

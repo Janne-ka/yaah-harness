@@ -155,9 +155,6 @@ class LiteLLMBackend:
             done["usage"] = usage
         yield done
 
-    async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
-        return await _ap.complete(self, prompt, model=model, **opts)
-
     async def turn(self, messages: List[dict], tools: List[dict], *,
                    model: Optional[str] = None, **opts: Any) -> Dict[str, Any]:
         out = await _ap.turn(self, messages, tools, model=model, **opts)

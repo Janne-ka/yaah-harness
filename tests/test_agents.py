@@ -19,6 +19,7 @@ from yaah import (
     Verdict,
 )
 from yaah.agents import Agent, FakeBackend
+from yaah.agents import api_provider as _ap
 
 
 class JsonGate:
@@ -78,13 +79,13 @@ async def scenario_routing() -> None:
 
     rb = RoutingBackend({"fake": Recorder("fake"), "claude": Recorder("claude")}, default="fake")
 
-    assert await rb.complete("p", model="claude:claude-sonnet-4-6") == "claude"
+    assert await _ap.complete(rb, "p", model="claude:claude-sonnet-4-6") == "claude"
     assert calls["claude"] == "claude-sonnet-4-6", calls  # provider prefix stripped
-    assert await rb.complete("p", model="fake:spec") == "fake"
+    assert await _ap.complete(rb, "p", model="fake:spec") == "fake"
     assert calls["fake"] == "spec", calls
 
     try:
-        await rb.complete("p", model="nope:x")
+        await _ap.complete(rb, "p", model="nope:x")
         raise AssertionError("expected LookupError for unknown provider")
     except LookupError:
         pass

@@ -75,13 +75,8 @@ class ScriptedToolBackend:
             return self._turns[-1] if self._turns else {"text": self._default}
         return {"text": self._default}
 
-    async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
-        # Tool-less `complete()` returns self._default and does NOT touch the
-        # script — the stream/turn path consumes script turns (which are
-        # loop-shaped), so keeping complete() script-free stops non-loop
-        # callers from accidentally consuming a tool turn.
-        return self._default
-
     async def turn(self, messages: List[dict], tools: List[dict], *,
                    model: Optional[str] = None, **opts: Any) -> dict:
+        # Kept as the tool-capability marker (Agent._supports_turn keys on `turn`);
+        # the body delegates to the stream bridge like every collected shape.
         return await _ap.turn(self, messages, tools, model=model, **opts)

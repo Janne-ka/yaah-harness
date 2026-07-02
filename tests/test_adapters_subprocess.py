@@ -54,88 +54,11 @@ def spawner(procs, captured):
 
 # ---- ClaudeCliBackend -------------------------------------------------------
 
-async def claude_complete_builds_argv_pipes_prompt_returns_stdout() -> None:
-    calls = []
-    proc = FakeProc(stdout=b"ANSWER")
-    be = ClaudeCliBackend(spawn=spawner([proc], calls))
-    out = await be.complete("do it", model="claude-x", cwd="/work")
-
-    assert out == "ANSWER"
-    argv = calls[0]["args"]
-    assert argv[0] == "claude" and "-p" in argv
-    assert "--model" in argv and argv[argv.index("--model") + 1] == "claude-x"
-    assert calls[0]["kwargs"]["cwd"] == "/work"     # per-run worktree threaded through
-    assert proc.stdin_data == b"do it"              # prompt piped on stdin, encoded
 
 
-async def claude_cost_bridge_parses_json_usage() -> None:
-    # L8: with on_usage (cost capture on), claude is asked for --output-format json;
-    # complete() extracts `result` and feeds summed token usage to the bridge.
-    import json as _json
-    calls, usage = [], {}
-    blob = _json.dumps({"result": "THE ANSWER", "model": "claude-sonnet",
-                        "usage": {"input_tokens": 100, "cache_read_input_tokens": 20,
-                                  "cache_creation_input_tokens": 5, "output_tokens": 30}})
-    be = ClaudeCliBackend(spawn=spawner([FakeProc(stdout=blob.encode())], calls))
-    out = await be.complete("hi", model="m", on_usage=usage.update)
-
-    assert out == "THE ANSWER"                                  # result text, not the JSON
-    argv = calls[0]["args"]
-    assert "--output-format" in argv and argv[argv.index("--output-format") + 1] == "json"
-    assert usage == {"tokens_in": 125, "tokens_out": 30, "model": "claude-sonnet"}  # summed
 
 
-async def claude_cost_path_missing_result_returns_empty() -> None:
-    # assessment cluster 3 B6: previously the cost path returned `raw` unchanged
-    # if the parsed JSON had no `result` field — so the downstream stage received
-    # the WHOLE JSON envelope as the agent's text and silently poisoned the run.
-    # Now: a parseable JSON without `result` yields "" (well-defined contract).
-    import json as _json
-    blob = _json.dumps({"model": "claude-sonnet",
-                        "usage": {"input_tokens": 10, "output_tokens": 5}})  # no result
-    usage = {}
-    be = ClaudeCliBackend(spawn=spawner([FakeProc(stdout=blob.encode())], []))
-    out = await be.complete("hi", model="m", on_usage=usage.update)
-    assert out == ""                                      # NOT the JSON envelope
-    assert usage["tokens_in"] == 10 and usage["tokens_out"] == 5  # usage still extracted
 
-
-async def claude_cost_path_non_json_passes_through() -> None:
-    # if claude failed to honor --output-format json (returned plain text), pass
-    # it through so the run still has SOMETHING — no surprise on a misbehaving CLI.
-    be = ClaudeCliBackend(spawn=spawner([FakeProc(stdout=b"not json at all")], []))
-    out = await be.complete("hi", model="m", on_usage=lambda u: None)
-    assert out == "not json at all"
-
-
-async def claude_no_cost_no_json_format() -> None:
-    # without on_usage, the plain text path is unchanged (no --output-format json)
-    calls = []
-    be = ClaudeCliBackend(spawn=spawner([FakeProc(stdout=b"plain text")], calls))
-    out = await be.complete("hi", model="m")
-    assert out == "plain text" and "--output-format" not in calls[0]["args"]
-
-
-async def claude_nonzero_exit_raises_with_stderr() -> None:
-    calls = []
-    be = ClaudeCliBackend(spawn=spawner([FakeProc(returncode=2, stderr=b"boom")], calls))
-    try:
-        await be.complete("x")
-        raise AssertionError("expected RuntimeError on non-zero exit")
-    except RuntimeError as e:
-        assert "exit 2" in str(e) and "boom" in str(e), e
-
-
-async def claude_timeout_kills_process_and_reraises() -> None:
-    calls = []
-    proc = FakeProc(raise_timeout=True)
-    be = ClaudeCliBackend(spawn=spawner([proc], calls))
-    try:
-        await be.complete("x", timeout=0.01)
-        raise AssertionError("expected TimeoutError")
-    except asyncio.TimeoutError:
-        pass
-    assert proc.killed and proc.waited, "a timed-out process must be killed and reaped"
 
 
 async def claude_build_args_covers_mcp_perm_and_tools() -> None:
@@ -151,6 +74,25 @@ async def claude_build_args_covers_mcp_perm_and_tools() -> None:
     i = bare.index("--mcp-config")
     assert bare[i + 1] == '{"mcpServers":{}}'
     assert "--model" not in bare  # model None -> omitted
+
+
+async def claude_stream_cost_bridge_feeds_on_usage() -> None:
+    # Cost bridge over the stream seam: the result event's usage is summed
+    # (input + both cache buckets) and fed to on_usage — so a plain agent
+    # collecting via api_provider.complete() still tracks cost now that the
+    # complete() --output-format json path was removed.
+    lines = [
+        b'{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}\n',
+        b'{"type":"result","subtype":"success","stop_reason":"end_turn","model":"claude-sonnet",'
+        b'"usage":{"input_tokens":100,"cache_read_input_tokens":20,"cache_creation_input_tokens":5,"output_tokens":30}}\n',
+    ]
+    usage = {}
+    proc = FakeStreamProc(stdout_lines=lines)
+    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    events = await _drain(be.stream({"messages": [{"role": "user", "content": "hi"}]},
+                                    on_usage=usage.update))
+    assert usage == {"tokens_in": 125, "tokens_out": 30, "model": "claude-sonnet"}, usage
+    assert [e["type"] for e in events] == ["start", "text_delta", "done"]
 
 
 # ---- GitDiffSource ----------------------------------------------------------
@@ -362,11 +304,12 @@ async def claude_stream_uses_output_format_stream_json_argv() -> None:
     proc = FakeStreamProc(stdout_lines=lines)
     captured = []
     be = ClaudeCliBackend(spawn=_stream_spawner(proc, captured))
-    await _drain(be.stream({"messages": [{"role": "user", "content": "hi"}]}))
+    await _drain(be.stream({"messages": [{"role": "user", "content": "hi"}]}, cwd="/work"))
     argv = captured[0]["args"]
     assert "--output-format" in argv, argv
     assert argv[argv.index("--output-format") + 1] == "stream-json", argv
     assert "--verbose" in argv, argv  # required by claude when stream-json is set
+    assert captured[0]["kwargs"]["cwd"] == "/work"  # per-run worktree threaded to spawn
 
 
 async def claude_stream_tool_use_session_skips_internal_tool_calls() -> None:
@@ -494,15 +437,6 @@ async def claude_stream_passes_prompt_via_stdin() -> None:
     assert proc.stdin.data == b"latest", proc.stdin.data
 
 
-async def claude_complete_path_unchanged_regression() -> None:
-    # Sanity: the existing complete() path (uses --output-format=json, not
-    # stream-json) must still work unchanged. The B3 work adds streaming but
-    # does not touch complete().
-    proc = FakeProc(stdout=b"the answer")
-    be = ClaudeCliBackend(spawn=spawner([proc], []))
-    out = await be.complete("x", model="m")
-    assert out == "the answer"
-
 
 async def claude_stream_handles_none_stdin_without_crashing() -> None:
     # CRIT-001 (opus bugs review): if the spawned process died before its
@@ -617,14 +551,8 @@ async def main() -> None:
     for fn in [
         claude_binary_and_flag_trust,
         claude_rejects_isolation_defeating_flags,
-        claude_complete_builds_argv_pipes_prompt_returns_stdout,
-        claude_cost_bridge_parses_json_usage,
-        claude_cost_path_missing_result_returns_empty,
-        claude_cost_path_non_json_passes_through,
-        claude_no_cost_no_json_format,
-        claude_nonzero_exit_raises_with_stderr,
-        claude_timeout_kills_process_and_reraises,
         claude_build_args_covers_mcp_perm_and_tools,
+        claude_stream_cost_bridge_feeds_on_usage,
         # B3 — stream-json parsing
         claude_stream_simple_text_yields_text_delta_and_done,
         claude_stream_uses_output_format_stream_json_argv,
@@ -633,7 +561,6 @@ async def main() -> None:
         claude_stream_malformed_lines_skipped,
         claude_stream_nonzero_exit_yields_error_event,
         claude_stream_passes_prompt_via_stdin,
-        claude_complete_path_unchanged_regression,
         claude_stream_handles_none_stdin_without_crashing,
         claude_stream_drains_stdin_before_closing,
         claude_stream_timeout_kills_proc_and_yields_error,

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 
 from yaah.adapters.backends import LiteLLMBackend
+from yaah.agents import api_provider as _ap
 from yaah.adapters.prompts import HttpPromptSource, LangfusePromptSource
 from yaah.adapters.transports.nats_comms import NatsComms, _NatsSubscription
 from yaah.core import Envelope, Kind
@@ -31,7 +32,7 @@ async def litellm_complete_shapes_request_and_returns_content() -> None:
         return _resp({"content": "hello"})
 
     be = LiteLLMBackend(acompletion=stub, temperature=0.2)  # default opt
-    out = await be.complete("ask me", model="gpt-4o", max_tokens=10)  # per-call opt
+    out = await _ap.complete(be, "ask me", model="gpt-4o", max_tokens=10)  # per-call opt
 
     assert out == "hello"
     assert seen["model"] == "gpt-4o"
@@ -47,7 +48,7 @@ async def litellm_defaults_model_when_unset() -> None:
         seen.update(kwargs)
         return _resp({"content": "x"})
 
-    await LiteLLMBackend(acompletion=stub).complete("p")
+    await _ap.complete(LiteLLMBackend(acompletion=stub), "p")
     assert seen["model"] == "gpt-4o-mini"  # the documented fallback
 
 
@@ -64,7 +65,7 @@ async def litellm_strips_agent_only_opts() -> None:
         return _resp({"content": "ok"})
 
     be = LiteLLMBackend(acompletion=stub)
-    await be.complete("p", temperature=0.1, **agent_opts)
+    await _ap.complete(be, "p", temperature=0.1, **agent_opts)
     assert not (set(agent_opts) & set(seen)), seen
     assert seen["temperature"] == 0.1  # real SDK opts still pass through
 
@@ -102,17 +103,17 @@ async def litellm_complete_degrades_on_empty_choices() -> None:
     # B5: an empty / filtered response must not raise IndexError mid-pipeline.
     async def empty(**kwargs):
         return {"choices": []}
-    out = await LiteLLMBackend(acompletion=empty).complete("x")
+    out = await _ap.complete(LiteLLMBackend(acompletion=empty), "x")
     assert out == ""
 
     async def none_content(**kwargs):
         return {"choices": [{"message": {"content": None}}]}
-    out = await LiteLLMBackend(acompletion=none_content).complete("x")
+    out = await _ap.complete(LiteLLMBackend(acompletion=none_content), "x")
     assert out == ""
 
     async def missing_message(**kwargs):
         return {"choices": [{}]}
-    out = await LiteLLMBackend(acompletion=missing_message).complete("x")
+    out = await _ap.complete(LiteLLMBackend(acompletion=missing_message), "x")
     assert out == ""
 
 

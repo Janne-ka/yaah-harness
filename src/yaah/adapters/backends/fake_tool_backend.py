@@ -63,15 +63,8 @@ class FakeToolBackend:
                    "args": call.get("args", {}) or {}}
         yield {"type": "done", "stop_reason": "tool_use" if calls else "end_turn"}
 
-    async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
-        # Legacy non-loop accommodation: return the first text-bearing turn WITHOUT
-        # advancing the cursor. Stream-path callers go through .stream() / .turn()
-        # and get proper turn-by-turn semantics.
-        for spec in self._turns:
-            if "text" in spec:
-                return str(spec["text"])
-        return ""
-
     async def turn(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *,
                    model: Optional[str] = None, **opts: Any) -> Dict[str, Any]:
+        # Kept as the tool-capability marker (Agent._supports_turn keys on `turn`);
+        # the body delegates to the stream bridge like every collected shape.
         return await _ap.turn(self, messages, tools, model=model, **opts)

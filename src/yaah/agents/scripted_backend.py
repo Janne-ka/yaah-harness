@@ -92,9 +92,6 @@ class ScriptedBackend:
             return seq[-1]
         return self._default
 
-    async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
-        return await _ap.complete(self, prompt, model=model, **opts)
-
 
 def _prompt_text(messages: List[Dict[str, Any]]) -> str:
     """Reconstruct a prompt-like string from a messages list so the

@@ -39,6 +39,3 @@ class FakeBackend:
         if text:
             yield {"type": "text_delta", "delta": text}
         yield {"type": "done", "stop_reason": "end_turn"}
-
-    async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
-        return await _ap.complete(self, prompt, model=model, **opts)
