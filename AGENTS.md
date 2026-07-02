@@ -46,6 +46,8 @@ are battle-tested in ways a fresh design isn't.
 - **[docs/node-reference.md](docs/node-reference.md)** + **[docs/root-config-reference.md](docs/root-config-reference.md)** — every node type and config key (single source of truth: `docs/module-catalog.md`, generated from the code).
 - **[docs/cookbook/](docs/cookbook/)** — non-importable reference
   recipes; copy-paste into your own project.
+- **[docs/why-data-not-code.md](docs/why-data-not-code.md)** — the one big idea
+  (wiring is data, work is code) in one short read; start here for the *why*.
 - **[docs/design.md](docs/design.md)** / **[docs/why-yaah.md](docs/why-yaah.md)** — architecture + rationale.
 
 ## Mental model

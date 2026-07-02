@@ -9,6 +9,7 @@ If you know what you want to do, jump straight here.
 
 | I want to… | Read |
 |---|---|
+| understand why a pipeline is data, not code | [why-data-not-code.md](why-data-not-code.md) — the one-idea explainer |
 | run my first pipeline (no API key) | [quickstart.md](quickstart.md) |
 | pick the shape for a new pipeline | [archetypes.md](archetypes.md) — five shapes; pick the nearest, copy from `examples/` |
 | author a pipeline step by step | [tutorial.md](tutorial.md) |
@@ -42,6 +43,7 @@ If you know what you want to do, jump straight here.
 
 | | |
 |---|---|
+| [why-data-not-code.md](why-data-not-code.md) | **start here** — the one big idea: wiring is data, work is code, and why that matters (safety, testing, tooling). A short read. |
 | [why-yaah.md](why-yaah.md) | what it's for, and when to reach for it |
 | [design.md](design.md) | the rationale and the decisions behind the shape |
 | [architecture.md](architecture.md) | the layers + how concepts map to code |
