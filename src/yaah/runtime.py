@@ -55,7 +55,7 @@ from typing import Any, Dict, Optional
 
 from .build import build, harness_from_config, serve_from_config
 from .core import Envelope, Kind
-from .harness import BatonStore, StageFailed, Suspended, build_decider as _build_decider, drive
+from .harness import Baton, BatonStore, StageFailed, Suspended, build_decider as _build_decider, drive
 from .store import EnvelopeStore, IdempotencyStore
 # Config-block → runtime-leaf factories (the maps + builders, split out so this
 # module is just assembly + entrypoints). _read_json is re-exported here because

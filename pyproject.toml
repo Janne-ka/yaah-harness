@@ -31,7 +31,7 @@ langfuse = ["langfuse>=4"]  # trace sink maps onto the v4 (OTEL) client surface;
                             # the legacy v2 surface is still handled if you pin <3
 http = ["httpx"]           # HttpPromptSource default fetcher
 all = ["litellm", "nats-py", "langfuse>=4", "httpx"]
-dev = ["coverage[toml]"]   # run_tests.py enforces the fail_under floor when present
+dev = ["coverage[toml]", "mypy"]   # run_tests.py enforces the coverage floor; mypy is the contract gate
 
 [project.scripts]
 yaah = "yaah.cli:main"
@@ -82,3 +82,18 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "\\.\\.\\.",                 # Protocol method bodies (abstract `...`, never run)
 ]
+
+[tool.mypy]
+# Contract-enforcement gate for the explicit-contracts refactor: type-check the
+# engine package so an impl that breaks a port Protocol is caught before runtime.
+# Runs under PYTHONPATH=src (mypy_path). Default strictness for now; tighten as
+# the per-subsystem declarations land and the error count reaches zero.
+python_version = "3.9"
+mypy_path = "src"
+packages = ["yaah"]
+
+[[tool.mypy.overrides]]
+# Optional adapters lazily import third-party libs not installed in the check
+# env; their absence is expected, not a type error.
+module = ["litellm.*", "langfuse.*", "nats.*", "httpx.*"]
+ignore_missing_imports = true

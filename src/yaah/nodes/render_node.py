@@ -10,6 +10,7 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 import os
+from typing import Optional, Tuple
 
 from ..core import Envelope, Failure, Kind, NodeConfig, Verdict
 from ..templating import fill as _fill
