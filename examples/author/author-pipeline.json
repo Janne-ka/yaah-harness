@@ -1,0 +1,32 @@
+{
+  "_doc": "Authoring meta-pipeline ('yaah authors yaah'): turn a plain-language request into a VALID yaah config pair (root + pipeline). The self-repair mechanic is the engine's OWN retry loop: the draft stage carries a VALIDATOR (role:check-config, a transform that runs yaah.validate.validate_root/validate_pipeline over the draft) with max_attempts+feedback, so a draft that fails the engine validator is retried with the exact validation errors appended to the agent's prompt. Shape: meta-tool (docs/archetypes.md #5) with a branch-with-gate tail.",
+  "nodes": {
+    "role:draft":        {"type": "agent", "prompt": "file:draft",
+                          "model": "claude:claude-sonnet-4-6", "stage": "draft",
+                          "carry": ["request", "out_dir"],
+                          "output_schema": {"type": "object",
+                                            "required": ["name", "root", "pipeline"],
+                                            "properties": {"name": {"type": "string"},
+                                                           "root": {"type": "object"},
+                                                           "pipeline": {"type": "object"}}}},
+    "role:check-config": {"type": "transform", "target": "fn:transforms:check_config",
+                          "call": "envelope"},
+    "role:approve":      {"type": "human_gate", "awaiting": "author:config-review",
+                          "form": "approve_or_revise",
+                          "ask": "An agent drafted a yaah config named \"{{name}}\" for this request:\n\n  {{request}}\n\nThe draft PASSED the engine validator (validate_root + validate_pipeline). Reply {\"decision\": \"approve\"} to write it to disk, or {\"decision\": \"revise\", \"feedback\": \"...\"} to redraft."},
+    "role:write":        {"type": "transform", "target": "fn:transforms:write_config",
+                          "call": "envelope",
+                          "provides": ["written_root", "written_pipeline"]}
+  },
+  "graph": {
+    "start": "draft",
+    "stages": {
+      "draft":   {"node": "role:draft", "validators": ["role:check-config"],
+                  "max_attempts": 3, "feedback": true, "then": "approve"},
+      "approve": {"node": "role:approve",
+                  "branch": {"on": "decision", "routes": {"revise": "draft"},
+                             "default": "write"}},
+      "write":   {"node": "role:write", "then": null}
+    }
+  }
+}
