@@ -2,8 +2,9 @@
 
 Used by: the typed facades (BatonStore, IdempotencyStore, and a KV-backed
 DataSource/Sink later) — they layer meaning on top of these raw bytes ops.
-Implemented by: MemoryBackend now; file / nats_kv / sqlite / blob / ... are
-deferred drop-in EXTENDERS chosen per-deployment (see docs/durable-state.md).
+Implemented by: MemoryBackend (default) and FileBackend (adapters/stores);
+nats_kv / sqlite / blob are deferred drop-in extenders chosen per-deployment —
+registrable via yaah.plugins (see docs/durable-state.md).
 Where: the bundled-stdlib substrate behind durable run state, execute-once, and
 working memory — NOT the kernel (the kernel is still only Node/Envelope/Comms).
 Why: define ONE contract, in tiers, so a backend implements only what it can —

@@ -6,7 +6,8 @@ Where: the engine tracing core defines the PORT (R1); the zero-/no-external-
 system defaults (NullTracer, RecordingTracer, BusTracer, EnvelopeTracer) live
 beside it. Every sink (file / Langfuse / OTLP) is a swap-in adapter consuming
 the carried records.
-Why: one tiny interface — `emit` + `drain` + `captures` — so emit sites stay
+Why: one small interface — `emit`/`drain`/`ingest`/`last_model_call_span` +
+the `captures`/`is_carriage` attributes — so emit sites stay
 clean and the CARRIAGE is config-selected: `none` (NullTracer) or `tracer` (Bus,
 the v1 default) or `envelope` (R6, no shared bus — spans accrete in an in-memory
 per-corr buffer; the carrier process drains and attaches them to its outgoing

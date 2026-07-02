@@ -157,6 +157,7 @@ async def _assemble_harness(root: Dict[str, Any], base: str) -> Any:
 
 
 async def run_root(root: Dict[str, Any], base: str) -> Optional[Envelope]:
+    load_plugins(root.get("plugins"), base)   # no-op when the CLI already did
     harness = await _assemble_harness(root, base)
 
     if not root.get("run", "input" in root):
@@ -248,6 +249,7 @@ async def list_gates(root: Dict[str, Any], base: str, *, as_json: bool = False) 
     same fields the prose view shows — so a driver skill can parse instead of
     interpret. Per-baton shape lives in `_baton_json`.
     """
+    load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
     bstore = BatonStore(_build_store(root.get("state"), base))
     gates = await bstore.list_suspended()
     if as_json:
@@ -276,6 +278,7 @@ async def resume_gate(root: Dict[str, Any], base: str, baton_id: str,
     """Deliver a human decision to a parked gate and drive the rest to completion —
     possibly in a different process than the one that suspended it (the durable
     store is the rendezvous). `--resume` entrypoint."""
+    load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
     harness = await _assemble_harness(root, base)
     # The originally-detached engine has exited at the park; THIS process
     # now runs the engine in-process until the next gate or completion.
@@ -297,6 +300,7 @@ async def baton_schema(root: Dict[str, Any], base: str, baton_id: str) -> None:
     baton.pending.payload (HumanGate stamps them on the AWAIT envelope; the
     harness parks that envelope as baton.pending). Exit 1 if no such baton, or
     if the baton wasn't parked by a HumanGate (no `form` declared)."""
+    load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
     from .harness.decision_forms import lookup
     bstore = BatonStore(_build_store(root.get("state"), base))
     baton = await bstore.load(baton_id)
@@ -325,6 +329,7 @@ async def clear_state(root: Dict[str, Any], base: str) -> None:
     in-flight clearable node cancels, every waiting gate releases), flush the parked
     set, and drop suspended batons — a graceful reset over the SAME store/transport
     the runs use. `--clear` entrypoint."""
+    load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
     harness = await _assemble_harness(root, base)
     result = await harness.clear()
     print("CLEARED:", result)
@@ -334,6 +339,7 @@ async def clear_state(root: Dict[str, Any], base: str) -> None:
 # lives in `yaah.validate`. Re-exported here for back-compat with `yaah.runtime`
 # importers (notably tests). The keys-spec, shape table, enum tables, and
 # documented surface are all in that one module — the AI skill's ground truth.
+from .plugins import load_plugins  # noqa: E402
 from .validate import _DEFAULTS, validate_budgets, validate_root  # noqa: E402  (re-export)
 _validate_root = validate_root        # back-compat alias for older test imports
 
@@ -373,6 +379,7 @@ def explain_root(raw_user: Dict[str, Any], effective: Dict[str, Any],
     Validates the effective config first (R15) — surfaces config errors with
     actionable messages before printing anything else.
     """
+    load_plugins(effective.get("plugins"), os.path.dirname(os.path.abspath(root_path)))   # registered types must exist before build/validate
     validate_root(effective)
     chain = _trace_extends_chain(root_path)
     fake_keys = set((raw_user.get("_fake") or {}).keys()) if fake else set()

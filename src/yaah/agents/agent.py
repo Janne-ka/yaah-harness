@@ -23,10 +23,9 @@ from ..cwd import carry_cwd, resolve_cwd
 from ..jsonio import extract_json
 from ..jsonschema import check_schema
 from ..trace import NullTracer, Span
-# Backend is typed as Any: it's a structural ApiProvider, duck-typed on
-# `complete` / `turn` at call time. That runtime check is what this Agent
-# actually relies on; a static Protocol annotation would only duplicate it
-# without adding any guarantee.
+# The backend is an ApiProvider (declared, ADR-0007); the optional tool-loop
+# capability stays a runtime check (SupportsTurn / supports_turn) because
+# claude_cli deliberately lacks it.
 from . import api_provider as _ap
 from .tool import Tool
 from .tool_loop import run_tool_loop

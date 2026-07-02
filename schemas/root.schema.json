@@ -130,6 +130,13 @@
         }
       ]
     },
+    "plugins": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array"
+    },
     "prompt_sources": {
       "additionalProperties": {
         "additionalProperties": true,

@@ -59,5 +59,6 @@ this governs *call-signature* contracts (as types). Do not unify them.
 - mypy now sees through the previously-`Any` consumer seams (wrapper `inner: Node`,
   `Agent.backend: ApiProvider`), so an engine change that would call an extender wrongly
   is caught by the ratchet, not by the extender's users.
-- Registration of new *types* (config `type:` strings → factories) is a separate,
-  still-closed seam — tracked as the plugins/registration decision, not covered here.
+- Registration of new *types* (config `type:` strings → factories) is the sibling
+  seam: `yaah.plugins.register_type` + the root `plugins:` key (shipped with this
+  ADR) — one register call makes a type validate, build, and enum-check.

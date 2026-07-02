@@ -129,6 +129,9 @@ def build_root_schema() -> Dict[str, Any]:
         ],
     }
 
+    # plugins: extension modules imported before validation (yaah.plugins)
+    props["plugins"] = {"type": "array", "items": {"type": "string", "minLength": 1}}
+
     # baton_ttl: minutes (positive number)
     props["baton_ttl"] = {"type": "number", "minimum": 0}
 

@@ -1,9 +1,9 @@
 """TraceSink — the port a trace destination implements.
 
 Used by: the runtime subscribes each configured sink to the `trace` topic, so a
-BusTracer's published records flow to it. Implemented by: FileTraceSink,
-ConsoleTraceSink, LangfuseTraceSink (all swap-in adapters in
-yaah.adapters.trace).
+BusTracer's published records flow to it. Implemented by: ConsoleTraceSink,
+FileTraceSink, LangfuseTraceSink, ProgressFileSink, StatsFileSink (all swap-in
+adapters in yaah.adapters.trace).
 Where: the engine tracing core defines the PORT; the destinations are adapters
 (they bind to a file / stderr / Langfuse — outside systems).
 Why: one interface so a destination is config, not code — add a sink, subscribe

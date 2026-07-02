@@ -824,13 +824,13 @@
       "args": [
         {
           "name": "inner",
-          "annotation": "Any",
+          "annotation": "Node",
           "default": null,
           "kwonly": false
         },
         {
           "name": "store",
-          "annotation": "Any",
+          "annotation": "IdempotencyStore",
           "default": null,
           "kwonly": false
         }

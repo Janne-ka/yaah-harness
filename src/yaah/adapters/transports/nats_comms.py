@@ -138,7 +138,7 @@ class NatsComms(Comms):
     async def publish(self, topic: str, envelope: Envelope) -> None:
         await self._nc.publish(topic, envelope.to_json().encode())
 
-    async def subscribe(self, topic: str, handler: EventHandler) -> Any:
+    async def subscribe(self, topic: str, handler: EventHandler) -> Subscription:
         async def cb(msg: Any) -> None:
             await handler(Envelope.from_json(msg.data.decode()))
 

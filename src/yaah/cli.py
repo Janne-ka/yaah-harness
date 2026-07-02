@@ -564,6 +564,14 @@ def _dispatch(spec: Dict[str, Any]) -> None:
     # package it and use a dotted `fn:pkg.mod:func` path (see docs/node-reference).
     if base not in sys.path:
         sys.path.insert(0, base)
+    # Plugins load BEFORE any validation so a registered type is a known enum
+    # value by the time validate_root / validate_pipeline read the factory maps.
+    from .plugins import load_plugins
+    load_plugins(root.get("plugins"), base)
+    if root.get("plugins"):
+        # plugins run code at IMPORT time, even for validate/explain — say so.
+        print("note: imported plugins: {}".format(", ".join(root["plugins"])),
+              file=sys.stderr)
     if action == "explain":
         # `explain_root` runs `validate_root` itself with extra provenance
         # context, so it has to bypass the orchestrator's validate call.

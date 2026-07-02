@@ -49,7 +49,7 @@ _ROOT_KEYS = frozenset({
     "transport", "trace", "state",
     "pipeline", "input",
     "decisions", "interactive", "run", "serve", "baton_ttl",
-    "live_config",
+    "live_config", "plugins",
 })
 
 
@@ -190,6 +190,11 @@ def _check_shapes(root: Dict[str, Any], errs: List[str]) -> None:
     if "input" in root and not isinstance(root["input"], (str, dict)):
         errs.append("'input': expected a fixture path or an inline payload object, got {} {!r}".format(
             type(root["input"]).__name__, root["input"]))
+    plugins = root.get("plugins")
+    if plugins is not None and not (isinstance(plugins, list)
+                                    and all(isinstance(m, str) and m for m in plugins)):
+        errs.append('`plugins` must be a list of module-path strings '
+                    '(imported before validation; see yaah.plugins)')
     for k in _BOOL_KEYS:
         if k in root and not isinstance(root[k], bool):
             errs.append("{!r}: expected bool, got {} {!r}".format(

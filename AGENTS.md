@@ -124,6 +124,10 @@ which is which.
   Caught by `scripts/review_my_pr.py`'s grep checks, not by runtime.
 - **One class per file**, filename = class, with a top docstring
   stating **who calls it, where, why**. Caught by code review.
+- **New config types register via `yaah.plugins`.** A third-party
+  provider/store/sink/etc. is `register_type(kind, name, factory)` in a
+  module named in the root `plugins:` list — never an edit to
+  `runtime_factories`' maps. (Node types: `build(registry=...)`.)
 - **Hug-the-world ports.** Extend an existing port (`routing_*`
   multiplexer + a `file_*`/`http_*` adapter) before inventing one.
   Caught by review.
