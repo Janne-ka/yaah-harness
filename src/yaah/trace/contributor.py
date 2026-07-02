@@ -15,6 +15,7 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
+from abc import abstractmethod
 from typing import Any, Dict, Protocol, runtime_checkable
 
 from .span import Span
@@ -24,6 +25,7 @@ from .span import Span
 class TraceContributor(Protocol):
     name: str  # the capture name this module provides (e.g. "phase", "cost")
 
+    @abstractmethod
     def contribute(self, span: Span) -> Dict[str, Any]:
         """Return the fields this capture adds to the record for `span`
         (possibly empty — e.g. the tools capture contributes nothing to a

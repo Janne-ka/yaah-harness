@@ -13,10 +13,11 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from ..contributor import TraceContributor
 from ..span import Span
 
 
-class ToolsContributor:
+class ToolsContributor(TraceContributor):
     name = "tools"
 
     def contribute(self, span: Span) -> Dict[str, Any]:

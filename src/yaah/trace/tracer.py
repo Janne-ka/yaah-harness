@@ -25,6 +25,7 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
+from abc import abstractmethod
 from typing import Any, Dict, FrozenSet, List, Optional, Protocol, runtime_checkable
 
 from .span import Span
@@ -36,16 +37,19 @@ class Tracer(Protocol):
     is_carriage: bool          # True for envelope carriage; False for bus/null/recording —
                                 # tells the Agent whether to drain on reply (R6)
 
+    @abstractmethod
     async def emit(self, span: Span) -> None:
         """Record one measurement (carry it: bus / list / drop / envelope-buffer)."""
         ...
 
+    @abstractmethod
     async def drain(self, corr: str) -> List[Dict[str, Any]]:
         """Return AND CLEAR any buffered records for `corr` so the caller can attach
         them to an outgoing envelope (R6 envelope carriage). Non-carriage tracers
         return [] — they deliver through their own channel."""
         ...
 
+    @abstractmethod
     async def ingest(self, records: List[Dict[str, Any]]) -> None:
         """Incorporate already-projected records that arrived from a remote node
         (R6 merge-on-receive). The harness calls this on `reply.headers["trace"]`
@@ -55,6 +59,7 @@ class Tracer(Protocol):
         re-projection."""
         ...
 
+    @abstractmethod
     def last_model_call_span(self, correlation_id: str) -> Optional[Dict[str, Any]]:
         """Return the most recent `model_call` projected record for this corr, or
         None if no such span is available. ADR-0003 — the seam AttachingAgent

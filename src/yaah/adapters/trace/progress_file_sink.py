@@ -22,9 +22,10 @@ import time
 from typing import Callable, Optional
 
 from ...core import Envelope
+from ...trace import TraceSink
 
 
-class ProgressFileSink:
+class ProgressFileSink(TraceSink):
     def __init__(self, path: str, *, clock: Optional[Callable[[], float]] = None) -> None:
         self._path = path
         self._clock = clock or time.time  # injectable for deterministic tests

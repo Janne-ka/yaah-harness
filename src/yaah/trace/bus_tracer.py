@@ -17,11 +17,12 @@ from typing import Any, Dict, FrozenSet, List, Optional, Sequence
 from ..comms import Comms
 from ..core import Envelope, Kind
 from .contributor import TraceContributor
+from .tracer import Tracer
 from .record import project
 from .span import Span
 
 
-class BusTracer:
+class BusTracer(Tracer):
     is_carriage = False  # delivery is via the bus, not via the envelope
 
     # Per-call ingest cap (assessment #6): ingested records come from REMOTE

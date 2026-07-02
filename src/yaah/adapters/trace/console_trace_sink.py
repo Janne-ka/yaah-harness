@@ -16,9 +16,10 @@ import sys
 from typing import Any, Optional, TextIO
 
 from ...core import Envelope
+from ...trace import TraceSink
 
 
-class ConsoleTraceSink:
+class ConsoleTraceSink(TraceSink):
     def __init__(self, stream: Optional[TextIO] = None) -> None:
         self._stream = stream if stream is not None else sys.stderr
 

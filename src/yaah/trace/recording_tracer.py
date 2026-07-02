@@ -14,11 +14,12 @@ from __future__ import annotations
 from typing import Any, Dict, FrozenSet, List, Optional, Sequence
 
 from .contributor import TraceContributor
+from .tracer import Tracer
 from .record import project
 from .span import Span
 
 
-class RecordingTracer:
+class RecordingTracer(Tracer):
     is_carriage = False  # records stay in `.records` for inspection; not a carriage
 
     def __init__(self, contributors: Sequence[TraceContributor] = ()) -> None:

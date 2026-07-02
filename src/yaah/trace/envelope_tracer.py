@@ -27,11 +27,12 @@ from __future__ import annotations
 from typing import Any, Dict, FrozenSet, List, Optional, Sequence
 
 from .contributor import TraceContributor
+from .tracer import Tracer
 from .record import project
 from .span import Span
 
 
-class EnvelopeTracer:
+class EnvelopeTracer(Tracer):
     is_carriage = True  # R6 — only carriage tracer; the Agent drains on reply
 
     def __init__(self, *, contributors: Sequence[TraceContributor] = (),

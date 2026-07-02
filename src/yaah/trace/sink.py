@@ -14,6 +14,7 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
+from abc import abstractmethod
 from typing import Protocol, runtime_checkable
 
 from ..core import Envelope
@@ -21,5 +22,6 @@ from ..core import Envelope
 
 @runtime_checkable
 class TraceSink(Protocol):
+    @abstractmethod
     async def handle(self, env: Envelope) -> None:
         ...

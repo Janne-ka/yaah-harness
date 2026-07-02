@@ -15,9 +15,10 @@ from __future__ import annotations
 from typing import Any, Dict, FrozenSet, List, Optional
 
 from .span import Span
+from .tracer import Tracer
 
 
-class NullTracer:
+class NullTracer(Tracer):
     is_carriage = False
     captures: FrozenSet[str] = frozenset()
 
