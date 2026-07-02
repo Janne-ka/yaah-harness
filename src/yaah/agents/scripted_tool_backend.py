@@ -28,7 +28,7 @@ from typing import Any, AsyncIterator, List, Optional, Sequence
 from . import api_provider as _ap
 
 
-class ScriptedToolBackend:
+class ScriptedToolBackend(_ap.ApiProvider, _ap.SupportsTurn):
     def __init__(self, turns: Sequence[dict], default: str = "",
                  *, on_exhaustion: str = "default") -> None:
         if on_exhaustion not in ("default", "raise", "repeat_last"):

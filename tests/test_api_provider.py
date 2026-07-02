@@ -23,9 +23,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from yaah.agents.api_provider import (  # noqa: E402
-    ApiProvider, assemble_message, complete, stream_of, turn,
+    ApiProvider, SupportsTurn, assemble_message, complete, stream_of, turn,
 )
 from yaah.agents.fake_backend import FakeBackend  # noqa: E402
+from yaah.adapters.backends import ClaudeCliBackend  # noqa: E402
+from yaah.adapters.backends.fake_tool_backend import FakeToolBackend  # noqa: E402
 
 
 # --- A minimal native streaming tool backend (emits StreamEvents directly) ---
@@ -138,6 +140,19 @@ def test_native_backend_satisfies_apiprovider_protocol():
     assert isinstance(_StreamingToolBackend(text="x"), ApiProvider)
 
 
+def test_supports_turn_is_a_distinct_optional_capability():
+    # The tool-loop capability is EXPLICIT and separate from ApiProvider: a
+    # tool-capable backend is both; claude_cli is an ApiProvider but NOT
+    # SupportsTurn (it runs its own tool loop — Agent must check, not assume).
+    assert isinstance(FakeToolBackend(turns=[]), SupportsTurn)      # has turn()
+    assert isinstance(FakeToolBackend(turns=[]), ApiProvider)
+    claude = ClaudeCliBackend()
+    assert isinstance(claude, ApiProvider)
+    assert not isinstance(claude, SupportsTurn), \
+        "claude_cli has no native turn() — the capability must read as absent"
+    assert not isinstance(FakeBackend(responses=["x"]), SupportsTurn)
+
+
 if __name__ == "__main__":
     test_stream_of_wraps_collected_only_tool_backend()
     test_module_complete_collects_text_from_native_stream()
@@ -145,4 +160,5 @@ if __name__ == "__main__":
     test_assemble_message_merges_text_deltas()
     test_assemble_message_raises_on_error_event()
     test_native_backend_satisfies_apiprovider_protocol()
+    test_supports_turn_is_a_distinct_optional_capability()
     print("PASS")

@@ -42,7 +42,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 from . import api_provider as _ap
 
 
-class ScriptedBackend:
+class ScriptedBackend(_ap.ApiProvider):
     def __init__(self, by_model: Dict[str, Sequence[str]], default: str = "",
                  *, on_exhaustion: str = "default") -> None:
         if on_exhaustion not in ("default", "raise", "repeat_last"):

@@ -76,7 +76,7 @@ def _report_usage(on_usage: Optional[Callable[..., Any]], resp: Any, model: Opti
               "model": resp_model or model})
 
 
-class LiteLLMBackend:
+class LiteLLMBackend(_ap.ApiProvider, _ap.SupportsTurn):
     def __init__(self, *, acompletion: Optional[Callable[..., Awaitable[Any]]] = None,
                  **default_opts: Any) -> None:
         # `acompletion` is the one external dependency, injected for testability:

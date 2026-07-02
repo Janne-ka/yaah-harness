@@ -106,7 +106,7 @@ def _validate_extra_args(extra_args: Sequence[str], allow_dangerous: bool) -> Li
     return args
 
 
-class ClaudeCliBackend:
+class ClaudeCliBackend(_ap.ApiProvider):
     def __init__(
         self,
         *,

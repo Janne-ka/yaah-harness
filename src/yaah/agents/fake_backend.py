@@ -19,7 +19,7 @@ from typing import Any, AsyncIterator, List, Optional, Sequence
 from . import api_provider as _ap
 
 
-class FakeBackend:
+class FakeBackend(_ap.ApiProvider):
     def __init__(self, responses: Optional[Sequence[str]] = None, default: str = "") -> None:
         self._responses: List[str] = list(responses or [])
         self._default = default

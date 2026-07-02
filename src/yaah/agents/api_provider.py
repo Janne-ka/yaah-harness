@@ -40,6 +40,7 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
+from abc import abstractmethod
 from typing import Any, AsyncIterator, Dict, List, Optional, Protocol, runtime_checkable
 
 try:
@@ -136,7 +137,23 @@ class ApiProvider(Protocol):
     wrapping a canned string) yield a single `text_delta` with the full
     text, then `done` — consumers shouldn't have to care."""
 
+    @abstractmethod
     def stream(self, context: Context, **opts: Any) -> AsyncIterator[StreamEvent]:
+        ...
+
+
+@runtime_checkable
+class SupportsTurn(Protocol):
+    """OPTIONAL tool-loop capability — a backend that runs one provider-native
+    tool turn (`{text, calls}`) instead of delegating to the engine's tool loop.
+    Kept explicit and separate from ApiProvider because it's optional: claude_cli
+    has NO native turn (it runs its own tool loop), so Agent checks for this
+    capability (`supports_turn`/hasattr) rather than assuming every provider has it.
+    A tool-capable backend declares `class X(ApiProvider, SupportsTurn)`."""
+
+    @abstractmethod
+    async def turn(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *,
+                   model: Optional[str] = None, **opts: Any) -> Dict[str, Any]:
         ...
 
 

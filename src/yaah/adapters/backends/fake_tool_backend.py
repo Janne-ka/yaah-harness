@@ -26,7 +26,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 from ...agents import api_provider as _ap
 
 
-class FakeToolBackend:
+class FakeToolBackend(_ap.ApiProvider, _ap.SupportsTurn):
     def __init__(self, *, turns: Sequence[Dict[str, Any]]) -> None:
         # Each turn is one of:
         #   {"text": "..."}                        -> final answer

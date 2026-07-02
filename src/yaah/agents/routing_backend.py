@@ -27,11 +27,12 @@ from ..prefix_router import PrefixRouter
 from . import api_provider as _ap
 
 
-# Generic parameter is Any: leaf backends are structural ApiProviders,
-# duck-typed on `complete` / `turn` / `stream` at dispatch time. That runtime
-# dispatch is the real contract; a static Protocol annotation would only be a
-# type-only ornament over it.
-class RoutingBackend(PrefixRouter[Any]):
+# PrefixRouter's generic parameter stays Any: a leaf backend is resolved and
+# dispatched at runtime (structural — any object with stream()/turn() works), so
+# the registry can't be statically typed to one leaf class. The ROUTER itself
+# declares ApiProvider + SupportsTurn — it presents both to Agent (forwards
+# stream to the selected leaf, turn when that leaf supports it).
+class RoutingBackend(PrefixRouter[Any], _ap.ApiProvider, _ap.SupportsTurn):
     label = "backend"
     prefix = "provider"
 
