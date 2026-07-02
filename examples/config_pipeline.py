@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 
 from yaah import Done, Envelope
-from yaah.agents import FakeBackend, RoutingBackend
+from yaah.agents import FakeProvider, RoutingProvider
 from yaah.build import build, default_registry
 
 SPEC_PROMPT = "You are a spec worker. Return JSON with keys summary, items.\nTask: {{task}}\n"
@@ -44,13 +44,13 @@ CONFIG = {
 
 
 async def main() -> None:
-    backend = RoutingBackend(
+    backend = RoutingProvider(
         {
-            "fake": FakeBackend(responses=[
+            "fake": FakeProvider(responses=[
                 '{"summary": "ok", "items": ["a"  ',     # invalid -> triggers retry
                 '{"summary": "ok", "items": ["a"]}',     # valid
             ]),
-            # "claude": ClaudeCliBackend(),   # then set role:spec model to "claude:claude-sonnet-4-6"
+            # "claude": ClaudeCliProvider(),   # then set role:spec model to "claude:claude-sonnet-4-6"
         },
         default="fake",
     )

@@ -11,7 +11,7 @@ import sys
 import types
 
 from yaah.adapters.filters import AroundKeywordFilter, CallTargetFilter, RedactFilter
-from yaah.agents import FakeBackend, make_envelope_get_tool
+from yaah.agents import FakeProvider, make_envelope_get_tool
 from yaah.core import Envelope, Kind
 from yaah.filter_factories import build_filter
 from yaah.filters import Filter
@@ -147,7 +147,7 @@ async def scenario_build_parses_filters_spec() -> None:
                                  "scrub":   {"type": "redact", "patterns": [r"\d+"]}}}},
         "graph": {"start": "s", "stages": {"s": {"node": "role:r"}}},
     }
-    h = build(cfg, backend=FakeBackend(default="{}"))
+    h = build(cfg, backend=FakeProvider(default="{}"))
     assert h.graph.stages["s"].node == "role:r"  # parsed without error
 
 

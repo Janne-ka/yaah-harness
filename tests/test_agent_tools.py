@@ -1,6 +1,6 @@
 """Agent tool-loop: a model-initiated tool call, run offline.
 
-A ScriptedToolBackend "decides" to call a tool, the loop executes the tool's
+A ScriptedToolProvider "decides" to call a tool, the loop executes the tool's
 impl (fn: or node:), feeds the result back, and the model "answers". No network.
 
 Run: cd yaah && PYTHONPATH=src python3 tests/test_agent_tools.py
@@ -13,7 +13,7 @@ import os
 import tempfile
 
 from yaah import Envelope, InProcessComms, Kind, NodeConfig
-from yaah.agents import Agent, RoutingBackend, ScriptedToolBackend, Tool
+from yaah.agents import Agent, RoutingProvider, ScriptedToolProvider, Tool
 
 # fn: tool impl — records its args to a file (shared across module instances; the
 # resolver imports this module by name, which is a different object than __main__
@@ -35,7 +35,7 @@ class Adder:  # node: tool impl — a tool that IS another node over Comms
 async def scenario_fn_tool() -> None:
     if os.path.exists(_MARKER):
         os.remove(_MARKER)
-    backend = RoutingBackend({"tool": ScriptedToolBackend([
+    backend = RoutingProvider({"tool": ScriptedToolProvider([
         {"calls": [{"id": "c1", "name": "rec", "args": {"x": 1}}]},  # model calls the tool
         {"text": "done"},                                            # then answers
     ])}, default="tool")
@@ -51,7 +51,7 @@ async def scenario_fn_tool() -> None:
 async def scenario_node_tool() -> None:
     comms = InProcessComms()
     comms.register("role:adder", Adder())
-    backend = RoutingBackend({"tool": ScriptedToolBackend([
+    backend = RoutingProvider({"tool": ScriptedToolProvider([
         {"calls": [{"id": "c1", "name": "add", "args": {"a": 2, "b": 3}}]},
         {"text": "the sum is 5"},
     ])}, default="tool")
@@ -64,7 +64,7 @@ async def scenario_node_tool() -> None:
 
 async def scenario_no_tools_still_completes() -> None:
     """An agent without tools (or a backend without turn) uses plain complete."""
-    backend = RoutingBackend({"tool": ScriptedToolBackend([], default="plain")}, default="tool")
+    backend = RoutingProvider({"tool": ScriptedToolProvider([], default="plain")}, default="tool")
     agent = Agent(backend, template="hi", parse=False)
     out = await agent.invoke(Envelope(Kind.TASK, {}), NodeConfig(model="tool:m"))
     assert out.payload["raw"] == "plain", out.payload
@@ -193,14 +193,14 @@ async def scenario_manifest_empty_when_backend_has_turn() -> None:
 
 
 async def scenario_manifest_injected_behind_router_without_turn() -> None:
-    """H4 regression (assessment 2026-06-10): RoutingBackend defines `turn`
+    """H4 regression (assessment 2026-06-10): RoutingProvider defines `turn`
     itself, so a structural isinstance check on the ROUTER would always be
     true — a complete-only provider (the claude_cli shape) routed through
     it skipped the R11 manifest AND crashed in run_tool_loop with 'does not
     support tool-use'. Capability is now resolved per-route: the manifest
     renders, complete() runs, no crash."""
     leaf = _CompleteOnlyBackend()
-    router = RoutingBackend({"cli": leaf}, default="cli")
+    router = RoutingProvider({"cli": leaf}, default="cli")
     # closure tool WITH an author usage line — renderable on the prompt side
     # (a usage-less closure would be skipped, assessment #10)
     a = Agent(router, template="Review.\n{{tool_manifest}}", stage="r", parse=False,
@@ -212,8 +212,8 @@ async def scenario_manifest_injected_behind_router_without_turn() -> None:
     assert "## Tools you can call" in leaf.last_prompt, "manifest fallback must render"
 
     # and a TURN-capable leaf behind the same router still takes the tool loop
-    leaf2 = ScriptedToolBackend([{"text": "looped"}])
-    router2 = RoutingBackend({"tool": leaf2}, default="tool")
+    leaf2 = ScriptedToolProvider([{"text": "looped"}])
+    router2 = RoutingProvider({"tool": leaf2}, default="tool")
     a2 = Agent(router2, template="Go.\n{{tool_manifest}}", stage="r", parse=False,
                tools=[Tool(name="fetch", impl=lambda a: a, description="x")])
     out2 = await a2.invoke(Envelope(Kind.TASK, {}, {"correlation_id": "c2"}),

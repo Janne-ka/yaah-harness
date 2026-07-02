@@ -1,4 +1,4 @@
-"""FakeBackend — a deterministic, offline ApiProvider for tests and the PoC.
+"""FakeProvider — a deterministic, offline ApiProvider for tests and the PoC.
 
 Used by: tests, examples, and the runtime's `fake` provider.
 Where: anywhere a real model isn't wanted (CI, local dev).
@@ -19,7 +19,7 @@ from typing import Any, AsyncIterator, List, Optional, Sequence
 from . import api_provider as _ap
 
 
-class FakeBackend(_ap.ApiProvider):
+class FakeProvider(_ap.ApiProvider):
     def __init__(self, responses: Optional[Sequence[str]] = None, default: str = "") -> None:
         self._responses: List[str] = list(responses or [])
         self._default = default

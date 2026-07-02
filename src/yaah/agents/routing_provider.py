@@ -1,4 +1,4 @@
-"""RoutingBackend — an ApiProvider that dispatches by the model's provider prefix.
+"""RoutingProvider — an ApiProvider that dispatches by the model's provider prefix.
 
 Used by: the runtime (built from the root config's `providers`) and apps; given
 to every Agent / AgentLoopNode as its single backend.
@@ -32,7 +32,7 @@ from . import api_provider as _ap
 # the registry can't be statically typed to one leaf class. The ROUTER itself
 # declares ApiProvider + SupportsTurn — it presents both to Agent (forwards
 # stream to the selected leaf, turn when that leaf supports it).
-class RoutingBackend(PrefixRouter[Any], _ap.ApiProvider, _ap.SupportsTurn):
+class RoutingProvider(PrefixRouter[Any], _ap.ApiProvider, _ap.SupportsTurn):
     label = "backend"
     prefix = "provider"
 

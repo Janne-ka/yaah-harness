@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 
 from yaah.core import Envelope, Kind, NodeConfig, Verdict
-from yaah.agents import Agent, FakeBackend
+from yaah.agents import Agent, FakeProvider
 
 CFG = NodeConfig(model="fake:1")
 
@@ -31,7 +31,7 @@ class _Recording:
 
 
 def _agent(template, *, strict, stage="agent", backend=None):
-    return Agent(backend or FakeBackend(responses=["ok"]), template,
+    return Agent(backend or FakeProvider(responses=["ok"]), template,
                  parse=False, stage=stage, strict_render=strict)
 
 

@@ -20,7 +20,7 @@ import os
 from typing import Any, Dict, Optional
 
 # Engine ports + zero-config references (next to the kernel) ...
-from .agents import FakeBackend, RoutingBackend, ScriptedBackend
+from .agents import FakeProvider, RoutingProvider, ScriptedProvider
 from .comms import InProcessComms
 from .data import RoutingDataSink, RoutingDataSource
 from .mcp import RoutingMcpSource, StaticMcpSource
@@ -29,8 +29,8 @@ from .store import MemoryBackend
 from .trace import BusTracer, NullTracer
 from .trace.contributors import BUILTIN_CONTRIBUTORS
 # ... and the swap-in adapters (the only place the assembly layer reaches into adapters/).
-from .adapters.backends import ClaudeCliBackend, LiteLLMBackend
-from .adapters.backends.fake_tool_backend import FakeToolBackend
+from .adapters.providers import ClaudeCliProvider, LiteLLMProvider
+from .adapters.providers.fake_tool_provider import FakeToolProvider
 from .adapters.data import FileDataSource, FileSink, GitDiffSource
 from .adapters.mcp import FileMcpSource
 from .adapters.prompts import FilePromptSource, HttpPromptSource, LangfusePromptSource
@@ -183,7 +183,7 @@ def _kw(spec: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _scripted_by_model(spec: Dict[str, Any], base: str) -> Any:
-    """The ScriptedBackend's canned-responses table: from a `fixtures` file
+    """The ScriptedProvider's canned-responses table: from a `fixtures` file
     (resolved against the config dir) or an inline `by_model`. Used by: the
     fake_scripted backend factory."""
     if "fixtures" in spec:
@@ -198,19 +198,19 @@ def _scripted_by_model(spec: Dict[str, Any], base: str) -> Any:
 # reads these SAME maps for its type enums AND unknown-key checks, so adding a
 # type = one entry here and the validator learns it for free — no parallel
 # tables to drift (the sink/sinks bug class).
-_BACKEND_TYPES = {
-    "claude_cli": (lambda spec, base: ClaudeCliBackend(**_kw(spec)), None),
-    "litellm": (lambda spec, base: LiteLLMBackend(**_kw(spec)), None),
-    "fake": (lambda spec, base: FakeBackend(responses=spec.get("responses"),
+_PROVIDER_TYPES = {
+    "claude_cli": (lambda spec, base: ClaudeCliProvider(**_kw(spec)), None),
+    "litellm": (lambda spec, base: LiteLLMProvider(**_kw(spec)), None),
+    "fake": (lambda spec, base: FakeProvider(responses=spec.get("responses"),
                                             default=spec.get("default", "")),
              frozenset({"responses", "default"})),
-    "fake_scripted": (lambda spec, base: ScriptedBackend(_scripted_by_model(spec, base),
+    "fake_scripted": (lambda spec, base: ScriptedProvider(_scripted_by_model(spec, base),
                                                          default=spec.get("default", "")),
                       frozenset({"fixtures", "by_model", "default"})),
     # Scripted tool-loop backend — drives an `agent_loop` node from a list of
     # canned turn responses ({"text": "..."} or {"calls": [{name,args,id}, ...]}).
     # For tests + spike examples; proves the ApiProvider seam is replaceable.
-    "fake_tool": (lambda spec, base: FakeToolBackend(turns=spec.get("turns", [])),
+    "fake_tool": (lambda spec, base: FakeToolProvider(turns=spec.get("turns", [])),
                   frozenset({"turns"})),
 }
 _PROMPT_TYPES = {
@@ -270,9 +270,9 @@ def _build_router(specs: Any, *, factories: Dict[str, Any], router_cls: Any,
     return router_cls(leaves, default=default)
 
 
-def _build_backend(cfg: Dict[str, Any], base: str) -> RoutingBackend:
-    return _build_router(cfg.get("providers"), factories=_BACKEND_TYPES,
-                         router_cls=RoutingBackend, default=cfg.get("default_provider"),
+def _build_provider(cfg: Dict[str, Any], base: str) -> RoutingProvider:
+    return _build_router(cfg.get("providers"), factories=_PROVIDER_TYPES,
+                         router_cls=RoutingProvider, default=cfg.get("default_provider"),
                          base=base, optional=False)
 
 

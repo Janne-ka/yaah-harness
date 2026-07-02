@@ -189,7 +189,7 @@ suite proving them is part of the implementation plan, not shipped.
 | Provider protocol | `src/yaah/agents/api_provider.py` |
 | Tool resolver | `src/yaah/external_call.py` (`call_target`) |
 | MCP adapter | `src/yaah/adapters/nodes/mcp_tool_node.py` *(planned)* |
-| Backend implementations | `src/yaah/adapters/backends/` |
+| Backend implementations | `src/yaah/adapters/providers/` |
 | Build registry (wires `agent_loop`) | `src/yaah/build/builders.py` *(pending)* |
 
 ## Related

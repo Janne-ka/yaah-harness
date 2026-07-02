@@ -93,7 +93,7 @@ _BOOL_KEYS = ("run", "interactive", "live_config")
 # lazily via `_factory_tables`. One entry there = enum value + key check here.
 # `_NAMED_MAP_FACTORIES` maps each named-map root key to its factory-map name.
 _NAMED_MAP_FACTORIES = {
-    "providers": "_BACKEND_TYPES",
+    "providers": "_PROVIDER_TYPES",
     "prompt_sources": "_PROMPT_TYPES",
     "data_sources": "_DATA_SOURCE_TYPES",
     "data_sinks": "_DATA_SINK_TYPES",

@@ -539,9 +539,9 @@
     ],
     "backends": [
       {
-        "module": "src/yaah/adapters/backends/claude_cli_backend.py",
-        "name": "ClaudeCliBackend",
-        "doc": "ClaudeCliBackend \u2014 an ApiProvider that shells out to the local `claude -p`.",
+        "module": "src/yaah/adapters/providers/claude_cli_provider.py",
+        "name": "ClaudeCliProvider",
+        "doc": "ClaudeCliProvider \u2014 an ApiProvider that shells out to the local `claude -p`.",
         "args": [
           {
             "name": "binary",
@@ -596,9 +596,9 @@
         "method_args_doc": []
       },
       {
-        "module": "src/yaah/adapters/backends/fake_tool_backend.py",
-        "name": "FakeToolBackend",
-        "doc": "FakeToolBackend \u2014 scripted ApiProvider for testing AgentLoopNode without an LLM.",
+        "module": "src/yaah/adapters/providers/fake_tool_provider.py",
+        "name": "FakeToolProvider",
+        "doc": "FakeToolProvider \u2014 scripted ApiProvider for testing AgentLoopNode without an LLM.",
         "args": [
           {
             "name": "turns",
@@ -611,9 +611,9 @@
         "method_args_doc": []
       },
       {
-        "module": "src/yaah/adapters/backends/litellm_backend.py",
-        "name": "LiteLLMBackend",
-        "doc": "LiteLLMBackend \u2014 an ApiProvider that calls many providers via litellm.",
+        "module": "src/yaah/adapters/providers/litellm_provider.py",
+        "name": "LiteLLMProvider",
+        "doc": "LiteLLMProvider \u2014 an ApiProvider that calls many providers via litellm.",
         "args": [
           {
             "name": "acompletion",

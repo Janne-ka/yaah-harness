@@ -1,4 +1,4 @@
-"""ClaudeCliBackend — an ApiProvider that shells out to the local `claude -p`.
+"""ClaudeCliProvider — an ApiProvider that shells out to the local `claude -p`.
 
 Used by: the runtime's `claude` provider (and apps) when running real local
 Claude (e.g. an app's code-editing stages).
@@ -106,7 +106,7 @@ def _validate_extra_args(extra_args: Sequence[str], allow_dangerous: bool) -> Li
     return args
 
 
-class ClaudeCliBackend(_ap.ApiProvider):
+class ClaudeCliProvider(_ap.ApiProvider):
     def __init__(
         self,
         *,

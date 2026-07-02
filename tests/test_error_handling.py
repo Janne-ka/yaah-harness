@@ -234,14 +234,14 @@ async def scenario_flush_drops_parked_set() -> None:
 
 
 def scenario_build_parses_on_error() -> None:
-    from yaah.agents import FakeBackend
+    from yaah.agents import FakeProvider
     cfg = {
         "nodes": {"role:x": {"type": "agent", "template": "t", "model": "fake:x"}},
         "graph": {"start": "work", "stages": {
             "work": {"node": "role:x", "on_error": {"compensate": "fn:m:f"}, "then": None},
         }},
     }
-    h = build(cfg, backend=FakeBackend(default="{}"))
+    h = build(cfg, backend=FakeProvider(default="{}"))
     assert h.graph.stages["work"].on_error == {"compensate": "fn:m:f"}
 
 

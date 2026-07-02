@@ -30,7 +30,7 @@ config with a real-provider override. Example: `arch-drift.local.json` has
 `providers.claude = {type: "fake_scripted", by_model: {…}}`; the real config
 says `providers.claude = {type: "claude_cli", binary: "claude"}` thinking it
 overrides. It doesn't — deep merge keeps `by_model` from the base, and
-`ClaudeCliBackend` rejects the extra key. **Explicitly null it:**
+`ClaudeCliProvider` rejects the extra key. **Explicitly null it:**
 ```json
 "providers": {"claude": {"type": "claude_cli", "binary": "claude",
                           "by_model": null}}

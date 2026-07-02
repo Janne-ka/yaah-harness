@@ -11,13 +11,13 @@ from __future__ import annotations
 import asyncio
 
 from yaah.core import Envelope, Kind, NodeConfig, Verdict
-from yaah.agents import Agent, FakeBackend
+from yaah.agents import Agent, FakeProvider
 
 CFG = NodeConfig(model="fake:1")
 
 
 def _agent(resp, schema):
-    return Agent(FakeBackend(responses=[resp]), "judge {{x}}", parse=True,
+    return Agent(FakeProvider(responses=[resp]), "judge {{x}}", parse=True,
                  output_schema=schema, stage="judge")
 
 
@@ -67,7 +67,7 @@ async def wellformed_json_unaffected() -> None:
 async def parse_false_never_recovers() -> None:
     # output_schema + parse:false: recovery must NOT run (parse:false = no extract_json
     # at all). raw passes through; nothing merged.
-    a = Agent(FakeBackend(responses=['{verdict:"FIX"}']), "judge {{x}}", parse=False,
+    a = Agent(FakeProvider(responses=['{verdict:"FIX"}']), "judge {{x}}", parse=False,
               output_schema={"required": ["verdict"]}, stage="judge")
     out = await a.invoke(Envelope("task", {"x": "y"}), CFG)
     assert out.payload["raw"] == '{verdict:"FIX"}', out.payload

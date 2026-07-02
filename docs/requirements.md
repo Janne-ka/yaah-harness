@@ -75,7 +75,7 @@ agenda — don't re-fixate on cost.
 Each stage picks the cheapest model that passes its bar; cheap models do triage/judge
 work, expensive models only the hard synthesis.
 - *YAAH:* `provider:model` routing per node + `effort` per `NodeConfig`; pure config,
-  no code (`RoutingBackend`).
+  no code (`RoutingProvider`).
 - *Field:* most agent frameworks bind one model per agent; per-step model choice is
   possible in LangGraph but is wiring, not a first-class knob. CrewAI/AutoGen lean to
   one strong model per agent → costlier by default.

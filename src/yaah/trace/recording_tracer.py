@@ -4,7 +4,7 @@ Used by: tests (assert what was traced without a bus/sink) and any in-proc
 consumer that wants the spans directly.
 Where: the engine tracing core (a no-external-system default).
 Why: the DI-testing seam for the whole tracing feature — inject this instead of
-a BusTracer and inspect `.records`; mirrors how FakeBackend/RecordingScripted
+a BusTracer and inspect `.records`; mirrors how FakeProvider/RecordingScripted
 stand in for real backends.
 
 Targets Python 3.9+.

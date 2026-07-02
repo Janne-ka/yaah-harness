@@ -1,4 +1,4 @@
-"""LiteLLMBackend against the REAL litellm SDK — offline, via mock_response.
+"""LiteLLMProvider against the REAL litellm SDK — offline, via mock_response.
 
 What it proves: the backend's response extraction works on a genuine litellm
 `ModelResponse` (whose `choices` items are objects, not dicts), not just on the
@@ -32,10 +32,10 @@ def main() -> None:
 
 
 async def _run() -> None:
-    from yaah.adapters.backends import LiteLLMBackend
+    from yaah.adapters.providers import LiteLLMProvider
 
     usage = {}
-    be = LiteLLMBackend()  # no stub -> real litellm.acompletion (lazy import)
+    be = LiteLLMProvider()  # no stub -> real litellm.acompletion (lazy import)
 
     out = await _ap.complete(be, 
         "ping", model="gpt-4o-mini",

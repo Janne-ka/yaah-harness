@@ -226,7 +226,7 @@ class Agent(Node):
 
     def _supports_turn(self, model: object) -> bool:
         """Tool capability of the backend THIS call will actually hit (H4). A
-        router (RoutingBackend) defines `turn` itself, so a structural
+        router (RoutingProvider) defines `turn` itself, so a structural
         isinstance check would be ALWAYS true behind a router — the R11
         manifest fallback would be unreachable, and a non-turn provider
         (claude_cli) with tools/expose/broker would crash mid-loop instead of

@@ -3,8 +3,8 @@
 Used by: call sites that want event-level visibility (token deltas, tool-call
 assembly, usage events) — run_tool_loop consumes provider.stream() directly,
 and Agent.invoke's plain path collects it via complete(). Implemented by: every
-shipped backend natively (FakeBackend, ScriptedBackend, FakeToolBackend,
-ScriptedToolBackend, LiteLLMBackend, ClaudeCliBackend, RoutingBackend).
+shipped backend natively (FakeProvider, ScriptedProvider, FakeToolProvider,
+ScriptedToolProvider, LiteLLMProvider, ClaudeCliProvider, RoutingProvider).
 Where: the model seam. A backend author implements `stream()` and nothing
 else. Module-level helpers `complete()` and `turn()` project a stream into
 collected-result shapes (a string / a `{text, calls}` dict) for call sites
@@ -133,7 +133,7 @@ class ApiProvider(Protocol):
     Implementations MUST yield a `start` event first and a `done` (or
     `error`) event last. Between them: any number of `text_delta` events
     interleaved with `toolcall_end` events, in the order the provider
-    produces them. Streams that aren't natively streaming (FakeBackend
+    produces them. Streams that aren't natively streaming (FakeProvider
     wrapping a canned string) yield a single `text_delta` with the full
     text, then `done` — consumers shouldn't have to care."""
 
@@ -219,7 +219,7 @@ async def stream_of(provider: Any, context: Context, **opts: Any) -> AsyncIterat
     used as-is; a collected-only provider (just `complete()`/`turn()` — a test
     double or an external legacy backend, possibly sitting behind a router) is
     wrapped into a one-shot stream so any stream consumer (assemble_message,
-    RoutingBackend.stream) works against it uniformly.
+    RoutingProvider.stream) works against it uniformly.
 
     `**opts` (incl. the `on_usage` cost callback) is forwarded verbatim: a
     collected-only provider is expected to accept `**opts` like every shipped

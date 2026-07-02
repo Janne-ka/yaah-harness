@@ -1,4 +1,4 @@
-"""ScriptedToolBackend — a deterministic tool-capable ApiProvider for tests.
+"""ScriptedToolProvider — a deterministic tool-capable ApiProvider for tests.
 
 Used by: tests of the agent tool-loop (and demos). `stream()` walks a canned
 sequence of turn results (tool calls, then a final answer), so the loop runs
@@ -9,8 +9,8 @@ the loop executes the tool's impl, feeds the result back, and the model
 "answers".
 
 Exhaustion behavior is unified across the offline backends (assessment
-cluster 3 B2): same `on_exhaustion` knob as ScriptedBackend — `"default"`
-(yield a synthetic final text equal to self._default, matching FakeBackend's
+cluster 3 B2): same `on_exhaustion` knob as ScriptedProvider — `"default"`
+(yield a synthetic final text equal to self._default, matching FakeProvider's
 "default" shape), `"raise"` (IndexError — raises through naturally; error
 events are for soft errors, exhaustion is exceptional), or `"repeat_last"`
 (legacy). Default is `"default"`.
@@ -28,7 +28,7 @@ from typing import Any, AsyncIterator, List, Optional, Sequence
 from . import api_provider as _ap
 
 
-class ScriptedToolBackend(_ap.ApiProvider, _ap.SupportsTurn):
+class ScriptedToolProvider(_ap.ApiProvider, _ap.SupportsTurn):
     def __init__(self, turns: Sequence[dict], default: str = "",
                  *, on_exhaustion: str = "default") -> None:
         if on_exhaustion not in ("default", "raise", "repeat_last"):
@@ -69,7 +69,7 @@ class ScriptedToolBackend(_ap.ApiProvider, _ap.SupportsTurn):
             return out
         if self._on_exhaustion == "raise":
             raise IndexError(
-                "ScriptedToolBackend exhausted (turns played: {})".format(len(self._turns)))
+                "ScriptedToolProvider exhausted (turns played: {})".format(len(self._turns)))
         if self._on_exhaustion == "repeat_last":
             return self._turns[-1] if self._turns else {"text": self._default}
         return {"text": self._default}

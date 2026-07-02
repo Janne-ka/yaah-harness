@@ -128,14 +128,14 @@ async def scenario_unmatched_clear_ignored() -> None:
 
 
 def scenario_build_parses_clearable() -> None:
-    from yaah.agents import FakeBackend
+    from yaah.agents import FakeProvider
     cfg = {
         "nodes": {"role:x": {"type": "agent", "template": "t", "model": "fake:x"}},
         "graph": {"start": "work", "stages": {
             "work": {"node": "role:x", "clearable": True, "then": None},
         }},
     }
-    h = build(cfg, backend=FakeBackend(default="{}"))
+    h = build(cfg, backend=FakeProvider(default="{}"))
     assert h.graph.stages["work"].clearable is True
 
 

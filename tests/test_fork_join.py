@@ -167,8 +167,8 @@ async def scenario_build_classifies_fanout_as_fork() -> None:
         }},
     }
     validate_pipeline(cfg)  # no error: spread has no node but is a fork; p,q are stages
-    from yaah.agents import FakeBackend
-    h = build(cfg, backend=FakeBackend(default="{}"))
+    from yaah.agents import FakeProvider
+    h = build(cfg, backend=FakeProvider(default="{}"))
     assert h.graph.stages["spread"].fork == ["p", "q"]
     assert h.graph.stages["spread"].fanout is None
 

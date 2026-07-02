@@ -129,7 +129,7 @@ to `litellm.json` and replace the provider section:
 Then set the relevant API key in the environment (`OPENAI_API_KEY`,
 `ANTHROPIC_API_KEY`, etc.) and run `yaah run litellm.json`.
 
-The current `LiteLLMBackend` collapses to a single non-streaming
+The current `LiteLLMProvider` collapses to a single non-streaming
 `acompletion()` call internally — sufficient for this example's "model
 decides which tool to call" pattern, but real chunk-by-chunk streaming
 is a future upgrade (see `.notes/breaking-changes.md`, the
@@ -220,7 +220,7 @@ export YAAH_CODING_AGENT_WORKDIR="$PWD/fixtures/buggy_code"
   — the model-driven single-shot `agent` node
 - [`src/yaah/agents/tool_loop.py`](../../src/yaah/agents/tool_loop.py)
   — the canonical tool-use loop (B8 unification)
-- [`src/yaah/adapters/backends/claude_cli_backend.py`](../../src/yaah/adapters/backends/claude_cli_backend.py)
+- [`src/yaah/adapters/providers/claude_cli_provider.py`](../../src/yaah/adapters/providers/claude_cli_provider.py)
   — claude provider with B3 stream-json parsing
 - [`docs/architecture/agent-loop/`](../../docs/architecture/agent-loop/)
   — the design + use cases

@@ -18,7 +18,7 @@ from yaah import (
     Stage,
     Verdict,
 )
-from yaah.agents import Agent, FakeBackend
+from yaah.agents import Agent, FakeProvider
 from yaah.agents import api_provider as _ap
 
 
@@ -32,9 +32,9 @@ class JsonGate:
 
 
 async def scenario_agent_retry() -> None:
-    """Generic Agent + FakeBackend: invalid JSON first, valid on retry."""
+    """Generic Agent + FakeProvider: invalid JSON first, valid on retry."""
     comms = InProcessComms()
-    backend = FakeBackend(responses=['{"x": 1', '{"x": 1}'])  # bad then good
+    backend = FakeProvider(responses=['{"x": 1', '{"x": 1}'])  # bad then good
     comms.register("role:agent", Agent(backend, "do {{task}}", parse=False), NodeConfig(model="fake:1"))
     comms.register("role:json", JsonGate())
     graph = Graph.of(
@@ -64,8 +64,8 @@ async def scenario_template_and_model_config() -> None:
 
 
 async def scenario_routing() -> None:
-    """RoutingBackend picks the backend from the model string's provider prefix."""
-    from yaah.agents import RoutingBackend
+    """RoutingProvider picks the backend from the model string's provider prefix."""
+    from yaah.agents import RoutingProvider
 
     calls = {}
 
@@ -77,7 +77,7 @@ async def scenario_routing() -> None:
             calls[self.tag] = model
             return self.tag
 
-    rb = RoutingBackend({"fake": Recorder("fake"), "claude": Recorder("claude")}, default="fake")
+    rb = RoutingProvider({"fake": Recorder("fake"), "claude": Recorder("claude")}, default="fake")
 
     assert await _ap.complete(rb, "p", model="claude:claude-sonnet-4-6") == "claude"
     assert calls["claude"] == "claude-sonnet-4-6", calls  # provider prefix stripped
@@ -94,9 +94,9 @@ async def scenario_routing() -> None:
 async def scenario_claude_per_agent_tools() -> None:
     """Per-agent claude tool perms: the agent's allowed_tools/permission_mode
     reach the CLI args (overriding provider defaults), without spawning claude."""
-    from yaah.adapters.backends import ClaudeCliBackend
+    from yaah.adapters.providers import ClaudeCliProvider
 
-    backend = ClaudeCliBackend()  # no provider-level tools
+    backend = ClaudeCliProvider()  # no provider-level tools
     # the Agent passes these as opts; the backend builds the per-call args
     args = backend._build_args("claude-sonnet-4-6",
                                {"allowed_tools": ["Read", "Edit", "Write"],
@@ -113,20 +113,20 @@ async def scenario_claude_per_agent_tools() -> None:
 async def scenario_backend_protocol_conformance() -> None:
     # The canonical conformance check is ApiProvider (every backend implements
     # stream()) plus a structural `hasattr(b, "turn")` for tool-capable ones.
-    from yaah.agents import (ApiProvider, FakeBackend, RoutingBackend,
-                             ScriptedBackend, ScriptedToolBackend)
-    from yaah.adapters.backends import ClaudeCliBackend, LiteLLMBackend
+    from yaah.agents import (ApiProvider, FakeProvider, RoutingProvider,
+                             ScriptedProvider, ScriptedToolProvider)
+    from yaah.adapters.providers import ClaudeCliProvider, LiteLLMProvider
 
-    plain = [FakeBackend(), ScriptedBackend({}), ClaudeCliBackend(), RoutingBackend({})]
-    tool_capable = [ScriptedToolBackend([]), LiteLLMBackend()]
+    plain = [FakeProvider(), ScriptedProvider({}), ClaudeCliProvider(), RoutingProvider({})]
+    tool_capable = [ScriptedToolProvider([]), LiteLLMProvider()]
     for b in plain + tool_capable:
         assert isinstance(b, ApiProvider), type(b).__name__  # every backend streams
     for b in tool_capable:
         assert callable(getattr(b, "turn", None)), type(b).__name__   # tool-capable have turn()
     # plain backends do NOT have turn() (claude handles its own tool loop natively;
     # fake/scripted have no tool surface).
-    assert not callable(getattr(FakeBackend(), "turn", None))
-    assert not callable(getattr(ClaudeCliBackend(), "turn", None))
+    assert not callable(getattr(FakeProvider(), "turn", None))
+    assert not callable(getattr(ClaudeCliProvider(), "turn", None))
 
 
 async def scenario_carry_does_not_collide_with_reserved_reply_kwarg() -> None:
@@ -136,7 +136,7 @@ async def scenario_carry_does_not_collide_with_reserved_reply_kwarg() -> None:
     # keys from extra so the carry is silently a no-op for those keys.
     from yaah.core import Envelope, Kind, NodeConfig
 
-    backend = FakeBackend(responses=["model output"])
+    backend = FakeProvider(responses=["model output"])
     agent = Agent(backend, "x", carry=["raw", "other"], parse=False)
     inp = Envelope(Kind.TASK, {"raw": "INCOMING-OVERRIDE", "other": "kept"},
                    {"correlation_id": "c"})

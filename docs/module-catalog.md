@@ -121,13 +121,13 @@ The structural interfaces the engine depends on. Each port has one or more concr
 | `LocalBus` (src/yaah/adapters/transports/local_bus.py) | LocalBus — an in-process bus that is faithful to the wire. | `(no constructor args)` |
 | `NatsComms` (src/yaah/adapters/transports/nats_comms.py) | NatsComms — the real distributed transport, over a NATS server. | `(servers: str = 'nats://127.0.0.1:4222', *, request_timeout: float = 300.0, connect_timeout: float = 10.0, user: Optional[str] = None, password: Optional[str] = None, token: Optional[str] = None, creds: Optional[str] = None, tls: Any = None, tls_hostname: Optional[str] = None, tracer: Any = None)` |
 
-## Model-backend adapters (`adapters/backends/`)
+## Model-backend adapters (`adapters/providers/`)
 
 | Class | Summary | Constructor |
 |---|---|---|
-| `ClaudeCliBackend` (src/yaah/adapters/backends/claude_cli_backend.py) | ClaudeCliBackend — an ApiProvider that shells out to the local `claude -p`. | `(*, binary: str = 'claude', extra_args: Optional[Sequence[str]] = None, strip_mcp: bool = True, timeout: Optional[float] = None, permission_mode: Optional[str] = None, allowed_tools: Optional[Sequence[str]] = None, allow_dangerous_flags: bool = False, spawn: Optional[Callable[..., Awaitable[Any]]] = None)` |
-| `FakeToolBackend` (src/yaah/adapters/backends/fake_tool_backend.py) | FakeToolBackend — scripted ApiProvider for testing AgentLoopNode without an LLM. | `(*, turns: Sequence[Dict[str, Any]])` |
-| `LiteLLMBackend` (src/yaah/adapters/backends/litellm_backend.py) | LiteLLMBackend — an ApiProvider that calls many providers via litellm. | `(*, acompletion: Optional[Callable[..., Awaitable[Any]]] = None)` |
+| `ClaudeCliProvider` (src/yaah/adapters/providers/claude_cli_provider.py) | ClaudeCliProvider — an ApiProvider that shells out to the local `claude -p`. | `(*, binary: str = 'claude', extra_args: Optional[Sequence[str]] = None, strip_mcp: bool = True, timeout: Optional[float] = None, permission_mode: Optional[str] = None, allowed_tools: Optional[Sequence[str]] = None, allow_dangerous_flags: bool = False, spawn: Optional[Callable[..., Awaitable[Any]]] = None)` |
+| `FakeToolProvider` (src/yaah/adapters/providers/fake_tool_provider.py) | FakeToolProvider — scripted ApiProvider for testing AgentLoopNode without an LLM. | `(*, turns: Sequence[Dict[str, Any]])` |
+| `LiteLLMProvider` (src/yaah/adapters/providers/litellm_provider.py) | LiteLLMProvider — an ApiProvider that calls many providers via litellm. | `(*, acompletion: Optional[Callable[..., Awaitable[Any]]] = None)` |
 
 ## Filter adapters (`adapters/filters/`)
 

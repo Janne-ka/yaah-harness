@@ -1,4 +1,4 @@
-"""FakeToolBackend — scripted ApiProvider for testing AgentLoopNode without an LLM.
+"""FakeToolProvider — scripted ApiProvider for testing AgentLoopNode without an LLM.
 
 Used by: the spike/yaah-as-harness example, plus tests of the agent loop.
 Drives the loop via a list of canned turn responses, e.g.:
@@ -7,7 +7,7 @@ Drives the loop via a list of canned turn responses, e.g.:
 
 Where: adapters (the loop is in adapters; its fake backend is too).
 Why: proves REPLACEABILITY of the backend seam — the loop runs against scripted
-responses the same way it would run against ClaudeCliBackend with stream-json
+responses the same way it would run against ClaudeCliProvider with stream-json
 parsing or a future Anthropic-API backend. If the fake works, the protocol is
 right; if a real backend doesn't, the bug is in that backend's translation,
 not in the loop.
@@ -26,7 +26,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 from ...agents import api_provider as _ap
 
 
-class FakeToolBackend(_ap.ApiProvider, _ap.SupportsTurn):
+class FakeToolProvider(_ap.ApiProvider, _ap.SupportsTurn):
     def __init__(self, *, turns: Sequence[Dict[str, Any]]) -> None:
         # Each turn is one of:
         #   {"text": "..."}                        -> final answer

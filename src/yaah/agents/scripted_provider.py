@@ -1,9 +1,9 @@
-"""ScriptedBackend — a deterministic ApiProvider keyed by model name.
+"""ScriptedProvider — a deterministic ApiProvider keyed by model name.
 
 Used by: multi-stage offline runs (the runtime's `fake_scripted` provider) and
 tests, where each stage needs its own canned output.
 Where: offline pipelines with more than one agent.
-Why: FakeBackend is one shared sequence; this returns per-model sequences, so
+Why: FakeProvider is one shared sequence; this returns per-model sequences, so
 `fake:spec` and `fake:eval` get different canned outputs.
 
 CURSOR (assessment #7 / cluster 3 B2): the turn index is the MAX of two
@@ -22,7 +22,7 @@ gracefully across cross-process resume:
     (drive grill in-process, not via `--resume`).
 
 EXHAUSTION (assessment cluster 3 B2): when the cursor passes the end of the
-sequence, return `self._default` — same shape as FakeBackend, so the offline
+sequence, return `self._default` — same shape as FakeProvider, so the offline
 defaults aren't three answers to one question. Callers wanting loud failure
 pass `on_exhaustion="raise"` (raises IndexError, preserved through the new
 stream protocol because the exception propagates naturally — error events
@@ -42,7 +42,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 from . import api_provider as _ap
 
 
-class ScriptedBackend(_ap.ApiProvider):
+class ScriptedProvider(_ap.ApiProvider):
     def __init__(self, by_model: Dict[str, Sequence[str]], default: str = "",
                  *, on_exhaustion: str = "default") -> None:
         if on_exhaustion not in ("default", "raise", "repeat_last"):
@@ -85,7 +85,7 @@ class ScriptedBackend(_ap.ApiProvider):
             return seq[turn]
         if self._on_exhaustion == "raise":
             raise IndexError(
-                "ScriptedBackend exhausted for model {!r} (seq has {} entries)"
+                "ScriptedProvider exhausted for model {!r} (seq has {} entries)"
                 .format(model, len(seq)))
         if self._on_exhaustion == "repeat_last":
             return seq[-1]

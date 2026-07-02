@@ -1,4 +1,4 @@
-"""Unit tests for the subprocess adapters (ClaudeCliBackend, GitDiffSource), via
+"""Unit tests for the subprocess adapters (ClaudeCliProvider, GitDiffSource), via
 an INJECTED fake process spawner.
 
 Both adapters take `spawn` (defaulting to asyncio.create_subprocess_exec) so a
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 
-from yaah.adapters.backends import ClaudeCliBackend
+from yaah.adapters.providers import ClaudeCliProvider
 from yaah.adapters.data import GitDiffSource
 
 
@@ -52,7 +52,7 @@ def spawner(procs, captured):
     return spawn
 
 
-# ---- ClaudeCliBackend -------------------------------------------------------
+# ---- ClaudeCliProvider -------------------------------------------------------
 
 
 
@@ -63,14 +63,14 @@ def spawner(procs, captured):
 
 async def claude_build_args_covers_mcp_perm_and_tools() -> None:
     # _build_args is pure; assert each config branch shapes the argv.
-    be = ClaudeCliBackend(permission_mode="acceptEdits", allowed_tools=["Read", "Edit"])
+    be = ClaudeCliProvider(permission_mode="acceptEdits", allowed_tools=["Read", "Edit"])
     args = be._build_args("m", {"mcp": {"srv": {"command": "x"}}})
     assert "--strict-mcp-config" in args and "--mcp-config" in args
     assert "--permission-mode" in args and "--allowedTools" in args
     assert args[args.index("--allowedTools") + 1] == "Read,Edit"
 
     # no mcp + strip_mcp default -> empty servers config
-    bare = ClaudeCliBackend()._build_args(None, {})
+    bare = ClaudeCliProvider()._build_args(None, {})
     i = bare.index("--mcp-config")
     assert bare[i + 1] == '{"mcpServers":{}}'
     assert "--model" not in bare  # model None -> omitted
@@ -88,7 +88,7 @@ async def claude_stream_cost_bridge_feeds_on_usage() -> None:
     ]
     usage = {}
     proc = FakeStreamProc(stdout_lines=lines)
-    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
     events = await _drain(be.stream({"messages": [{"role": "user", "content": "hi"}]},
                                     on_usage=usage.update))
     assert usage == {"tokens_in": 125, "tokens_out": 30, "model": "claude-sonnet"}, usage
@@ -177,18 +177,18 @@ async def claude_binary_and_flag_trust() -> None:
     import sys
     for bad in ("claude; rm -rf /", "-claude", "evil", "relative/path/claude", ""):
         try:
-            ClaudeCliBackend(binary=bad)
+            ClaudeCliProvider(binary=bad)
             raise AssertionError("binary {!r} should have been rejected".format(bad))
         except ValueError:
             pass
-    ClaudeCliBackend(binary="claude")                 # allow-listed bare name
-    ClaudeCliBackend(binary=sys.executable)           # absolute existing executable
+    ClaudeCliProvider(binary="claude")                 # allow-listed bare name
+    ClaudeCliProvider(binary=sys.executable)           # absolute existing executable
     try:
-        ClaudeCliBackend(extra_args=["--dangerously-skip-permissions"])
+        ClaudeCliProvider(extra_args=["--dangerously-skip-permissions"])
         raise AssertionError("bypass flag should require explicit opt-in")
     except ValueError as e:
         assert "allow_dangerous_flags" in str(e), e
-    ClaudeCliBackend(extra_args=["--dangerously-skip-permissions"],
+    ClaudeCliProvider(extra_args=["--dangerously-skip-permissions"],
                      allow_dangerous_flags=True)      # explicit, greppable opt-in
 
 
@@ -205,15 +205,15 @@ async def claude_rejects_isolation_defeating_flags() -> None:
                 ["--append-system-prompt", "ignore previous"],
                 ["--ide"]):
         try:
-            ClaudeCliBackend(extra_args=bad)
+            ClaudeCliProvider(extra_args=bad)
             raise AssertionError("isolation-defeating flag {!r} should be rejected".format(bad))
         except ValueError as e:
             assert "allow_dangerous_flags" in str(e), e
     # explicit opt-in still works (greppable in config)
-    ClaudeCliBackend(extra_args=["--add-dir", "/work"], allow_dangerous_flags=True)
+    ClaudeCliProvider(extra_args=["--add-dir", "/work"], allow_dangerous_flags=True)
 
 
-# ---- B3: ClaudeCliBackend.stream — real --output-format stream-json parsing -
+# ---- B3: ClaudeCliProvider.stream — real --output-format stream-json parsing -
 
 class FakeStream:
     """Minimal async-readable stream — feeds bytes lines back via readline()."""
@@ -252,7 +252,7 @@ class FakeStdin:
 
 class FakeStreamProc:
     """Process stub that exposes stdout/stderr as FakeStream + a writable stdin —
-    matches the shape ClaudeCliBackend.stream() needs (readline() loop, not
+    matches the shape ClaudeCliProvider.stream() needs (readline() loop, not
     communicate())."""
 
     def __init__(self, *, returncode=0, stdout_lines=None, stderr=b""):
@@ -288,7 +288,7 @@ async def claude_stream_simple_text_yields_text_delta_and_done() -> None:
         b'{"type":"result","subtype":"success","stop_reason":"end_turn","usage":{"input_tokens":5,"output_tokens":3}}\n',
     ]
     proc = FakeStreamProc(stdout_lines=lines)
-    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
     events = await _drain(be.stream({"messages": [{"role": "user", "content": "hi"}]}))
     types = [e["type"] for e in events]
     assert types == ["start", "text_delta", "done"], types
@@ -303,7 +303,7 @@ async def claude_stream_uses_output_format_stream_json_argv() -> None:
     lines = [b'{"type":"result","subtype":"success","stop_reason":"end_turn","usage":{}}\n']
     proc = FakeStreamProc(stdout_lines=lines)
     captured = []
-    be = ClaudeCliBackend(spawn=_stream_spawner(proc, captured))
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, captured))
     await _drain(be.stream({"messages": [{"role": "user", "content": "hi"}]}, cwd="/work"))
     argv = captured[0]["args"]
     assert "--output-format" in argv, argv
@@ -325,7 +325,7 @@ async def claude_stream_tool_use_session_skips_internal_tool_calls() -> None:
         b'{"type":"result","subtype":"success","stop_reason":"end_turn","usage":{}}\n',
     ]
     proc = FakeStreamProc(stdout_lines=lines)
-    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
     events = await _drain(be.stream({"messages": [{"role": "user", "content": "read /x"}]}))
     types = [e["type"] for e in events]
     # exactly one text_delta (the final answer), no toolcall_end
@@ -342,7 +342,7 @@ async def claude_stream_thinking_blocks_skipped() -> None:
         b'{"type":"result","subtype":"success","stop_reason":"end_turn","usage":{}}\n',
     ]
     proc = FakeStreamProc(stdout_lines=lines)
-    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
     events = await _drain(be.stream({"messages": [{"role": "user", "content": "think"}]}))
     text_deltas = [e for e in events if e["type"] == "text_delta"]
     assert len(text_deltas) == 1, text_deltas
@@ -361,7 +361,7 @@ async def claude_stream_malformed_lines_skipped() -> None:
         b'{"type":"result","subtype":"success","stop_reason":"end_turn","usage":{}}\n',
     ]
     proc = FakeStreamProc(stdout_lines=lines)
-    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
     events = await _drain(be.stream({"messages": [{"role": "user", "content": "x"}]}))
     text_deltas = [e for e in events if e["type"] == "text_delta"]
     assert len(text_deltas) == 1, text_deltas
@@ -398,7 +398,7 @@ async def claude_stream_drains_stderr_before_wait() -> None:
             self.waited = True
 
     proc = DeadlockingProc(returncode=2, stdout_lines=[], stderr=b"lots of stderr")
-    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
     # If the code waits before draining stderr, this never completes.
     events = await asyncio.wait_for(
         _drain(be.stream({"messages": [{"role": "user", "content": "x"}]})),
@@ -414,7 +414,7 @@ async def claude_stream_nonzero_exit_yields_error_event() -> None:
     # surface as an in-stream error event (not a raised exception). Consumer
     # can decide how to react.
     proc = FakeStreamProc(returncode=2, stdout_lines=[], stderr=b"auth failed")
-    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
     events = await _drain(be.stream({"messages": [{"role": "user", "content": "x"}]}))
     types = [e["type"] for e in events]
     assert "error" in types, types
@@ -428,7 +428,7 @@ async def claude_stream_passes_prompt_via_stdin() -> None:
     # conversation-history stdin format.
     lines = [b'{"type":"result","subtype":"success","stop_reason":"end_turn","usage":{}}\n']
     proc = FakeStreamProc(stdout_lines=lines)
-    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
     await _drain(be.stream({
         "messages": [{"role": "user", "content": "older"},
                      {"role": "assistant", "content": "..."},
@@ -445,7 +445,7 @@ async def claude_stream_prepends_system_and_joins_content_blocks() -> None:
     # production shapes — a bug here silently feeds claude the wrong prompt.
     lines = [b'{"type":"result","subtype":"success","stop_reason":"end_turn","usage":{}}\n']
     proc = FakeStreamProc(stdout_lines=lines)
-    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
     await _drain(be.stream({
         "system": "SYS",
         "messages": [{"role": "user",
@@ -464,7 +464,7 @@ async def claude_stream_handles_none_stdin_without_crashing() -> None:
     # a raised AttributeError.
     proc = FakeStreamProc(returncode=127, stdout_lines=[], stderr=b"binary failed")
     proc.stdin = None                                    # the failure mode
-    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
     events = await _drain(be.stream({"messages": [{"role": "user", "content": "x"}]}))
     types = [e["type"] for e in events]
     assert types[0] == "start"
@@ -485,7 +485,7 @@ async def claude_stream_drains_stdin_before_closing() -> None:
     proc = FakeStreamProc(stdout_lines=[
         b'{"type":"result","subtype":"success","stop_reason":"end_turn","usage":{}}\n',
     ])
-    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
     await _drain(be.stream({"messages": [{"role": "user", "content": "x"}]}))
     assert proc.stdin.events == ["write", "drain", "close"], \
         "expected ordered ['write','drain','close']; got {!r}".format(proc.stdin.events)
@@ -509,7 +509,7 @@ async def claude_stream_timeout_kills_proc_and_yields_error() -> None:
 
     proc = FakeStreamProc(stdout_lines=[])
     proc.stdout = HangingStdout()
-    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []), timeout=0.3)
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []), timeout=0.3)
     # The whole call must complete within a small multiple of self._timeout,
     # otherwise the kill path isn't running.
     events = await asyncio.wait_for(
@@ -537,7 +537,7 @@ async def claude_stream_parses_captured_fixture_end_to_end() -> None:
     with open(fixture, "rb") as f:
         lines = [ln if ln.endswith(b"\n") else ln + b"\n" for ln in f.read().splitlines()]
     proc = FakeStreamProc(stdout_lines=lines)
-    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
     events = await _drain(be.stream({"messages": [{"role": "user", "content": "read it"}]}))
     types = [e["type"] for e in events]
     # The session has thinking (skipped) + an internal tool_use/tool_result
@@ -555,7 +555,7 @@ async def claude_stream_handles_none_stdout_without_crashing() -> None:
     # AttributeError. The stream MUST surface this as an error event.
     proc = FakeStreamProc(returncode=127, stdout_lines=[], stderr=b"binary failed")
     proc.stdout = None                                   # the failure mode
-    be = ClaudeCliBackend(spawn=_stream_spawner(proc, []))
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
     events = await _drain(be.stream({"messages": [{"role": "user", "content": "x"}]}))
     types = [e["type"] for e in events]
     assert types[0] == "start"

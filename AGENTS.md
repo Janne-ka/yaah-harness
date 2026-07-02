@@ -111,7 +111,7 @@ which is which.
 
 - **Declare your port.** Every shipped impl names its port in the class
   header — `class MemoryBackend(StoreBackend, Scannable, CompareAndSet)`,
-  `class RenderNode(Node)`, `class FakeBackend(ApiProvider)`. The ports are
+  `class RenderNode(Node)`, `class FakeProvider(ApiProvider)`. The ports are
   `@runtime_checkable` Protocols with `@abstractmethod`, so a DECLARED
   subclass missing a method fails at instantiation, and mypy checks the
   signatures. Structural (non-declaring) impls still work — external

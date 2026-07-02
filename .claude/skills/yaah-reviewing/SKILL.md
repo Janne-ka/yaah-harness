@@ -32,7 +32,7 @@ A YAAH review judges **four axes** (elegant, simple, working, extensible) alongs
 |---|---|---|
 | 1 | Harness engine | `src/yaah/core/`, `harness/` (includes `fork_coordinator.py`, `span_emitter.py` — concerns already split out of `harness.py`) |
 | 2 | Comms / transports / store | `comms/` (including the `Subscription` Protocol), `adapters/transports/`, `store/`, `adapters/stores/` |
-| 3 | Agents / backends | `agents/`, `adapters/backends/` |
+| 3 | Agents / backends | `agents/`, `adapters/providers/` |
 | 4 | Nodes / build / runtime | `nodes/`, `build/`, `runtime*.py`, `external_call.py`, `cwd.py` |
 | 5 | Ports & adapters | `data/`, `prompts/`, `mcp/`, `adapters/{data,prompts,mcp,trace}/`, `trace/`, `validators.py`, `recall.py`, `jsonio.py` |
 | 6 | App on YAAH (only if your project ships one) | its pipeline configs, transforms, prompts, renderers |

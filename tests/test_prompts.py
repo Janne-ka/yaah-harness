@@ -10,7 +10,7 @@ import os
 import tempfile
 
 from yaah import Done, Envelope
-from yaah.agents import FakeBackend, RoutingBackend
+from yaah.agents import FakeProvider, RoutingProvider
 from yaah.build import build
 from yaah.prompts import RoutingPromptSource, StaticPromptSource
 from yaah.adapters.prompts import FilePromptSource
@@ -41,8 +41,8 @@ async def scenario_sources() -> None:
 async def scenario_agent_via_prompt_config() -> None:
     """Config references a prompt by key ('static:spec'); build() wires the source."""
     prompts = StaticPromptSource({"spec": "Return JSON. Task: {{task}}"})
-    backend = RoutingBackend(
-        {"fake": FakeBackend(responses=['{"x": 1', '{"x": 1}'])}, default="fake"
+    backend = RoutingProvider(
+        {"fake": FakeProvider(responses=['{"x": 1', '{"x": 1}'])}, default="fake"
     )
     config = {
         "nodes": {

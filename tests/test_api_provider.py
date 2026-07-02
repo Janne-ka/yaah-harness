@@ -25,9 +25,9 @@ sys.path.insert(0, str(ROOT / "src"))
 from yaah.agents.api_provider import (  # noqa: E402
     ApiProvider, SupportsTurn, assemble_message, complete, stream_of, turn,
 )
-from yaah.agents.fake_backend import FakeBackend  # noqa: E402
-from yaah.adapters.backends import ClaudeCliBackend  # noqa: E402
-from yaah.adapters.backends.fake_tool_backend import FakeToolBackend  # noqa: E402
+from yaah.agents.fake_provider import FakeProvider  # noqa: E402
+from yaah.adapters.providers import ClaudeCliProvider  # noqa: E402
+from yaah.adapters.providers.fake_tool_provider import FakeToolProvider  # noqa: E402
 
 
 # --- A minimal native streaming tool backend (emits StreamEvents directly) ---
@@ -55,7 +55,7 @@ class _StreamingToolBackend:
 class _CollectedOnlyToolBackend:
     """A collected-only tool provider: has turn() but NO stream(). Exercises
     stream_of's fallback branch that wraps turn() into a one-shot stream — the
-    forward-compat path RoutingBackend.stream documents for legacy/external tool
+    forward-compat path RoutingProvider.stream documents for legacy/external tool
     backends (no shipped backend hits it; all have native stream())."""
 
     def __init__(self, *, text=None, calls=None):
@@ -83,9 +83,9 @@ def test_stream_of_wraps_collected_only_tool_backend():
 
 
 def test_module_complete_collects_text_from_native_stream():
-    # FakeBackend is a native ApiProvider (B2.1); complete() drains its stream
+    # FakeProvider is a native ApiProvider (B2.1); complete() drains its stream
     # into a single string — same result as the backend's own complete().
-    out = asyncio.run(complete(FakeBackend(responses=["the answer"]), "ignored"))
+    out = asyncio.run(complete(FakeProvider(responses=["the answer"]), "ignored"))
     assert out == "the answer"
 
 
@@ -135,8 +135,8 @@ def test_assemble_message_raises_on_error_event():
 
 
 def test_native_backend_satisfies_apiprovider_protocol():
-    assert isinstance(FakeBackend(responses=["x"]), ApiProvider), \
-        "FakeBackend should structurally satisfy ApiProvider (native stream())"
+    assert isinstance(FakeProvider(responses=["x"]), ApiProvider), \
+        "FakeProvider should structurally satisfy ApiProvider (native stream())"
     assert isinstance(_StreamingToolBackend(text="x"), ApiProvider)
 
 
@@ -153,17 +153,17 @@ def test_supports_turn_is_a_distinct_optional_capability():
     #       even for a class that only conforms structurally (that made an earlier
     #       version of this test vacuous w.r.t. the declaration).
     # (a) capability:
-    assert isinstance(FakeToolBackend(turns=[]), SupportsTurn)      # has turn()
-    assert isinstance(FakeToolBackend(turns=[]), ApiProvider)
-    claude = ClaudeCliBackend()
+    assert isinstance(FakeToolProvider(turns=[]), SupportsTurn)      # has turn()
+    assert isinstance(FakeToolProvider(turns=[]), ApiProvider)
+    claude = ClaudeCliProvider()
     assert isinstance(claude, ApiProvider)
     assert not isinstance(claude, SupportsTurn), \
         "claude_cli has no native turn() — the capability must read as absent"
-    assert not isinstance(FakeBackend(responses=["x"]), SupportsTurn)
+    assert not isinstance(FakeProvider(responses=["x"]), SupportsTurn)
     # (b) declaration (falsifies if a backend drops the port from its bases):
-    assert SupportsTurn in FakeToolBackend.__mro__ and ApiProvider in FakeToolBackend.__mro__
-    assert ApiProvider in ClaudeCliBackend.__mro__ and SupportsTurn not in ClaudeCliBackend.__mro__
-    assert ApiProvider in FakeBackend.__mro__ and SupportsTurn not in FakeBackend.__mro__
+    assert SupportsTurn in FakeToolProvider.__mro__ and ApiProvider in FakeToolProvider.__mro__
+    assert ApiProvider in ClaudeCliProvider.__mro__ and SupportsTurn not in ClaudeCliProvider.__mro__
+    assert ApiProvider in FakeProvider.__mro__ and SupportsTurn not in FakeProvider.__mro__
 
 
 if __name__ == "__main__":

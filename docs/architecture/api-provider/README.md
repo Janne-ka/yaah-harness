@@ -41,7 +41,7 @@ node-level architecture see [`../agent-loop/`](../agent-loop/).
 - `src/yaah/agents/model_backend.py` — **removed in B6.** Held the legacy
   `ModelBackend` / `ToolBackend` Protocols; gone now that every backend
   implements `ApiProvider` natively.
-- Each backend in `src/yaah/agents/` and `src/yaah/adapters/backends/` —
+- Each backend in `src/yaah/agents/` and `src/yaah/adapters/providers/` —
   implements a native `stream()` method (migrated one at a time in B2)
 
 ## Migration order (B2)
@@ -50,16 +50,16 @@ Easiest first. The "easy" ones collapse to a single `text_delta` because
 their source has no real wire stream; the work is mechanical. The hard
 ones (LiteLLM, ClaudeCli) light up actual token streaming.
 
-1. **`FakeBackend`** — done (B2.1). Canned responses → one `text_delta`.
-2. **`ScriptedBackend`** — NEXT. Model-keyed canned responses; same shape as Fake.
-3. **`FakeToolBackend`** — scripted `turn()` responses → text + tool events.
-4. **`ScriptedToolBackend`** — model-keyed `turn()`; same shape as FakeTool.
-5. **`LiteLLMBackend`** — translate litellm chunks → `StreamEvent` stream
+1. **`FakeProvider`** — done (B2.1). Canned responses → one `text_delta`.
+2. **`ScriptedProvider`** — NEXT. Model-keyed canned responses; same shape as Fake.
+3. **`FakeToolProvider`** — scripted `turn()` responses → text + tool events.
+4. **`ScriptedToolProvider`** — model-keyed `turn()`; same shape as FakeTool.
+5. **`LiteLLMProvider`** — translate litellm chunks → `StreamEvent` stream
    (the first native streaming source).
-6. **`ClaudeCliBackend`** — parse `claude --output-format stream-json`
+6. **`ClaudeCliProvider`** — parse `claude --output-format stream-json`
    (or fall back to delegating the loop entirely — see B3 in the
    resume context).
-7. **`RoutingBackend`** — simplifies: `supports_turn` capability check
+7. **`RoutingProvider`** — simplifies: `supports_turn` capability check
    goes away because every provider implements `stream()`. Stays as a
    prefix router; loses the dual-method surface.
 

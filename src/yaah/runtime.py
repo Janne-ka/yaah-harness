@@ -61,7 +61,7 @@ from .store import EnvelopeStore, IdempotencyStore
 # module is just assembly + entrypoints). _read_json is re-exported here because
 # tests/callers reach for it on the runtime namespace.
 from .runtime_factories import (  # noqa: F401  (_read_json re-exported)
-    _build_backend,
+    _build_provider,
     _build_data_sink,
     _build_data_source,
     _build_mcp_source,
@@ -110,7 +110,7 @@ async def _assemble_harness(root: Dict[str, Any], base: str) -> Any:
     over a bus, or registered in-process). Shared by run_root and resume_gate so a
     run and a later cross-process resume use the SAME wiring over the SAME store.
     The store is what makes a parked gate resumable from another process."""
-    backend = _build_backend(root, base)
+    backend = _build_provider(root, base)
     prompts = _build_prompt_source(root, base)
     data = _build_data_source(root, base)
     sink = _build_data_sink(root, base)

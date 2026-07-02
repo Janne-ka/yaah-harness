@@ -77,13 +77,13 @@ async for ev in provider.stream(ctx):
 ```
 
 **Honest limits:** TTFT only meaningful for real streaming backends. The
-adapter wrapping FakeBackend emits one `text_delta` at end-of-call, so
+adapter wrapping FakeProvider emits one `text_delta` at end-of-call, so
 TTFT == total latency. Capture it anyway — equal-to-end is a valid
 signal that "this backend doesn't stream."
 
-## 4. Capability simplification (RoutingBackend)
+## 4. Capability simplification (RoutingProvider)
 
-**Scenario:** `RoutingBackend` currently has a `supports_turn()` helper
+**Scenario:** `RoutingProvider` currently has a `supports_turn()` helper
 because some legacy backends (claude_cli) don't implement `turn()` and
 some do (LiteLLM, ScriptedTool). Callers check the capability before
 choosing tool-loop vs. manifest-fallback paths.

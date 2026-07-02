@@ -13,7 +13,7 @@ import asyncio
 import json
 
 from yaah import Done, Envelope, Kind
-from yaah.agents import FakeBackend, RoutingBackend
+from yaah.agents import FakeProvider, RoutingProvider
 from yaah.build import build
 from yaah.comms import Comms, InMemorySubscription, InProcessComms, Subscription
 from yaah.adapters.transports import LocalBus
@@ -62,8 +62,8 @@ def test_serialization() -> None:
 
 async def test_pipeline_over_bus() -> None:
     bus = LocalBus()
-    backend = RoutingBackend(
-        {"fake": FakeBackend(responses=[
+    backend = RoutingProvider(
+        {"fake": FakeProvider(responses=[
             '{"summary": "ok", "items": ["a"  ',     # invalid -> retry over the bus
             '{"summary": "ok", "items": ["a"]}',     # valid
         ])},

@@ -38,7 +38,7 @@ and example hygiene.
 |---|---|---|---|---|---|
 | 1. Harness engine (`core/`, `harness/`) | 5 | 4 | 4 | 5 | Clean run-stage seam; latent fork-clears ordering + concern-aliasing hazards. |
 | 2. Comms / store (`comms/`, `store/`, adapters) | 4 | 5 | 4 | 5 | Strong distributed-systems care; NATS unsubscribe fire-and-forget; idempotency guards caching not execution (documented Phase A). |
-| 3. Agents / backends (`agents/`, `adapters/backends/`) | 5 | 4 | 5 | 5 | Streaming protocol clean; trust boundary tested; claude_cli `stream()` cost-bridge gap (latent). |
+| 3. Agents / backends (`agents/`, `adapters/providers/`) | 5 | 4 | 5 | 5 | Streaming protocol clean; trust boundary tested; claude_cli `stream()` cost-bridge gap (latent). |
 | 4. Nodes / build / runtime (`nodes/`, `build/`, `runtime*`) | 5 | 4 | 5 | 5 | Trust boundary defended end-to-end; dead import; agent_loop justified as model-driven-iteration primitive. |
 | 5. Ports & stdlib (`data/`,`prompts/`,`mcp/`,`trace/`,`validate*`,`recall`,`jsonio`,`safepath`) | 5 | 4 | 4 | 4 | safe_join/extract_json verified; **overlay_lint fail-open (HIGH)**; triad asymmetric. |
 | 6. Examples (`examples/`) | 4 | 4 | 5 | 5 | All five archetypes run offline; hardening holds; doc drift + one unconfined PoC tool. |
@@ -79,12 +79,12 @@ and example hygiene.
 10. `runtime.py:58` — dead `StageFailed` import.
 11. `build/builders.py` — `agent_loop` build errors don't name the node
     (`spec.get("_role", "?")`), unlike `_wrap_node`.
-12. `adapters/backends/claude_cli_backend.py` — `stream()` never calls
+12. `adapters/providers/claude_cli_provider.py` — `stream()` never calls
     `on_usage` (cost capture silently zero once a consumer streams claude;
     latent — claude currently routes through `complete()`).
-13. `claude_cli_backend.py` — `complete()` lacks the stdin/stdout None-guard
+13. `claude_cli_provider.py` — `complete()` lacks the stdin/stdout None-guard
     `stream()` has; a dead process raises a bare error (error-voice).
-14. `adapters/backends/litellm_backend.py` — partial/odd tool-call `arguments`
+14. `adapters/providers/litellm_provider.py` — partial/odd tool-call `arguments`
     degrade to `{}` silently; assert on non-empty-args round-trip when a real
     key lands.
 15. `adapters/transports/nats_comms.py` — `_NatsSubscription.cancel()` is

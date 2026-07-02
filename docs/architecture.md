@@ -170,7 +170,7 @@ dispatches a `source:key` string (e.g. `file:eval`, `git:`, `registry:acme-prod`
 | `DataSource`/`DataSink` (data/) | — | **get**/**post** payloads |
 | `McpSource` (mcp/) | `StaticMcpSource` | an agent's MCP server set |
 | `StoreBackend` (store/) | `MemoryBackend` | durable baton state + idempotency (`store/idempotency.py`, the `once` node) |
-| `ApiProvider` (agents/) | `FakeBackend`/`ScriptedBackend` | a provider via `provider:model` |
+| `ApiProvider` (agents/) | `FakeProvider`/`ScriptedProvider` | a provider via `provider:model` |
 
 ### 6. Assembly — `build/`, `runtime.py` (+ `runtime_factories.py`)
 Turns config into a wired, running harness. The seam where everything is composed
@@ -296,7 +296,7 @@ A `spec` stage with a JSON validator and a human gate, to see the layers coopera
 2. **Comms** (2) routes to the `spec` node — an **Agent** (4).
 3. The **Agent** fetches its prompt via the **PromptSource** port (5) using
    `prompt: "file:spec"` → the **file adapter** reads it; folds in `payload` +
-   any retry `feedback`; calls the **ApiProvider** router (`RoutingBackend`, 5) → the **claude
+   any retry `feedback`; calls the **ApiProvider** router (`RoutingProvider`, 5) → the **claude
    adapter** runs `claude -p`. Returns a `result` Envelope.
 4. **Harness** runs the stage's validator (`json_object`, layer 4). Soft fails are
    recorded on the baton as `concerns`; a hard fail re-invokes the Agent with the

@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 
 from yaah.core import Envelope, Kind, NodeConfig
-from yaah.agents import Agent, RoutingBackend, ScriptedToolBackend, make_envelope_get_tool
+from yaah.agents import Agent, RoutingProvider, ScriptedToolProvider, make_envelope_get_tool
 
 
 async def scenario_allowlist_filter_cap() -> None:
@@ -29,7 +29,7 @@ async def scenario_allowlist_filter_cap() -> None:
 
 async def scenario_tool_loop_pull() -> None:
     # the model "decides" to call envelope_get, then answers using the pulled value
-    backend = RoutingBackend({"tool": ScriptedToolBackend([
+    backend = RoutingProvider({"tool": ScriptedToolProvider([
         {"calls": [{"id": "c1", "name": "envelope_get", "args": {"key": "diff"}}]},
         {"text": "done"},
     ])})
@@ -43,13 +43,13 @@ async def scenario_tool_loop_pull() -> None:
 
 def scenario_build_parses_expose() -> None:
     from yaah.build import build
-    from yaah.agents import FakeBackend
+    from yaah.agents import FakeProvider
     cfg = {
         "nodes": {"role:r": {"type": "agent", "template": "t", "model": "fake:x",
                              "expose": {"payload": ["diff"]}, "max_chars": 500}},
         "graph": {"start": "s", "stages": {"s": {"node": "role:r"}}},
     }
-    h = build(cfg, backend=FakeBackend(default="{}"))
+    h = build(cfg, backend=FakeProvider(default="{}"))
     a = h.graph.stages["s"]
     assert a.node == "role:r"  # built without error (expose/max_chars accepted)
 

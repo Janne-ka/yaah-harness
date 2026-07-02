@@ -35,7 +35,7 @@ _TYPED_BLOCK_FACTORY = {
     "state":     rf._STATE_TYPES,
 }
 _NAMED_MAP_FACTORY = {
-    "providers":      rf._BACKEND_TYPES,
+    "providers":      rf._PROVIDER_TYPES,
     "prompt_sources": rf._PROMPT_TYPES,
     "data_sources":   rf._DATA_SOURCE_TYPES,
     "data_sinks":     rf._DATA_SINK_TYPES,

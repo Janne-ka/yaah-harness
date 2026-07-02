@@ -21,13 +21,13 @@ from __future__ import annotations
 import asyncio
 
 from yaah.core import Envelope, Kind, NodeConfig, Verdict
-from yaah.agents import Agent, FakeBackend
+from yaah.agents import Agent, FakeProvider
 
 CFG = NodeConfig(model="fake:1")
 
 
 async def _invoke(resp, schema, *, parse=True):
-    a = Agent(FakeBackend(responses=[resp]), "judge {{x}}", parse=parse,
+    a = Agent(FakeProvider(responses=[resp]), "judge {{x}}", parse=parse,
               output_schema=schema, stage="judge")
     return await a.invoke(Envelope("task", {"x": "y"}), CFG)
 

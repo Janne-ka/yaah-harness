@@ -10,7 +10,7 @@ import json
 
 from yaah import Done, Envelope, NodeConfig
 from yaah.build import build
-from yaah.agents import ScriptedBackend
+from yaah.agents import ScriptedProvider
 from yaah.validators import JsonSchemaValidator, check_schema
 
 CFG = NodeConfig()
@@ -90,7 +90,7 @@ async def scenario_config_driven() -> None:
         "graph": {"start": "s", "stages": {"s": {"node": "writer", "validators": ["shape"]}}},
     }
     good = json.dumps({"summary": "ok", "findings": []})
-    backend = ScriptedBackend({"fake:writer": [good]})
+    backend = ScriptedProvider({"fake:writer": [good]})
     h = build(config, backend=backend)
     out = await h.run(Envelope("task", {}))
     assert isinstance(out, Done) and out.output.payload["raw"] == good
