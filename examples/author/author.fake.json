@@ -1,0 +1,9 @@
+{
+  "_doc": "Offline / CI overlay: fake_scripted drafts + auto-approved gate, so the whole meta-pipeline runs deterministically with no API key and no human. The scripted draft #1 is INVALID (a typo'd `then` target the engine validator rejects), draft #2 is the corrected config — proving the retry+feedback repair loop actually repairs. The trace file records one model_call per attempt, so a test can assert the loop fired.",
+  "_extends": "author.local.json",
+  "providers": {"claude": {"type": "fake_scripted", "fixtures": "fixtures/draft.fake.json"}},
+  "state": {"type": "file", "dir": ".author-state-fake"},
+  "decisions": {"author:config-review": {"decision": "approve"}},
+  "trace": {"mode": "tracer", "capture": ["phase", "cost"],
+            "sinks": [{"type": "file", "path": "trace.jsonl"}]}
+}

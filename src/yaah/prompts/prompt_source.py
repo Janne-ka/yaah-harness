@@ -10,10 +10,12 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
+from abc import abstractmethod
 from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
 class PromptSource(Protocol):
+    @abstractmethod
     async def get(self, key: str, **opts: Any) -> str:
         ...

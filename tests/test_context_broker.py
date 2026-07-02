@@ -12,8 +12,8 @@ import asyncio
 from yaah.core import Envelope, Kind, NodeConfig
 from yaah.agents import (
     Agent,
-    RoutingBackend,
-    ScriptedToolBackend,
+    RoutingProvider,
+    ScriptedToolProvider,
     make_context_broker_tool,
 )
 from yaah.comms import InProcessComms
@@ -142,7 +142,7 @@ async def scenario_tool_loop_calls_broker() -> None:
     comms = InProcessComms()
     broker = _Broker(slice_text="diff-of-interest")
     _serve_role(comms, "role:broker", broker)
-    backend = RoutingBackend({"tool": ScriptedToolBackend([
+    backend = RoutingProvider({"tool": ScriptedToolProvider([
         {"calls": [{"id": "c1", "name": "context_broker",
                     "args": {"query": "what touches auth?"}}]},
         {"text": "found it: diff-of-interest"},
@@ -160,14 +160,14 @@ async def scenario_tool_loop_calls_broker() -> None:
 def scenario_build_parses_broker() -> None:
     """`broker:` flows from the JSON spec through _build_agent into the Agent."""
     from yaah.build import build
-    from yaah.agents import FakeBackend
+    from yaah.agents import FakeProvider
     cfg = {
         "nodes": {"role:r": {"type": "agent", "template": "t", "model": "fake:x",
                              "expose": {"payload": ["diff"]},
                              "broker": "role:context-broker"}},
         "graph": {"start": "s", "stages": {"s": {"node": "role:r"}}},
     }
-    h = build(cfg, backend=FakeBackend(default="{}"))
+    h = build(cfg, backend=FakeProvider(default="{}"))
     assert h.graph.stages["s"].node == "role:r"  # built without error
 
 

@@ -21,15 +21,16 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from ..core import Envelope, Kind, NodeConfig
+from ..core import Node, Envelope, Kind, NodeConfig
+from ..trace import Tracer
 from .attacher import Attacher
 
 
-class AttachingAgent:
-    def __init__(self, inner: Any, attachers: List[Attacher], tracer: Any) -> None:
-        # `inner` is an Agent; typed Any to avoid an import cycle (Agent is in
-        # the same package but the wrapper doesn't need its full surface, only
-        # `invoke()`).
+class AttachingAgent(Node):
+    def __init__(self, inner: Node, attachers: List[Attacher], tracer: Tracer) -> None:
+        # `inner` is usually an Agent, typed as the Node PORT: the wrapper only
+        # needs `invoke()`, and Node (from core) avoids the same-package cycle
+        # that typing it as Agent would create.
         self._inner = inner
         self._attachers = list(attachers)
         self._tracer = tracer
@@ -55,4 +56,4 @@ class AttachingAgent:
             return result
         # merge over the agent's output payload, attacher keys winning a
         # collision (the attacher's whole point is to add named data)
-        return result.reply(result.kind, **{**result.payload, **attached})
+        return result.reply_with(result.kind, {**result.payload, **attached})

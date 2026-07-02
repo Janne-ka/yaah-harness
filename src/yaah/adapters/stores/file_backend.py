@@ -1,4 +1,4 @@
-"""FileStore — a durable Store extender backed by one file per key.
+"""FileBackend — a durable StoreBackend extender backed by one file per key.
 
 Used by: the runtime when root `state: {type: file, dir: ...}` is set. Makes a
 parked human gate (and execute-once results) survive process exit, so a run
@@ -23,11 +23,13 @@ from __future__ import annotations
 import base64
 import json
 import os
-from typing import Any, AsyncIterator, Dict, Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, Optional, Tuple
 from urllib.parse import quote, unquote
 
+from ...store import CompareAndSet, Scannable, StoreBackend
 
-class FileStore:
+
+class FileBackend(StoreBackend, Scannable, CompareAndSet):
     def __init__(self, base_dir: str) -> None:
         self._dir = base_dir
         os.makedirs(base_dir, exist_ok=True)
@@ -74,7 +76,7 @@ class FileStore:
         except FileNotFoundError:
             pass
 
-    async def scan(self, prefix: str) -> AsyncIterator[Tuple[str, bytes]]:
+    async def scan(self, prefix: str) -> AsyncGenerator[Tuple[str, bytes], None]:
         for name in list(os.listdir(self._dir)):  # snapshot: callers delete while iterating
             if not name.endswith(".json"):
                 continue

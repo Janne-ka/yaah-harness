@@ -20,7 +20,7 @@ from typing import Any, Awaitable, Callable, List, Optional, Union
 from ..comms import Comms
 from ..core import Envelope, Failure, Kind, Verdict
 from ..external_call import call_target
-from ..store import EnvelopeStore, MemoryStore
+from ..store import EnvelopeStore, MemoryBackend
 from ..trace import NullTracer
 from .baton import Baton
 from .baton_store import BatonStore
@@ -113,13 +113,13 @@ class Harness:
         self.comms = comms
         self.graph = graph
         # Run state lives behind a BatonStore (default in-memory = today's behavior;
-        # a durable Store extender makes parked gates survive restart and resumable
+        # a durable StoreBackend extender makes parked gates survive restart and resumable
         # cross-process). The harness only calls save/load/delete/sweep/list.
-        self.batons = baton_store or BatonStore(MemoryStore())
+        self.batons = baton_store or BatonStore(MemoryBackend())
         # Gate parking (fan-in arrivals) goes through EnvelopeStore — memory default
-        # (behaviour-neutral), a durable Store extender makes parked envelopes survive
+        # (behaviour-neutral), a durable StoreBackend extender makes parked envelopes survive
         # + inspectable + flushable. The "gates park envelopes via one utility" seam.
-        self._envelopes = envelope_store or EnvelopeStore(MemoryStore())
+        self._envelopes = envelope_store or EnvelopeStore(MemoryBackend())
         # TWO time sources, deliberately distinct (bug review H1):
         #  - `clock` (monotonic) for in-process SPAN DURATIONS — accurate, immune to
         #    wall-clock jumps, but its zero point is process-local.
@@ -329,7 +329,11 @@ class Harness:
         # route (it is already in the output payload at emit time) so the trace
         # answers "why did it go there?" without re-deriving from transient payload.
         route = None
-        out = getattr(result, "output", None)
+        # A _Suspend result has no `output` (it parked); its parked payload is on
+        # `last_output`. Fall back to it so the rendered-artifact `path` (Y2) and
+        # any other payload-borne attrs reach the emitter on a suspend too. For a
+        # suspend, stage.branch is absent, so the route logic below is untouched.
+        out = getattr(result, "output", None) or getattr(result, "last_output", None)
         if stage.branch and out is not None:
             on = stage.branch.get("on")
             if on is not None:
@@ -505,7 +509,16 @@ class Harness:
             if attempt >= stage.max_attempts:
                 if stage.escalate == "human":
                     # keep the failed artifact so resume can merge the decision onto
-                    # it, AND surface this stage's own soft concerns at the gate
+                    # it, AND surface this stage's own soft concerns at the gate.
+                    # Fold the failed verdict onto the parked artifact as a GENERIC
+                    # scalar dict (same shape as `concerns`, so it round-trips through
+                    # the baton store) — otherwise the failure that broke the stage is
+                    # thrown away at exactly the moment `yaah list` should show it (Y3).
+                    out.payload["escalation"] = {
+                        "stage": stage.name,
+                        "failures": [{"code": f.code, "message": f.message,
+                                      "fix_hint": f.fix_hint} for f in verdict.failures],
+                    }
                     return _Suspend("human:" + stage.name, out, concerns=soft)
                 # carry the failed artifact on the exception; per-node error-handling
                 # (on_error) runs in _drive, OUTSIDE the clearable race (so a self-clear
@@ -637,7 +650,7 @@ class Harness:
         merged_payload.update(results=[res.payload for _, res in outs],
                               roles=[role for role, _ in outs],
                               failed_roles=[role for role, _ in errors])
-        merged = input.reply(Kind.RESULT, **merged_payload)
+        merged = input.reply_with(Kind.RESULT, merged_payload)
         if errors:
             return merged, Verdict.failed(Failure(
                 "fanout_error",
@@ -703,7 +716,8 @@ class Harness:
           - {"compensate": T} (side-effecting node): run the node-specific undo target
             T (a call_target fn:/node:/http:), which receives the corr + failed
             artifact + error codes so it can target what to roll back, then drop the
-            parked set.
+            parked set. If the undo itself fails, `on_compensate_fail` picks the
+            severity ("error" default = escalate loud / "warn" = note + tolerate).
         No-op when `on_error` is unset (fail straight through). It does NOT swallow the
         failure — recovery runs, then the caller still raises StageFailed; cleanup
         leaves the system ready, it doesn't paper over the error."""
@@ -721,7 +735,29 @@ class Harness:
             ctx = {"correlation_id": corr, "node": node_id,
                    "payload": dict(out.payload),
                    "error": [f.code for f in verdict.failures]}
-            await call_target(oe["compensate"], ctx, comms=self.comms)
+            # The undo can ITSELF fail; `on_compensate_fail` picks the severity
+            # (see docstring; unknown values fall to "error" — fail loud). Only a
+            # RAISED failure counts — a node: target RETURNING an error envelope
+            # reads as success (no payload-level failure contract). `flush`
+            # (bookkeeping) always runs.
+            try:
+                await call_target(oe["compensate"], ctx, comms=self.comms)
+            except Exception as ce:  # the undo failed
+                # Trace + StageFailed identity is stage.name (as everywhere else —
+                # the origin span at _drive and the origin StageFailed both use it);
+                # node_id/parked_prefix stay the addressing identity for bookkeeping.
+                await self._spans.note(stage.name, input, status="error", attrs={
+                    "event": "compensation_failed", "target": str(oe["compensate"]),
+                    "on_compensate_fail": oe.get("on_compensate_fail", "error"),
+                    "error": str(ce)})
+                await self._envelopes.flush(parked_prefix)
+                if oe.get("on_compensate_fail", "error") == "warn":
+                    return  # noted; the original StageFailed re-raises at the caller
+                raise StageFailed(stage.name, Verdict.failed(
+                    *verdict.failures,
+                    Failure("compensation_failed",
+                            "compensate target {!r} failed: {}".format(oe["compensate"], ce))),
+                    out) from ce
             await self._envelopes.flush(parked_prefix)
 
     async def _validate(self, stage: Stage, out: Envelope) -> "tuple[Verdict, List[dict]]":

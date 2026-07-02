@@ -169,8 +169,8 @@ dispatches a `source:key` string (e.g. `file:eval`, `git:`, `registry:acme-prod`
 | `PromptSource` (prompts/) | `StaticPromptSource` | a prompt body |
 | `DataSource`/`DataSink` (data/) | — | **get**/**post** payloads |
 | `McpSource` (mcp/) | `StaticMcpSource` | an agent's MCP server set |
-| `Store` (store/) | `MemoryStore` | durable baton state + idempotency (`store/idempotency.py`, the `once` node) |
-| `ApiProvider` (agents/) | `FakeBackend`/`ScriptedBackend` | a provider via `provider:model` |
+| `StoreBackend` (store/) | `MemoryBackend` | durable baton state + idempotency (`store/idempotency.py`, the `once` node) |
+| `ApiProvider` (agents/) | `FakeProvider`/`ScriptedProvider` | a provider via `provider:model` |
 
 ### 6. Assembly — `build/`, `runtime.py` (+ `runtime_factories.py`)
 Turns config into a wired, running harness. The seam where everything is composed
@@ -181,7 +181,7 @@ and the **only** place adapters are imported (in `runtime_factories.py`).
 | `Registry` + builders | map a node-spec `type` → a constructed `Node`; `default_registry()` lists the built-ins |
 | `validate_pipeline()` | fail-fast check that graph targets and node/validator/fanout roles all resolve |
 | `build()` / `serve_from_config()` / `harness_from_config()` | in-proc build+register · distributed worker serve · orchestrator-side graph+harness |
-| `runtime.py` | root/deployment-config bootstrap: assembly (`_assemble_harness`) + entrypoints (`run_root`/`list_gates`/`resume_gate`, `yaah` console-script + `python -m yaah.runtime` fallback, the gate CLI `--list`/`--resume`/`--clear`) + config-policy (`_resolve_serve` · `_validate_root` (unknown-key guard) · `_validate_root_shapes` (typed-block / named-map / string / bool shape checks with JSON-shaped rewrite suggestions) · `_apply_fake_overlay` (the `--fake` flag — merges the root's `_fake` block over the top level so one root carries both real + fake modes)) |
+| `runtime.py` | root/deployment-config bootstrap: assembly (`_assemble_harness`) + the action functions (`run_root`/`list_gates`/`resume_gate`/`baton_schema`/`clear_state` — each RETURNS data (Outcome/Batons/dict); rendering belongs to the calling surface, `yaah.cli` for the terminal, `adapters/mcp_server` for JSON) + config-policy (`_resolve_serve` · `_validate_root` (unknown-key guard) · `_validate_root_shapes` (typed-block / named-map / string / bool shape checks with JSON-shaped rewrite suggestions) · `_apply_fake_overlay` (the `--fake` flag — merges the root's `_fake` block over the top level so one root carries both real + fake modes)) |
 | `runtime_factories.py` | the config-block→runtime-leaf factories (transport, providers, prompt/data/mcp sources, store, trace sinks) — the 7 type-maps + the generic `_build_router`; the only adapter-import site |
 
 ### Adapters — `adapters/`
@@ -296,13 +296,13 @@ A `spec` stage with a JSON validator and a human gate, to see the layers coopera
 2. **Comms** (2) routes to the `spec` node — an **Agent** (4).
 3. The **Agent** fetches its prompt via the **PromptSource** port (5) using
    `prompt: "file:spec"` → the **file adapter** reads it; folds in `payload` +
-   any retry `feedback`; calls the **ApiProvider** router (`RoutingBackend`, 5) → the **claude
+   any retry `feedback`; calls the **ApiProvider** router (`RoutingProvider`, 5) → the **claude
    adapter** runs `claude -p`. Returns a `result` Envelope.
 4. **Harness** runs the stage's validator (`json_object`, layer 4). Soft fails are
    recorded on the baton as `concerns`; a hard fail re-invokes the Agent with the
    verdict as feedback, up to `max_attempts`.
 5. On pass, the stage's `escalate: human` gate returns `await` → **Harness**
-   persists the **Baton** via the **Store** port (5) and returns `Suspended`.
+   persists the **Baton** via the **StoreBackend** port (5) and returns `Suspended`.
 6. `drive()` (3) asks the injected decider (config map / stdin / a UI node's
    mailbox) for the decision and calls `resume(baton, decision)` → the run
    continues at the next stage. State survived because the baton is durable.

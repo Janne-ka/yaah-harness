@@ -15,7 +15,7 @@ import tempfile
 
 from yaah import Envelope, Kind, NodeConfig
 from yaah.agents import Agent
-from yaah.adapters.backends import ClaudeCliBackend
+from yaah.adapters.providers import ClaudeCliProvider
 from yaah.mcp import RoutingMcpSource, StaticMcpSource, normalize_servers
 from yaah.adapters.mcp import FileMcpSource
 
@@ -68,7 +68,7 @@ async def scenario_agent_resolves_ref_and_inline() -> None:
 
 async def scenario_claude_mcp_args() -> None:
     """The resolved servers reach claude as --mcp-config (no claude spawn)."""
-    backend = ClaudeCliBackend()
+    backend = ClaudeCliProvider()
     args = backend._build_args("claude-sonnet-4-6", {"mcp": SERVERS,
                                                      "allowed_tools": ["mcp__fetch__fetch"]})
     joined = " ".join(args)

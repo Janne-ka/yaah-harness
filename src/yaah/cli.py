@@ -33,7 +33,7 @@ import sys
 from typing import Any, Callable, Dict
 
 from .harness import StageFailed
-from .runtime_factories import _read_json, _rel
+from .runtime_factories import _read_json
 from .validate import validate_root
 
 
@@ -62,7 +62,10 @@ Debug:
                                 add --corr ID to zoom in on one specific run
 
 Diagnose:
+  manual                        print the generated agent manual (for LLM authors)
+  mcp-serve                     serve validate/run/gates as MCP tools over stdio
   validate <root>               validate root + referenced pipeline file (no run)
+                                  [--strict] [--from-code] [--json (machine-readable diagnostics)]
   doctor                        diagnose install: Python version, optional deps, packaged base configs
   completion <bash|zsh>         emit a shell completion script (`source <(yaah completion bash)`)
 
@@ -166,6 +169,18 @@ def _parse_init(rest: list) -> dict:
     return {"action": "scaffold", "target_dir": rest[0], "archetype": "linear"}
 
 
+def _parse_mcp_serve(rest: list) -> dict:
+    if rest:
+        _usage_exit("mcp-serve takes no arguments (configs are named per tool call)")
+    return {"action": "mcp-serve"}
+
+
+def _parse_manual(rest: list) -> dict:
+    if rest:
+        _usage_exit("manual takes no arguments")
+    return {"action": "manual"}
+
+
 def _parse_scaffold(rest: list) -> dict:
     """`scaffold <archetype> <dir>` — pick the named archetype and write its
     template. `scaffold --list` prints the archetype catalog with one-liners."""
@@ -209,8 +224,21 @@ def _parse_resume(rest: list) -> dict:
 def _parse_validate(rest: list) -> dict:
     if not rest:
         _usage_exit("validate needs a root config")
+    rest = list(rest)
+    strict = "--strict" in rest
+    if strict:
+        rest.remove("--strict")    # --strict: lint warnings FAIL (exit 2), for CI
+    from_code = "--from-code" in rest
+    if from_code:
+        rest.remove("--from-code")  # --from-code: read @provides off fn: transforms (imports app code)
+    as_json = "--json" in rest
+    if as_json:
+        rest.remove("--json")      # --json: ONE machine-readable diagnostics object on stdout
     spec = _parse_cli(rest)        # parse root + --fake/--debug, then
     spec["action"] = "validate"    # check-only (never runs the pipeline)
+    spec["strict"] = strict
+    spec["from_code"] = from_code
+    spec["json"] = as_json
     return spec
 
 
@@ -280,6 +308,8 @@ def _parse_baton_schema(rest: list) -> dict:
 # CLI surface — adding a verb is one entry here + the matching dispatcher.
 _VERB_PARSERS: Dict[str, Callable[[list], dict]] = {
     "init":          _parse_init,
+    "manual":        _parse_manual,
+    "mcp-serve":     _parse_mcp_serve,
     "scaffold":      _parse_scaffold,
     "run":           _parse_run,
     "list":          _parse_via_flag("--list"),
@@ -399,6 +429,22 @@ def _dispatch_scaffold_list(spec: Dict[str, Any]) -> None:
     print("\nUse: yaah scaffold <archetype> <dir>")
 
 
+def _dispatch_manual(spec: Dict[str, Any]) -> None:
+    """Print the generated agent manual — ONE token-budgeted document an LLM
+    needs in context to author valid configs (generated from the same tables
+    validate/build read, so it cannot drift)."""
+    from .manual import build_manual
+    print(build_manual())
+
+
+def _dispatch_mcp_serve(spec: Dict[str, Any]) -> None:
+    """Serve yaah's operator surface as MCP tools over stdio (newline-delimited
+    JSON-RPC): validate / run / list_gates / baton_schema / resume — so any
+    MCP-capable agent host operates yaah natively, no CLI string parsing."""
+    from .adapters.mcp_server import serve_process_stdio
+    asyncio.run(serve_process_stdio())
+
+
 def _dispatch_scaffold(spec: Dict[str, Any]) -> None:
     """Write the named archetype's template into target_dir. `yaah init <dir>`
     enters here with archetype="linear" (back-compat)."""
@@ -421,6 +467,8 @@ _SELF_CONTAINED_DISPATCH: Dict[str, Callable[[Dict[str, Any]], None]] = {
     "completion":    _dispatch_completion,
     "trace":         _dispatch_trace,
     "scaffold-list": _dispatch_scaffold_list,
+    "manual":        _dispatch_manual,
+    "mcp-serve":     _dispatch_mcp_serve,
     "scaffold":      _dispatch_scaffold,
 }
 
@@ -444,48 +492,174 @@ def _dispatch_explain(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> 
 def _dispatch_validate(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
     """Validate root + the referenced pipeline file. Closes the gap where the
     pre-batch `yaah validate` only checked the root and pronounced "ok" while
-    the referenced pipeline had unresolved targets or was malformed."""
-    from .validate import validate_pipeline
+    the referenced pipeline had unresolved targets or was malformed. The check
+    itself is `validate.validate_config` — shared with the MCP `validate` tool
+    so the two operator surfaces can't drift; this dispatcher owns the terminal
+    rendering and exit codes.
+
+    `--json` prints ONE machine-readable object on stdout —
+    {ok, root, errors: [{message, stage?}], warnings: [{id, message}]} —
+    so a generate->validate->repair loop (an LLM author) consumes diagnostics
+    without prose parsing. Exit codes unchanged: 0 ok / 1 invalid / 2 strict.
+    Root validation happens HERE (this action dispatches before the
+    orchestrator's validate_root) so root errors become diagnostics too."""
+    from .validate import split_diagnostics, split_lint_id, validate_config
+    as_json = spec.get("json", False)
+    # --from-code (ADR-0005 slice D): read @provides off fn: transforms so the lint sees
+    # across them without hand-written `provides`. OPT-IN because it IMPORTS app code; the
+    # default lint stays pure.
+    resolve = None
+    if spec.get("from_code"):
+        from .contract import fn_provides_resolver
+        resolve = fn_provides_resolver(base)
+    errors: list = []
+    warnings: list = []
+    try:
+        warnings = validate_config(root, base, resolve=resolve)
+    except ValueError as e:
+        if not as_json:
+            raise                      # prose mode: same loud failure as before
+        errors = split_diagnostics(str(e))
+    if as_json:
+        warn_items = [{"id": wid, "message": msg}
+                      for wid, msg in map(split_lint_id, warnings)]
+        print(json.dumps({"ok": not errors, "root": spec["root"],
+                          "errors": errors, "warnings": warn_items}, indent=2))
+        if errors:
+            raise SystemExit(1)
+        if warnings and spec.get("strict"):
+            raise SystemExit(2)
+        return
+    # Advisory lint: print warnings to stderr (stdout stays clean for "ok"). `--strict`
+    # makes ANY warning FAIL with exit code 2 — distinct from the hard-error path (so CI
+    # can tell 'invalid config' from 'valid-but-weak'). Default stays advisory so a
+    # mid-migration pipeline still validates and runs.
+    # Each lint message carries its rule id as a "[lint: id]" trailer; present it
+    # UP FRONT ("warning[id]: ...") — on a long unwrapped stderr line the rule name
+    # is what the author scans for, and the trailer would be the last thing seen.
+    for w in warnings:
+        wid, msg = split_lint_id(w)
+        if wid:
+            print("warning[{}]: {}".format(wid, msg), file=sys.stderr)
+        else:
+            print("warning: " + msg, file=sys.stderr)
+    if warnings and spec.get("strict"):
+        print("strict: {} lint warning(s) — failing with exit 2 (rerun without --strict "
+              "to treat as advisory)".format(len(warnings)), file=sys.stderr)
+        raise SystemExit(2)
     pipeline_ref = root.get("pipeline")
     if isinstance(pipeline_ref, str):
-        pipeline_cfg = _read_json(_rel(base, pipeline_ref))
-        validate_pipeline(pipeline_cfg)
-        print("ok: {} is valid (root + pipeline {})".format(
-            spec["root"], pipeline_ref))
+        print("ok: {} is valid (root + pipeline {})".format(spec["root"], pipeline_ref))
     elif isinstance(pipeline_ref, dict):
-        validate_pipeline(pipeline_ref)
         print("ok: {} is valid (root + inline pipeline)".format(spec["root"]))
     else:
-        # Root validation already caught the missing/bad-type case above.
-        # If we somehow got here without a `pipeline` field, fall back to the
-        # original message rather than guessing.
         print("ok: {} is a valid root config".format(spec["root"]))
 
 
+# ---------- outcome / mailbox rendering ---------------------------------------
+# The runtime actions RETURN data (Outcome / Batons / dicts); how that data
+# reads on a terminal is this surface's concern. The MCP server renders the
+# same returns as JSON (adapters/mcp_server/tools.py) — two renderings, one
+# source of truth for the data itself.
+
+_RESULT_PRINT_MAX = 4000
+
+
+def _short(out: object) -> str:
+    """Truncated render of an Outcome for the console. The payload can carry
+    large fields (a full diff, a spec); an operator — especially an AI in a
+    session — polls state via this print, so it must stay cheap to read.
+    Artifacts live on disk by reference (`*_path` keys); fetch on demand."""
+    s = str(out)
+    if len(s) <= _RESULT_PRINT_MAX:
+        return s
+    return s[:_RESULT_PRINT_MAX] + " … [{} chars truncated — artifacts are on disk via *_path keys]".format(
+        len(s) - _RESULT_PRINT_MAX)
+
+
+def _print_concerns(concerns: list) -> None:
+    """The concern TEXTS, one line each — a count alone is not actionable; the
+    whole point of soft/sceptic concerns is that the human reads them AT the gate."""
+    for c in concerns:
+        line = "  concern [{}/{}]: {}".format(c.get("stage", "?"), c.get("code", "?"),
+                                              c.get("message", ""))
+        if c.get("fix_hint"):
+            line += " ({})".format(c["fix_hint"])
+        print(line)
+
+
+def _render_outcome(out: Any) -> None:
+    """One run/resume Outcome on the console: the GATE banner when parked
+    (durable state lets another process resume it), then the RESULT line."""
+    from .harness import Suspended
+    if isinstance(out, Suspended):
+        print("GATE baton_id={} awaiting={} concerns={}".format(
+            out.baton_id, out.awaiting, len(out.concerns)))
+        _print_concerns(out.concerns)
+    print("RESULT:", _short(out))
+
+
 def _dispatch_baton_schema(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
-    from .runtime import baton_schema
-    asyncio.run(baton_schema(root, base, spec["baton_id"]))
+    from .runtime import ActionError, baton_schema
+    try:
+        out = asyncio.run(baton_schema(root, base, spec["baton_id"]))
+    except ActionError as e:
+        # ONLY the action's domain errors (no such baton / not a gate / no
+        # form) get the documented exit code 1 — a driver skill can tell
+        # "wrong baton" from "broken root/store" (which stays exit 2 via
+        # main()'s boundary; catching all ValueError would net e.g. a
+        # corrupted store's JSONDecodeError into the wrong class).
+        print("error: {}".format(e), file=sys.stderr)
+        raise SystemExit(1) from None
+    print(json.dumps(out, indent=2))
 
 
 def _dispatch_list(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
-    from .runtime import list_gates
-    asyncio.run(list_gates(root, base, as_json=bool(spec.get("json"))))
+    from .runtime import list_gates, _baton_json
+    gates = asyncio.run(list_gates(root, base))
+    if spec.get("json"):
+        # one JSON document with the same fields the prose view shows — so a
+        # driver skill can parse instead of interpret (shape: _baton_json).
+        print(json.dumps({"batons": [_baton_json(b) for b in gates]}, indent=2))
+        return
+    for b in gates:
+        print("GATE baton_id={} stage={} awaiting={} concerns={}".format(
+            b.id, b.stage, b.awaiting, len(b.concerns)))
+        _print_concerns(b.concerns)
+        if b.pending is not None:
+            # surface the failed verdict that escalated this stage (Y3) — the
+            # failure that broke the stage, shown where the human first looks...
+            for f in (b.pending.payload.get("escalation") or {}).get("failures", []):
+                print("  failed: {}: {}".format(f.get("code", "?"), f.get("message", "")))
+            # ...and the pending question/ask, so they know what to answer.
+            q = b.pending.payload.get("question") or b.pending.payload.get("ask")
+            if q:
+                print("  question: {}".format(q))
+    if not gates:
+        print("(no suspended gates)")
 
 
 def _dispatch_clear(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
     from .runtime import clear_state
-    asyncio.run(clear_state(root, base))
+    print("CLEARED:", asyncio.run(clear_state(root, base)))
 
 
 def _dispatch_resume(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
     from .runtime import resume_gate
     decision = _read_json(spec["decision_file"]) if spec["decision_file"] else {}
-    asyncio.run(resume_gate(root, base, spec["baton_id"], decision))
+    # The originally-detached engine exited at the park; THIS process now runs
+    # the engine until the next gate or completion. Banner sets expectations
+    # (was previously silently blocking).
+    print("[yaah resume] engine running in this process until next gate or completion",
+          file=sys.stderr)
+    _render_outcome(asyncio.run(resume_gate(root, base, spec["baton_id"], decision)))
 
 
 def _dispatch_run(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
     from .runtime import run_root
-    asyncio.run(run_root(root, base))
+    out = asyncio.run(run_root(root, base))
+    if out is not None:   # None = the serve-only path (which normally never returns)
+        _render_outcome(out)
 
 
 _ROOT_DISPATCH: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], str], None]] = {
@@ -524,6 +698,19 @@ def _dispatch(spec: Dict[str, Any]) -> None:
     # package it and use a dotted `fn:pkg.mod:func` path (see docs/node-reference).
     if base not in sys.path:
         sys.path.insert(0, base)
+    # Plugins load BEFORE any validation so a registered type is a known enum
+    # value by the time validate_root / validate_pipeline read the factory maps.
+    from .plugins import load_plugins
+    load_plugins(root.get("plugins"), base)
+    if root.get("plugins"):
+        # plugins run code at IMPORT time, even for validate/explain — say so.
+        print("note: imported plugins: {}".format(", ".join(root["plugins"])),
+              file=sys.stderr)
+    if action == "validate":
+        # validates the root ITSELF (inside its error collection) so `--json`
+        # reports root errors as diagnostics instead of a traceback.
+        _dispatch_validate(spec, root, base)
+        return
     if action == "explain":
         # `explain_root` runs `validate_root` itself with extra provenance
         # context, so it has to bypass the orchestrator's validate call.

@@ -1,4 +1,4 @@
-"""ClaudeCliBackend — an ApiProvider that shells out to the local `claude -p`.
+"""ClaudeCliProvider — an ApiProvider that shells out to the local `claude -p`.
 
 Used by: the runtime's `claude` provider (and apps) when running real local
 Claude (e.g. an app's code-editing stages).
@@ -13,23 +13,17 @@ permission mode, and is handed a per-call `cwd` (the task's worktree) so its
 file edits land in isolation. The cwd is a call opt, not constructor state,
 because it is per-run payload data.
 
-After B2.6 (provider unification): native ApiProvider — `stream()` exists,
-satisfying the new protocol shape, but unlike LiteLLM/Fake migrations
-`complete()` remains the source of truth. `stream()` calls complete() and
-yields one text_delta + done. The reason: complete()'s subprocess handling
-(timeout, kill-on-timeout, exit-code, JSON usage extraction) is well-tested;
-flipping which method is canonical would require refactoring all of that
-into stream() with no test coverage of the new path.
+Native ApiProvider: `stream()` is the one seam. It parses `claude -p
+--output-format stream-json` line-by-line (see `_iter`) — text blocks become
+text_delta events; the result event carries stop_reason + usage (fed to the
+`on_usage` cost bridge via `_map_usage`). There is no separate `complete()`; a
+caller wanting the collected string uses `api_provider.complete(this, ...)`,
+which drains the stream.
 
 Tools are NOT exposed through the YAAH tool-loop — claude handles its own
 tool execution internally via --allowedTools / --permission-mode. So
-tool-call events do not flow through stream(); a context with tools would
-be passed to claude as configuration, not surfaced as agent-emitted calls.
-
-WIRE-LEVEL STREAMING IS DEFERRED: real `claude --output-format stream-json`
-parsing (line-by-line stdout, partial tool_use deltas, usage reconciliation)
-is the eval-flagged hard work. Not in this commit. When a consumer demands
-token-level deltas from claude, that's the upgrade.
+tool-call events do not flow through stream(); a context with tools is passed
+to claude as configuration, not surfaced as agent-emitted calls.
 
 Targets Python 3.9+.
 """
@@ -41,7 +35,7 @@ import os
 import re
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Sequence
 
-from ...agents import api_provider as _ap
+from ...agents.api_provider import ApiProvider, Context, StreamEvent
 
 # Config-named-executable trust (BUG-629: an env-var-named binary was executed
 # with --allow-dangerously-skip-permissions). The binary is config — and config
@@ -112,7 +106,7 @@ def _validate_extra_args(extra_args: Sequence[str], allow_dangerous: bool) -> Li
     return args
 
 
-class ClaudeCliBackend:
+class ClaudeCliProvider(ApiProvider):
     def __init__(
         self,
         *,
@@ -139,7 +133,7 @@ class ClaudeCliBackend:
         self._spawn = spawn or asyncio.create_subprocess_exec
 
     def _build_args(self, model: Optional[str], opts: dict, *,
-                    json_output: bool = False, stream_json: bool = False) -> List[str]:
+                    stream_json: bool = False) -> List[str]:
         # per-call opts (from the agent's config) override the constructor defaults,
         # so tool permissions / permission-mode are PER-AGENT, not per-provider.
         permission_mode = opts.get("permission_mode", self._permission_mode)
@@ -150,8 +144,6 @@ class ClaudeCliBackend:
             # claude requires --verbose alongside --output-format stream-json
             # (the CLI rejects stream-json without it).
             args += ["--output-format", "stream-json", "--verbose"]
-        elif json_output:  # cost capture on -> ask claude for usage (bug review L8)
-            args += ["--output-format", "json"]
         if model:
             args += ["--model", model]
         if mcp:
@@ -167,41 +159,10 @@ class ClaudeCliBackend:
         args += self._extra_args
         return args
 
-    async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
-        on_usage = opts.pop("on_usage", None)  # cost bridge (R4/L8); not a CLI arg
-        cwd = opts.get("cwd")  # per-run worktree for repo-bound agents
-        timeout = opts.get("timeout", self._timeout)  # per-node deadline overrides default
-        args = self._build_args(model, opts, json_output=on_usage is not None)
-        proc = await self._spawn(
-            *args,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-        )
-        try:
-            out, err = await asyncio.wait_for(
-                proc.communicate(prompt.encode()), timeout=timeout
-            )
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise
-        if proc.returncode != 0:
-            raise RuntimeError(
-                "claude -p failed (exit {}): {}".format(
-                    proc.returncode, err.decode(errors="replace")[:500]
-                )
-            )
-        text = out.decode(errors="replace")
-        if on_usage is not None:  # --output-format json: extract result + feed usage
-            return _extract_result_and_usage(text, on_usage, model)
-        return text
-
-    def stream(self, context: _ap.Context, **opts: Any) -> AsyncIterator[_ap.StreamEvent]:
+    def stream(self, context: Context, **opts: Any) -> AsyncIterator[StreamEvent]:
         return self._iter(context, opts)
 
-    async def _iter(self, context: _ap.Context, opts: Dict[str, Any]) -> AsyncIterator[_ap.StreamEvent]:
+    async def _iter(self, context: Context, opts: Dict[str, Any]) -> AsyncIterator[StreamEvent]:
         """B3 (2026-06-23): real `--output-format stream-json` parsing. Spawns
         claude with --verbose --output-format stream-json, writes the prompt
         to stdin, reads stdout line-by-line as JSONL, maps each claude event
@@ -226,10 +187,12 @@ class ClaudeCliBackend:
         definitions in context.tools are not surfaced — claude handles its
         own tool loop natively via --allowedTools / --permission-mode.
         """
+        on_usage = opts.pop("on_usage", None)  # cost bridge (R4/L8); not a CLI arg
         yield {"type": "start"}
         prompt = _prompt_from_messages(context.get("messages") or [],
                                        context.get("system"))
         model = context.get("model")
+        result_model: Optional[str] = None  # model named in the result event (cost bridge)
         cwd = opts.get("cwd")
         args = self._build_args(model, opts, stream_json=True)
         proc = await self._spawn(
@@ -311,6 +274,7 @@ class ClaudeCliBackend:
                     # (claude-internal — see method docstring)
             elif event_type == "result":
                 stop_reason = obj.get("stop_reason") or stop_reason
+                result_model = obj.get("model") or result_model
                 u = obj.get("usage")
                 if isinstance(u, dict):
                     usage = u
@@ -333,6 +297,11 @@ class ClaudeCliBackend:
                        proc.returncode, ": " + err_text if err_text else "")}
             return
 
+        # Cost bridge (R4/L8): feed the result-event usage to on_usage — the
+        # streaming seam's equivalent of the removed --output-format json path, so
+        # a plain agent collecting via api_provider.complete() still tracks cost.
+        if on_usage is not None and usage is not None:
+            on_usage(_map_usage(usage, result_model or model))
         done: Dict[str, Any] = {"type": "done", "stop_reason": stop_reason}
         if usage is not None:
             done["usage"] = usage
@@ -361,25 +330,13 @@ def _prompt_from_messages(messages: List[Dict[str, Any]], system: Optional[str])
     return user_text
 
 
-def _extract_result_and_usage(raw: str, on_usage: Callable[..., Any], model: Optional[str]) -> str:
-    """Parse `claude -p --output-format json` (a single JSON object with `result`
-    + `usage`): feed token usage to the cost bridge and return the result text.
-    Defensive — if the output isn't JSON at all, return it unchanged (claude
-    likely failed to honor --output-format). If it's JSON but the expected
-    `result` key is missing, return "" — downstream stages get a well-defined
-    string contract (assessment cluster 3 B6: previously returned the whole
-    JSON envelope as the agent's text, which then poisoned the next stage)."""
-    try:
-        obj = json.loads(raw)
-    except json.JSONDecodeError:
-        return raw                                     # not JSON: pass through (claude misbehaved)
-    if not isinstance(obj, dict):
-        return raw if not isinstance(obj, (dict, list)) else ""
-    u = obj.get("usage") or {}
+def _map_usage(u: Dict[str, Any], model: Optional[str]) -> Dict[str, Any]:
+    """Map claude's raw usage dict (input/cache/output token counts) to the yaah
+    cost-bridge shape {tokens_in, tokens_out, model}. tokens_in sums the plain
+    input plus both cache-read and cache-creation input tokens."""
+    u = u or {}
     tokens_in = sum(int(u.get(k, 0) or 0) for k in
                     ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
-    on_usage({"tokens_in": tokens_in,
-              "tokens_out": int(u.get("output_tokens", 0) or 0),
-              "model": obj.get("model") or model})
-    result = obj.get("result")
-    return result if isinstance(result, str) else ""    # missing/non-string -> "" (assessment B6)
+    return {"tokens_in": tokens_in,
+            "tokens_out": int(u.get("output_tokens", 0) or 0),
+            "model": model}

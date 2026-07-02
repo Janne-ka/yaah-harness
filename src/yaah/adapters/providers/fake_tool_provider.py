@@ -1,4 +1,4 @@
-"""FakeToolBackend — scripted ApiProvider for testing AgentLoopNode without an LLM.
+"""FakeToolProvider — scripted ApiProvider for testing AgentLoopNode without an LLM.
 
 Used by: the spike/yaah-as-harness example, plus tests of the agent loop.
 Drives the loop via a list of canned turn responses, e.g.:
@@ -7,18 +7,15 @@ Drives the loop via a list of canned turn responses, e.g.:
 
 Where: adapters (the loop is in adapters; its fake backend is too).
 Why: proves REPLACEABILITY of the backend seam — the loop runs against scripted
-responses the same way it would run against ClaudeCliBackend with stream-json
+responses the same way it would run against ClaudeCliProvider with stream-json
 parsing or a future Anthropic-API backend. If the fake works, the protocol is
 right; if a real backend doesn't, the bug is in that backend's translation,
 not in the loop.
 
-After B2.3 (provider unification): native ApiProvider. `stream()` walks the
-script one turn at a time, emitting start → optional text_delta → zero or
-more toolcall_end → done. `turn()` is preserved as a thin wrapper over the
-module-level helper (so AgentLoopNode keeps working). `complete()` retains
-its legacy "first text-bearing turn, no cursor advance" semantics — that
-behavior was a special accommodation for non-loop callers and shouldn't
-silently change under migration.
+A native ApiProvider: `stream()` walks the script one turn at a time, emitting
+start → optional text_delta → zero or more toolcall_end → done. `turn()` is
+kept as the tool-loop entry (the capability marker AgentLoopNode / `supports_turn`
+key on). Collected-text callers use the module-level `api_provider.complete()`.
 
 Targets Python 3.9+.
 """
@@ -26,10 +23,10 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 
-from ...agents import api_provider as _ap
+from ...agents.api_provider import ApiProvider, Context, StreamEvent, SupportsTurn, turn as collect_turn
 
 
-class FakeToolBackend:
+class FakeToolProvider(ApiProvider, SupportsTurn):
     def __init__(self, *, turns: Sequence[Dict[str, Any]]) -> None:
         # Each turn is one of:
         #   {"text": "..."}                        -> final answer
@@ -38,10 +35,10 @@ class FakeToolBackend:
         self._turns: List[Dict[str, Any]] = list(turns)
         self._cursor = 0
 
-    def stream(self, context: _ap.Context, **opts: Any) -> AsyncIterator[_ap.StreamEvent]:
+    def stream(self, context: Context, **opts: Any) -> AsyncIterator[StreamEvent]:
         return self._iter()
 
-    async def _iter(self) -> AsyncIterator[_ap.StreamEvent]:
+    async def _iter(self) -> AsyncIterator[StreamEvent]:
         yield {"type": "start"}
         if self._cursor >= len(self._turns):
             # Out of script — yield a synthetic final so the loop terminates cleanly.
@@ -63,15 +60,8 @@ class FakeToolBackend:
                    "args": call.get("args", {}) or {}}
         yield {"type": "done", "stop_reason": "tool_use" if calls else "end_turn"}
 
-    async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
-        # Legacy non-loop accommodation: return the first text-bearing turn WITHOUT
-        # advancing the cursor. Stream-path callers go through .stream() / .turn()
-        # and get proper turn-by-turn semantics.
-        for spec in self._turns:
-            if "text" in spec:
-                return str(spec["text"])
-        return ""
-
     async def turn(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *,
                    model: Optional[str] = None, **opts: Any) -> Dict[str, Any]:
-        return await _ap.turn(self, messages, tools, model=model, **opts)
+        # Kept as the tool-capability marker (Agent._supports_turn keys on `turn`);
+        # the body delegates to the stream bridge like every collected shape.
+        return await collect_turn(self, messages, tools, model=model, **opts)

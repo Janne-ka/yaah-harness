@@ -1,7 +1,7 @@
 """PrefixRouter — dispatch a 'name:rest' key to one of several backends.
 
 Used by: every Routing* class (RoutingPromptSource / RoutingDataSource /
-RoutingDataSink / RoutingMcpSource / RoutingBackend). They all do the SAME thing —
+RoutingDataSink / RoutingMcpSource / RoutingProvider). They all do the SAME thing —
 split a config string on the first ':', fall back to a default when there's no
 prefix, look up the named backend, and raise a uniform LookupError when it's
 missing — and differ ONLY in the verb they forward (get / fetch / store /

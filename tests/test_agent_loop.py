@@ -1,6 +1,6 @@
 """End-to-end test for the agent_loop node.
 
-Drives the AgentLoopNode through a scripted FakeToolBackend; verifies:
+Drives the AgentLoopNode through a scripted FakeToolProvider; verifies:
 - The loop dispatches tool calls via call_target (fn: scheme; no Comms needed)
 - Tool results are fed back into the next turn's messages
 - A final text response terminates the loop
@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import sys
 
-from yaah.adapters.backends.fake_tool_backend import FakeToolBackend
+from yaah.adapters.providers.fake_tool_provider import FakeToolProvider
 from yaah.core import Envelope, Kind
 from yaah.nodes import AgentLoopNode
 
@@ -36,7 +36,7 @@ def _make(backend, tools, **kw):
 
 def test_loop_completes_with_final_text():
     fx.calls_log.clear()
-    backend = FakeToolBackend(turns=[
+    backend = FakeToolProvider(turns=[
         {"text": "thinking", "calls": [{"id": "c1", "name": "tool_ok", "args": {"x": 1}}]},
         {"text": "all done"},
     ])
@@ -55,7 +55,7 @@ def test_loop_completes_with_final_text():
 
 def test_tool_error_flows_back_as_observation():
     fx.calls_log.clear()
-    backend = FakeToolBackend(turns=[
+    backend = FakeToolProvider(turns=[
         {"calls": [{"id": "c1", "name": "tool_boom", "args": {}}]},
         {"text": "recovered"},
     ])
@@ -75,7 +75,7 @@ def test_tool_error_flows_back_as_observation():
 
 
 def test_unknown_tool_is_an_error_observation_not_a_crash():
-    backend = FakeToolBackend(turns=[
+    backend = FakeToolProvider(turns=[
         {"calls": [{"id": "c1", "name": "not_in_catalog", "args": {}}]},
         {"text": "noted"},
     ])
@@ -90,7 +90,7 @@ def test_unknown_tool_is_an_error_observation_not_a_crash():
 
 
 def test_max_turns_exhausted():
-    backend = FakeToolBackend(turns=[
+    backend = FakeToolProvider(turns=[
         {"calls": [{"id": "c{}".format(i), "name": "tool_ok", "args": {"i": i}}]}
         for i in range(5)
     ])
@@ -142,7 +142,7 @@ def test_stream_only_backend_accepted_at_construction():
 
 
 def test_tool_spec_missing_dispatch_rejected_at_construction():
-    backend = FakeToolBackend(turns=[])
+    backend = FakeToolProvider(turns=[])
     try:
         _make(backend, tools={"x": {"description": "", "input_schema": {}}})
     except ValueError as e:
@@ -159,7 +159,7 @@ def test_b8_dict_catalog_converts_to_tool_instances_at_construction():
     # when Tool's field is `schema`. This test fails fast on that bug
     # because AgentLoopNode construction itself would raise TypeError.
     from yaah.agents import Tool
-    backend = FakeToolBackend(turns=[{"text": "done"}])
+    backend = FakeToolProvider(turns=[{"text": "done"}])
     node = _make(backend, tools={
         "tool_ok": {"description": "a real tool",
                     "input_schema": {"type": "object", "properties": {"x": {"type": "integer"}}},
@@ -184,7 +184,7 @@ def test_b8_dispatch_validation_precedes_tool_conversion():
     # build inline. Post-B8 the validation must STILL happen before the
     # Tool() construction comprehension, or a missing dispatch becomes a
     # KeyError on spec["dispatch"] instead of the documented ValueError.
-    backend = FakeToolBackend(turns=[])
+    backend = FakeToolProvider(turns=[])
     try:
         _make(backend, tools={"x": {"description": "", "input_schema": {}}})
     except ValueError as e:
@@ -211,7 +211,7 @@ def test_node_dispatch_routes_tool_through_comms():
 
     comms = InProcessComms()
     comms.register("role:adder", Adder())
-    backend = FakeToolBackend(turns=[
+    backend = FakeToolProvider(turns=[
         {"calls": [{"id": "c1", "name": "add", "args": {"a": 2, "b": 3}}]},
         {"text": "the sum is 5"},
     ])
@@ -230,7 +230,7 @@ def test_non_dict_input_schema_rejected_at_construction():
     # "object" instead of {"type": "object"}) was accepted at construction and
     # deferred-crashed deep in the provider with an opaque error. Validate it
     # eagerly, same as 'dispatch' — fail fast at build, not at turn N.
-    backend = FakeToolBackend(turns=[])
+    backend = FakeToolProvider(turns=[])
     try:
         _make(backend, tools={"x": {"description": "", "input_schema": "object",
                                     "dispatch": "fn:x:y"}})

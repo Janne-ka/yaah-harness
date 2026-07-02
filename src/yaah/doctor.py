@@ -23,7 +23,7 @@ from typing import List, Tuple
 # import-name, what-it-unlocks) — the third column is the user-facing
 # "why does this matter" so the report reads as guidance, not a stack trace.
 _OPTIONAL_DEPS = [
-    ("litellm",  "litellm",  "LiteLLMBackend (provider:model via litellm)"),
+    ("litellm",  "litellm",  "LiteLLMProvider (provider:model via litellm)"),
     ("nats",     "nats",     "NatsComms transport (distributed runs)"),
     ("langfuse", "langfuse", "Langfuse trace sink"),
     ("http",     "httpx",    "HttpPromptSource default fetcher"),

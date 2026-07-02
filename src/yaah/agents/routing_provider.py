@@ -1,4 +1,4 @@
-"""RoutingBackend — an ApiProvider that dispatches by the model's provider prefix.
+"""RoutingProvider — an ApiProvider that dispatches by the model's provider prefix.
 
 Used by: the runtime (built from the root config's `providers`) and apps; given
 to every Agent / AgentLoopNode as its single backend.
@@ -6,19 +6,16 @@ Where: the seam where `NodeConfig.model` selects a provider.
 Why: a model string 'provider:rest' routes to the backend registered for
 'provider' (called with model='rest'), so choosing fake/claude/litellm for a
 node is pure config. The prefix-dispatch lives in PrefixRouter (shared with the
-prompt/data/mcp routers); this class forwards three verbs — `stream`,
-`complete`, and the tool-loop `turn` — and maps an empty rest back to None
+prompt/data/mcp routers); this class forwards two verbs — `stream` (the one
+model seam) and the tool-loop `turn` — and maps an empty rest back to None
 (provider default model).
 
-After B2.7 (provider unification): `stream()` is the new routing verb, added
-alongside the legacy two. Every leaf backend implements stream() natively
-post-B2.1–B2.6, so stream-based consumers (the future operator UI, trace
-recorders, hedge logic) no longer need a capability check. `supports_turn()`
-remains a real signal because claude_cli still has no native turn() — that
-capability gap is preserved by design (claude handles its own tool loop) and
-isn't fixed by the migration. The "supports_turn goes away" outcome
-documented in docs/architecture/api-provider/use-cases.md lights up only if a
-future B-step adds a turn() shim for claude_cli; until then, the check stays.
+`stream()` is the single routing verb: every leaf backend implements it
+natively, so stream-based consumers (operator UI, trace recorders, hedge logic)
+never need a capability check. `supports_turn()` stays a real signal because
+claude_cli has no native turn() — that capability gap is by design (claude
+handles its own tool loop), so the check remains until (if ever) a turn() shim
+is added for claude_cli.
 
 Targets Python 3.9+.
 """
@@ -27,18 +24,19 @@ from __future__ import annotations
 from typing import Any, AsyncIterator, List, Optional
 
 from ..prefix_router import PrefixRouter
-from . import api_provider as _ap
+from .api_provider import ApiProvider, Context, StreamEvent, SupportsTurn, stream_of
 
 
-# Generic parameter is Any: leaf backends are structural ApiProviders,
-# duck-typed on `complete` / `turn` / `stream` at dispatch time. That runtime
-# dispatch is the real contract; a static Protocol annotation would only be a
-# type-only ornament over it.
-class RoutingBackend(PrefixRouter[Any]):
+# PrefixRouter's generic parameter stays Any: a leaf backend is resolved and
+# dispatched at runtime (structural — any object with stream()/turn() works), so
+# the registry can't be statically typed to one leaf class. The ROUTER itself
+# declares ApiProvider + SupportsTurn — it presents both to Agent (forwards
+# stream to the selected leaf, turn when that leaf supports it).
+class RoutingProvider(PrefixRouter[Any], ApiProvider, SupportsTurn):
     label = "backend"
     prefix = "provider"
 
-    def stream(self, context: _ap.Context, **opts: Any) -> AsyncIterator[_ap.StreamEvent]:
+    def stream(self, context: Context, **opts: Any) -> AsyncIterator[StreamEvent]:
         """Forward an ApiProvider.stream call to the selected provider. Every leaf
         backend implements stream() natively; no capability check needed. The
         context's `model` is rewritten to the post-prefix rest so the leaf sees
@@ -47,13 +45,11 @@ class RoutingBackend(PrefixRouter[Any]):
         backend, rest = self._select(model)
         # Rebuild the context with the resolved leaf-side model. Use dict() so
         # we don't mutate the caller's context.
-        new_ctx: _ap.Context = dict(context)  # type: ignore[assignment]
+        new_ctx: Context = dict(context)  # type: ignore[assignment]
         new_ctx["model"] = (rest or None)
-        return backend.stream(new_ctx, **opts)
-
-    async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
-        backend, rest = self._select(model)
-        return await backend.complete(prompt, model=(rest or None), **opts)
+        # stream_of adapts a collected-only leaf (no native stream(), e.g. an
+        # external legacy backend) into a one-shot stream, so routing to it works.
+        return stream_of(backend, new_ctx, **opts)
 
     async def turn(self, messages: List[dict], tools: List[dict], *,
                    model: Optional[str] = None, **opts: Any) -> dict:

@@ -1,12 +1,12 @@
-"""EnvelopeStore — park and reload Envelopes over a Store (the gate-parking utility).
+"""EnvelopeStore — park and reload Envelopes over a StoreBackend (the gate-parking utility).
 
 Used by: GATES — any control point that holds an envelope until it can route or
 release it: the human_gate (park until a decision), fanin (park each branch until the
 join policy is met), and future gates (a proxygate routing by load, a hold-until gate).
 They all need the same thing — save an envelope under a key now, load it back later —
 so this is the ONE save/load utility instead of each gate reinventing parking.
-Where: a typed facade over the Store substrate, namespace 'env:'. The BACKEND is the
-swappable part — MemoryStore (default, in-process), FileStore, or a db extender — so a
+Where: a typed facade over the StoreBackend substrate, namespace 'env:'. The BACKEND is the
+swappable part — MemoryBackend (default, in-process), FileBackend, or a db extender — so a
 gate parks in memory now and durably later WITHOUT the gate changing.
 Why: an Envelope is the unit a gate holds; one utility, pluggable backend. Peer of
 BatonStore (which already parks the pending envelope for a human gate) and
@@ -16,16 +16,16 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from typing import Any, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from ..core import Envelope
+from .facade import StoreBackedFacade
+from .store import ScannableBackend
 
 
-class EnvelopeStore:
+class EnvelopeStore(StoreBackedFacade[ScannableBackend]):  # +SCAN: `list` needs scan
     PREFIX = "env:"
-
-    def __init__(self, store: Any) -> None:  # store: yaah.store.Store (core tier; +scan for list)
-        self._store = store
+    REQUIRES = ScannableBackend  # checked at construction (fail fast)
 
     async def save(self, key: str, envelope: Envelope, *, ttl: Optional[float] = None) -> None:
         """Park `envelope` under `key` (overwrites). `ttl` (where the backend honors it)
@@ -43,7 +43,7 @@ class EnvelopeStore:
 
     async def list(self, group: str = "") -> List[Tuple[str, Envelope]]:
         """All parked (key, envelope) pairs under an optional `group` key-prefix — the
-        inspection / mailbox view. Requires the Store's +SCAN tier. Keys are returned
+        inspection / mailbox view. Requires the StoreBackend's +SCAN tier. Keys are returned
         without the internal namespace prefix."""
         out: List[Tuple[str, Envelope]] = []
         async for full_key, raw in self._store.scan(self.PREFIX + group):
@@ -53,7 +53,7 @@ class EnvelopeStore:
     async def flush(self, group: str = "") -> int:
         """Release ALL parked envelopes under `group` (default everything) and return
         the count. The parked-set side of a flush: error recovery, or cleaning up a
-        finished gate's arrivals. Requires the Store's +SCAN tier."""
+        finished gate's arrivals. Requires the StoreBackend's +SCAN tier."""
         keys = [self.PREFIX + k for k, _ in await self.list(group)]
         for full_key in keys:
             await self._store.delete(full_key)

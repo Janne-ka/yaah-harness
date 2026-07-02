@@ -21,7 +21,7 @@ except Exception:
     raise SystemExit(0)
 
 from yaah import Done, Envelope, Graph, Harness, Kind, NodeConfig, Stage
-from yaah.agents import Agent, FakeBackend, RoutingBackend
+from yaah.agents import Agent, FakeProvider, RoutingProvider
 from yaah.adapters.transports import NatsComms
 from yaah.validators import JsonObjectValidator
 
@@ -36,8 +36,8 @@ async def main() -> None:
         print("skip: cannot connect to nats ({})".format(e))
         return
 
-    backend = RoutingBackend(
-        {"fake": FakeBackend(responses=[
+    backend = RoutingProvider(
+        {"fake": FakeProvider(responses=[
             '{"summary": "ok", "items": ["a"  ',     # invalid -> retry over the broker
             '{"summary": "ok", "items": ["a"]}',     # valid
         ])},

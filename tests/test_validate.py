@@ -392,6 +392,34 @@ def test_pipeline_typo_then_surfaces() -> None:
     raise AssertionError("typo'd then should raise")
 
 
+def test_pipeline_on_error_shape_is_hard_checked() -> None:
+    # A typo'd on_error would otherwise be a SILENT no-op ("claer" matches no
+    # recovery branch) or silently flip rollback-failure severity ("warning" ->
+    # the "error" default) — recovery the author believes exists must not
+    # quietly disappear, so these are load errors.
+    import copy
+    cases = [
+        ("claer", "on_error must be"),
+        ({"compensate": ""}, "non-empty"),
+        ({"compensate": "fn:m:f", "on_compensate_fail": "warning"}, "on_compensate_fail"),
+        ({"compensate": "fn:m:f", "on_compensat_fail": "warn"}, "unknown on_error key"),
+    ]
+    for bad, expect in cases:
+        p = _valid_pipeline()
+        p["graph"]["stages"]["s1"]["on_error"] = copy.deepcopy(bad)
+        try:
+            validate_pipeline(p)
+        except ValueError as e:
+            assert expect in str(e), (bad, str(e))
+        else:
+            raise AssertionError("bad on_error {!r} should raise".format(bad))
+    for good in ("clear", None, {"compensate": "fn:m:f"},
+                 {"compensate": "fn:m:f", "on_compensate_fail": "warn"}):
+        p = _valid_pipeline()
+        p["graph"]["stages"]["s1"]["on_error"] = good
+        validate_pipeline(p)  # must not raise
+
+
 def test_pipeline_unknown_node_role() -> None:
     p = _valid_pipeline()
     p["graph"]["stages"]["s1"]["node"] = "notdeclared"
@@ -534,8 +562,80 @@ def test_budget_fork_wait_smaller_than_branch_node_timeout() -> None:
     raise AssertionError("fork wait.timeout < branch node timeout should raise")
 
 
+def _parse_false_to(consumer: Dict[str, Any], extra_stage: Dict[str, Any]) -> Dict[str, Any]:
+    return {"nodes": {"ask": {"type": "agent", "parse": False}, **{"c": consumer}},
+            "graph": {"start": "a", "stages": {
+                "a": {"node": "ask", "then": "b"},
+                "b": {"node": "c", **extra_stage}}}}
+
+
+def test_parse_false_render_of_raw_is_accepted() -> None:
+    # parse=false DOES provide `raw`, so a render of only {{raw}} is runnable — the hard
+    # data-flow check must NOT reject it (it reads the template now, not just the edge shape).
+    p = _parse_false_to({"type": "render", "template_text": "Result: {{raw}}"}, {})
+    validate_pipeline(p)  # must not raise
+
+
+def test_parse_false_render_of_unprovided_key_still_fails_loud() -> None:
+    # but a render needing a key the agent never produced is still rejected at LOAD, and the
+    # error names the missing key — fail-loud preserved, just accurate.
+    p = _parse_false_to({"type": "render", "template_text": "{{verdict}}"}, {})
+    try:
+        validate_pipeline(p)
+    except ValueError as e:
+        assert "verdict" in str(e), str(e)
+        return
+    raise AssertionError("parse=false → render needing an unprovided key must still raise")
+
+
+def test_parse_false_branch_after_validator_reset() -> None:
+    # A validator used as a MAIN node returns a Verdict → its output payload is a FRESH
+    # {status, severity, failures} (core/verdict.py to_envelope) — it RESETS, so the agent's
+    # `raw` is GONE downstream. Branching on `status` (which the validator DOES provide) is
+    # fine; branching on `raw`/`verdict` (reset away) fails loud. (The old model wrongly treated
+    # the validator as a passthrough and blessed `branch on raw` — a runtime-broken pipeline.)
+    on_status = _parse_false_to({"type": "json_object"},
+                                {"branch": {"on": "status", "routes": {}, "default": "a"}})
+    validate_pipeline(on_status)  # `status` IS in the validator's fresh payload
+    for absent in ("raw", "verdict"):
+        bad = _parse_false_to({"type": "json_object"},
+                              {"branch": {"on": absent, "routes": {}, "default": "a"}})
+        try:
+            validate_pipeline(bad)
+        except ValueError as e:
+            assert absent in str(e), str(e)
+        else:
+            raise AssertionError(
+                "branch on {!r} (reset away by the validator) must fail loud".format(absent))
+
+
+def test_validator_main_node_render_status_ok_inbound_fails() -> None:
+    # the code-eval's repro: agent(parse=false) → json_object(main) → render. The validator
+    # RESETS the payload to {status,...}, so `{{status}}` renders fine and must NOT be blocked
+    # (the false positive we fixed), while `{{raw}}` (reset away) correctly fails loud.
+    def chain(tpl: str) -> Dict[str, Any]:
+        return {"nodes": {"ask": {"type": "agent", "parse": False},
+                          "chk": {"type": "json_object"},
+                          "rep": {"type": "render", "template_text": tpl}},
+                "graph": {"start": "a", "stages": {
+                    "a": {"node": "ask", "then": "b"},
+                    "b": {"node": "chk", "then": "c"},
+                    "c": {"node": "rep"}}}}
+    validate_pipeline(chain("Result: {{status}}"))   # provided by the validator → must pass
+    try:
+        validate_pipeline(chain("{{raw}}"))
+    except ValueError as e:
+        assert "raw" in str(e), str(e)
+    else:
+        raise AssertionError("render of reset-away {{raw}} after a validator must fail loud")
+
+
 def main() -> None:
     test_valid_root_passes()
+    test_validator_main_node_render_status_ok_inbound_fails()
+    test_parse_false_render_of_raw_is_accepted()
+    test_parse_false_render_of_unprovided_key_still_fails_loud()
+    test_parse_false_branch_after_validator_reset()
     test_unknown_top_level_key_with_did_you_mean()
     test_underscore_keys_treated_as_comments()
     test_bare_string_transport_suggests_typed_block()
@@ -562,6 +662,7 @@ def main() -> None:
     test_multiple_errors_gathered()
     test_pipeline_valid_passes()
     test_pipeline_typo_then_surfaces()
+    test_pipeline_on_error_shape_is_hard_checked()
     test_pipeline_unknown_node_role()
     test_pipeline_typeless_node_names_stale_overlay()
     test_constraint_precedes_holds()
@@ -571,7 +672,7 @@ def main() -> None:
     test_budget_node_timeout_exceeds_transport_window()
     test_budget_inproc_has_no_reply_window()
     test_budget_fork_wait_smaller_than_branch_node_timeout()
-    print("test_validate: PASS (36 scenarios)")
+    print("test_validate: PASS (40 scenarios)")
 
 
 if __name__ == "__main__":

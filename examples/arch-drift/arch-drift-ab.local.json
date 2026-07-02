@@ -20,7 +20,8 @@
   "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
   "default_prompt_source": "file",
   "state": {"type": "file", "dir": ".arch-drift-state"},
-  "trace": {"mode": "tracer", "capture": ["phase", "cost"], "sinks": [{"type": "console"}]},
+  "trace": {"mode": "tracer", "capture": ["phase", "cost", "tools"],
+            "sinks": [{"type": "console"}, {"type": "file", "path": "trace-ab.jsonl"}]},
   "pipeline": "arch-drift-pipeline-ab.json",
   "input": "fixtures/input.json",
   "run": true

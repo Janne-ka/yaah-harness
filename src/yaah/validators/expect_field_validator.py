@@ -13,10 +13,10 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from ..core import Envelope, Failure, NodeConfig, Verdict
+from ..core import Node, Envelope, Failure, NodeConfig, Verdict
 
 
-class ExpectField:
+class ExpectField(Node):
     """Passes if the prior node's output payload[key] equals an expected value."""
 
     def __init__(self, key: str, equals: object) -> None:

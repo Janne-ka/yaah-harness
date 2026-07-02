@@ -15,13 +15,13 @@ from __future__ import annotations
 import asyncio
 from typing import Awaitable, Callable, Dict, List, Optional
 
-from ...comms import Handler, InMemorySubscription
+from ...comms import Comms, Handler, InMemorySubscription
 from ...core import Envelope, Node, NodeConfig
 
 RequestHandler = Callable[[Envelope], Awaitable[Envelope]]
 
 
-class LocalBus:
+class LocalBus(Comms):
     def __init__(self) -> None:
         self._queues: Dict[str, "asyncio.Queue"] = {}
         self._servers: Dict[str, "asyncio.Future"] = {}

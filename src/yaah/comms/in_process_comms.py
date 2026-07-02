@@ -14,11 +14,11 @@ import asyncio
 from typing import Dict, List, Optional, Tuple
 
 from ..core import Envelope, Node, NodeConfig
-from .comms import Handler
+from .comms import Comms, Handler
 from .subscription import InMemorySubscription
 
 
-class InProcessComms:
+class InProcessComms(Comms):
     def __init__(self) -> None:
         self._nodes: Dict[str, Tuple[Node, NodeConfig]] = {}
         self._subs: Dict[str, List[Handler]] = {}

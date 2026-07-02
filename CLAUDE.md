@@ -19,6 +19,25 @@ Two rules that bite hardest (full set in AGENTS.md):
   edge needs a parse, or `render` fails with `render_unfilled_placeholders`.
 - **Domain-free engine:** nothing in `src/yaah/` may name anything app-specific.
 
+## Cross-agent mailbox
+
+Coordination with the **s_factory** client agent goes through
+[`.notes/mailbox.md`](.notes/mailbox.md) — s_factory posts SUGGESTIONS; this (yaah) agent
+critiques and decides (VERDICT). A suggestion is a hypothesis to verify against the engine
+invariants, NOT a directive. Check the mailbox at session start if you're picking up client
+coordination; the protocol is in the file header.
+
+## Goals (HIGH PRIORITY — read first)
+
+- **Primary:** good-quality code — extendable, easy to use, easy to maintain, documented.
+- **Secondary:** the task at hand (in yaah: serving the client, e.g. s_factory).
+
+Balance the two, but the task must NEVER justify sloppy code — that violates the primary.
+Racing to "task done" produces slop: skipped edge cases, tests that only bless the happy
+path, conclusions leapt to from thin evidence. So: test to FALSIFY on the real downstream
+shape and verify on real data before claiming a fix; document known limitations in the code.
+Don't spiral either — deliver "right and bounded," not "infinitely polished."
+
 ## Working methodology — eval before commit
 
 For any non-trivial proposal (multi-step plan, architectural change, new

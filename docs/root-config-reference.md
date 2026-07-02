@@ -30,7 +30,7 @@ config with a real-provider override. Example: `arch-drift.local.json` has
 `providers.claude = {type: "fake_scripted", by_model: {…}}`; the real config
 says `providers.claude = {type: "claude_cli", binary: "claude"}` thinking it
 overrides. It doesn't — deep merge keeps `by_model` from the base, and
-`ClaudeCliBackend` rejects the extra key. **Explicitly null it:**
+`ClaudeCliProvider` rejects the extra key. **Explicitly null it:**
 ```json
 "providers": {"claude": {"type": "claude_cli", "binary": "claude",
                           "by_model": null}}
@@ -124,6 +124,24 @@ store is what lets `--list`/`--resume` work cross-process and survive a crash.
 duration, default-on), `cost` (tokens/model), `tools`. `stats_file` takes a
 `price_map` (tokens→$). Cross-field checks reject silently-dropped config (e.g.
 `sinks` under `mode: none`). `--explain` shows the effective trace block.
+
+## Plugins (extension types)
+
+```jsonc
+"plugins": ["my_ext"]          // modules imported BEFORE validation
+```
+
+Each named module is imported (config-dir on `sys.path`, like `fn:` targets) so
+its `yaah.plugins.register_type(kind, name, factory, spec_keys=...)` calls run —
+after which the new `type` value validates, enum-checks, and builds like a
+built-in. Kinds: `provider`, `prompt_source`, `data_source`, `data_sink`,
+`mcp_source`, `state`, `transport`, `trace_sink`.
+
+**Trust note:** plugins run at import time — even `yaah validate` executes them
+(the validator can't know a plugin's types without importing it). Only validate
+configs whose plugins you trust; the CLI prints which plugins it imported. For
+shared/long-lived use, package the extension (`plugins: ["mypkg.yaah_ext"]`)
+instead of a flat file next to the config.
 
 ## Distribution (`serve`) and running
 

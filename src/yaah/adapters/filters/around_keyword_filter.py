@@ -13,9 +13,10 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 from typing import Any
+from ...filters import Filter
 
 
-class AroundKeywordFilter:
+class AroundKeywordFilter(Filter):
     async def apply(self, value: Any, *, keyword: str = "", n: int = 3,
                     all: bool = False, **_: Any) -> Any:
         """Return ±n lines around occurrences of `keyword` in `value`.

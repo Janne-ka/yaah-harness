@@ -1,9 +1,9 @@
-"""MemoryStore — the in-process Store extender (the default; = today's behavior).
+"""MemoryBackend — the in-process StoreBackend extender (the default; = today's behavior).
 
 Used by: the runtime when no durable `state:` backend is configured, and the test
 suite. Backs BatonStore / IdempotencyStore over a plain dict.
 Where: the default substrate; single process, lost on exit.
-Why: a zero-dependency Store that implements all three tiers (core + scan + cas)
+Why: a zero-dependency StoreBackend that implements all three tiers (core + scan + cas)
 so the facades and their tests run with nothing installed. A durable extender
 (file / nats_kv / ...) is dropped in per-deployment with the same interface.
 
@@ -15,10 +15,12 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from typing import AsyncIterator, Dict, Optional, Tuple
+from typing import AsyncGenerator, Dict, Optional, Tuple
+
+from .store import CompareAndSet, Scannable, StoreBackend
 
 
-class MemoryStore:
+class MemoryBackend(StoreBackend, Scannable, CompareAndSet):
     def __init__(self) -> None:
         self._data: Dict[str, bytes] = {}
         self._rev: Dict[str, int] = {}  # per-key revision, for compare-and-set
@@ -34,7 +36,7 @@ class MemoryStore:
         self._data.pop(key, None)
         self._rev.pop(key, None)
 
-    async def scan(self, prefix: str) -> AsyncIterator[Tuple[str, bytes]]:
+    async def scan(self, prefix: str) -> AsyncGenerator[Tuple[str, bytes], None]:
         # snapshot first: callers (sweep) delete while iterating
         for key, value in list(self._data.items()):
             if key.startswith(prefix):

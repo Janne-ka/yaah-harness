@@ -17,9 +17,10 @@ import os
 from typing import Any
 
 from ...core import Envelope
+from ...trace import TraceSink
 
 
-class FileTraceSink:
+class FileTraceSink(TraceSink):
     def __init__(self, path: str) -> None:
         self._path = path
         parent = os.path.dirname(path)

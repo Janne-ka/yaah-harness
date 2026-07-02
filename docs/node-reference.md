@@ -39,6 +39,23 @@ REPLACE the payload otherwise; prefer graph `sticky` for run-wide keys),
 `parse` (bool, default `true` — [ADR-0004](decisions/0004-parse-by-default.md):
 agent runs `extract_json` on its output and merges the parsed keys onto the
 reply; opt out with `parse: false` for streaming/raw-only cases),
+`strict_render` (bool, default `false` — when `true`, a `{{placeholder}}` with no
+value in payload ∪ `config` extras FAILS the stage loud with
+`render_unfilled_placeholders` naming the key + stage, instead of leaving the
+literal `{{name}}` in the prompt; engine-injected keys like `tool_manifest` and
+present-but-empty values never trip it. Catches the stage-local unfilled-placeholder
+class no static lint can),
+`output_schema` (optional JSON-Schema subset — the stage's OUTPUT CONTRACT,
+parse-path only: the agent self-validates its parsed reply against it
+(type/enum/required/properties/items) and fails loud with `schema_mismatch`
+when it drifts, so you DON'T need a separate `json_schema` validator node; its
+`required` keys + the typed `properties` also drive recovery of a weak executor's
+not-quite-JSON on a parse failure — unquoted/bare values, enum members,
+`type:string` free-form, and one-`key: value`-per-line output — see
+[json-recovery.md](json-recovery.md) for the exact contract and how to declare a
+stage so haiku output Just Works. Top level must be an object — a parse-mode
+agent rejects a non-object reply as `not_object` before the schema runs. Omit
+it for no contract — byte-identical to before),
 `tools` (model-initiated, needs a turn-capable backend), `allowed_tools` +
 `permission_mode` (claude-native), `mcp` (inline servers or `"source:key"`),
 `expose`/`filters`/`max_chars`/`broker` (R9–R12 envelope access), `attach`
@@ -143,9 +160,12 @@ Parse `payload[key]` (default `"raw"`, fence/prose-tolerant via
 **Usually unnecessary on `agent` outputs**: per [ADR-0004](decisions/0004-parse-by-default.md)
 agents are parse-by-default (they run `extract_json` themselves and emit a
 failed verdict on bad JSON, triggering the retry+feedback loop). Reach for
-these validators when validating a `transform` output, OR when you need
-the SCHEMA shape (`json_schema.schema` does structural checking the
-agent's plain `extract_json` doesn't).
+these validators when validating a `transform` output. For an `agent` that
+needs the SCHEMA shape, prefer the agent's own `output_schema` (above) — it
+runs the SAME checker (`yaah.jsonschema.check_schema`) on the agent's reply,
+so a standalone `json_schema` node on an agent output is redundant; keep
+`json_schema` for non-agent (`transform`) outputs that have no contract of
+their own.
 
 ## `human_gate` — park for a decision
 

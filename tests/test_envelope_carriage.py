@@ -113,7 +113,7 @@ async def scenario_nested_broker_spans_survive() -> None:
     emptied the corr onto the broker's reply headers, which the context_broker
     tool discarded. Now: the broker's serve boundary drains, the tool re-ingests
     — every span survives to the stage's own boundary/terminal drain."""
-    from yaah.agents import Agent, ScriptedToolBackend
+    from yaah.agents import Agent, ScriptedToolProvider
     from yaah.comms import InProcessComms
     from yaah.core import NodeConfig
     from yaah.trace import CarriageBoundaryNode
@@ -128,7 +128,7 @@ async def scenario_nested_broker_spans_survive() -> None:
     comms.register("role:broker", CarriageBoundaryNode(broker, tr), NodeConfig())
 
     main = Agent(
-        ScriptedToolBackend([
+        ScriptedToolProvider([
             {"calls": [{"id": "c1", "name": "context_broker",
                         "args": {"query": "the auth part"}}]},
             {"text": "done"},

@@ -87,6 +87,8 @@ def _build_agent(spec: Dict[str, Any], ctx: BuildContext) -> Node:
         broker=spec.get("broker"),                    # R12: node role for the fuzzy context broker
         envelope_filters=envelope_filters,             # R10: name->Filter, available via envelope_get's `filter:` arg
         parse=bool(spec.get("parse", True)),          # ADR-0004: parse-by-default; opt out with parse:false
+        strict_render=bool(spec.get("strict_render", False)),  # Y1: fail loud on unfilled {{placeholder}} (node-level; no root default yet)
+        output_schema=spec.get("output_schema"),       # Y4: declared output contract; `required` gates parse-failure key recovery
     )
     # ADR-0003: opt-in `attach: [...]` wraps the agent so attachers can merge
     # post-invoke data (tokens/usage/etc.) from the tracer's last span onto
@@ -114,7 +116,14 @@ def _build_agent(spec: Dict[str, Any], ctx: BuildContext) -> Node:
         # with the exact `trace:` snippet to add. NullTracer has empty
         # captures, so this also rejects "attach without tracing" without a
         # separate presence check.
-        captures = set(getattr(ctx.tracer, "captures", ()) or ())
+        tracer = ctx.tracer
+        if tracer is None:  # a zero-capture attacher would otherwise pass the
+            # capture check below and crash mid-run on tracer.last_model_call_span
+            raise ValueError(
+                "agent uses attach: [...] but no tracer is configured. Add to "
+                'your root config: "trace": {"mode": "tracer", '
+                '"sinks": [{"type": "console"}]}')
+        captures = set(getattr(tracer, "captures", ()) or ())
         missing: Dict[str, list] = {}
         for a in attachers:
             for cap in a.requires_capture:
@@ -129,7 +138,7 @@ def _build_agent(spec: Dict[str, Any], ctx: BuildContext) -> Node:
                 '"sinks": [{{"type": "console"}}]}}'.format(
                     needed, {c: missing[c] for c in needed},
                     sorted(captures | set(needed))))
-        return AttachingAgent(agent, attachers, ctx.tracer)
+        return AttachingAgent(agent, attachers, tracer)
     return agent
 
 
@@ -320,10 +329,11 @@ def _wrap_node(node: Node, spec: Dict[str, Any], ctx: BuildContext) -> Node:
                 "node {!r} is marked idempotent but no state/idempotency store is "
                 "configured (set root `state:`)".format(spec.get("_role", "?")))
         node = OnceNode(node, ctx.idempotency_store)
-    if getattr(ctx.tracer, "is_carriage", False):
+    tracer = ctx.tracer
+    if tracer is not None and getattr(tracer, "is_carriage", False):
         # outermost: even a cached OnceNode reply carries the corr's buffered spans
         from ..trace import CarriageBoundaryNode
-        node = CarriageBoundaryNode(node, ctx.tracer)
+        node = CarriageBoundaryNode(node, tracer)
     return node
 
 

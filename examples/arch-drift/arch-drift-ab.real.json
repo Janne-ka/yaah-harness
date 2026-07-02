@@ -1,0 +1,12 @@
+{
+  "_doc": "Real-model A/B with full traces: candidate A = claude-sonnet-4-6, B = claude-haiku-4-5, both via the claude_cli backend (real `claude` on PATH). Inherits the A/B pipeline + the rich trace (capture phase+cost+tools, JSONL file sink) from arch-drift-ab.local.json; only swaps the fake provider for claude_cli (by_model null deletes the scripted map). Needs `claude` AND `mmdc` on PATH. Run from this dir: `yaah run arch-drift-ab.real.json`, approve a/b at the gate, then `yaah trace trace-ab.jsonl --pretty --cost prices.json` for REAL per-model tokens + $ (the offline .local run is $0 because it's a fake model).",
+  "_extends": "arch-drift-ab.local.json",
+  "providers": {
+    "claude": {
+      "type": "claude_cli",
+      "binary": "claude",
+      "by_model": null
+    }
+  },
+  "state": {"type": "file", "dir": ".arch-drift-state"}
+}

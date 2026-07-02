@@ -22,9 +22,10 @@ import time
 from typing import Callable, Optional
 
 from ...core import Envelope
+from ...trace import TraceSink
 
 
-class ProgressFileSink:
+class ProgressFileSink(TraceSink):
     def __init__(self, path: str, *, clock: Optional[Callable[[], float]] = None) -> None:
         self._path = path
         self._clock = clock or time.time  # injectable for deterministic tests
@@ -45,6 +46,11 @@ class ProgressFileSink:
         awaiting = r.get("awaiting")
         if awaiting:
             line += " awaiting={}".format(awaiting)
+        # A parked stage that rendered an artifact (the generic `path` payload key,
+        # projected to `artifact` on the span) gets an `-> open <basename>` hint so
+        # the operator tailing progress.log knows exactly what to open (Y2).
+        if r.get("artifact"):
+            line += " -> open {}".format(r["artifact"])
         line += "\n"
         with open(self._path, "a", encoding="utf-8") as f:
             f.write(line)

@@ -13,17 +13,15 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from typing import Optional
-
-from ..core import Envelope, NodeConfig
+from ..core import Node, Envelope, NodeConfig
 from .live_leaf_config import LiveLeafConfig
 
 
-class LiveConfigNode:
-    def __init__(self, inner: object, role: str, live: LiveLeafConfig) -> None:
+class LiveConfigNode(Node):
+    def __init__(self, inner: Node, role: str, live: LiveLeafConfig) -> None:
         self._inner = inner
         self._role = role
         self._live = live
 
-    async def invoke(self, input: Envelope, config: Optional[NodeConfig]) -> Envelope:
+    async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
         return await self._inner.invoke(input, self._live.refresh(self._role, config))

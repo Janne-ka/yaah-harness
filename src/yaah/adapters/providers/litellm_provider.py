@@ -1,4 +1,4 @@
-"""LiteLLMBackend — an ApiProvider that calls many providers via litellm.
+"""LiteLLMProvider — an ApiProvider that calls many providers via litellm.
 
 Used by: the runtime's `litellm` provider (and apps) to reach OpenAI / Gemini /
 Bedrock / etc. through one API.
@@ -6,11 +6,10 @@ Where: hosts with `pip install litellm` + a provider key.
 Why: one provider-agnostic call for non-Claude models; litellm is imported
 lazily so it's only required if this backend is actually used.
 
-After B2.5 (provider unification): native ApiProvider. `stream()` is the
-canonical method — it calls litellm's acompletion once and projects the
-response into the StreamEvent vocabulary (text_delta + toolcall_end + done).
-`complete()` / `turn()` are thin wrappers over the module-level helpers so
-existing consumers stay green.
+A native ApiProvider: `stream()` is its completion method — it calls litellm's
+acompletion once and projects the response into the StreamEvent vocabulary
+(text_delta + toolcall_end + done). `turn()` is kept as the tool-loop entry.
+Collected-text callers use the module-level `api_provider.complete()`.
 
 Real chunk-by-chunk streaming (passing `stream=True` to acompletion and
 iterating the SSE chunks) is a FOLLOW-UP — the upgrade requires updating
@@ -26,7 +25,7 @@ from __future__ import annotations
 import json
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
-from ...agents import api_provider as _ap
+from ...agents.api_provider import ApiProvider, Context, StreamEvent, SupportsTurn, turn as collect_turn
 
 
 # Agent-plumbing opts that claude-native backends consume but are NOT litellm /
@@ -77,7 +76,7 @@ def _report_usage(on_usage: Optional[Callable[..., Any]], resp: Any, model: Opti
               "model": resp_model or model})
 
 
-class LiteLLMBackend:
+class LiteLLMProvider(ApiProvider, SupportsTurn):
     def __init__(self, *, acompletion: Optional[Callable[..., Awaitable[Any]]] = None,
                  **default_opts: Any) -> None:
         # `acompletion` is the one external dependency, injected for testability:
@@ -93,10 +92,10 @@ class LiteLLMBackend:
         import litellm  # pragma: no cover - real SDK shim (lazy, integration-only)
         return litellm.acompletion  # pragma: no cover
 
-    def stream(self, context: _ap.Context, **opts: Any) -> AsyncIterator[_ap.StreamEvent]:
+    def stream(self, context: Context, **opts: Any) -> AsyncIterator[StreamEvent]:
         return self._iter(context, opts)
 
-    async def _iter(self, context: _ap.Context, opts: Dict[str, Any]) -> AsyncIterator[_ap.StreamEvent]:
+    async def _iter(self, context: Context, opts: Dict[str, Any]) -> AsyncIterator[StreamEvent]:
         yield {"type": "start"}
         merged = dict(self._default_opts)
         merged.update(opts)
@@ -155,12 +154,9 @@ class LiteLLMBackend:
             done["usage"] = usage
         yield done
 
-    async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
-        return await _ap.complete(self, prompt, model=model, **opts)
-
     async def turn(self, messages: List[dict], tools: List[dict], *,
                    model: Optional[str] = None, **opts: Any) -> Dict[str, Any]:
-        out = await _ap.turn(self, messages, tools, model=model, **opts)
+        out = await collect_turn(self, messages, tools, model=model, **opts)
         # Legacy LiteLLM turn() contract: always returns either {"calls": [...]}
         # OR {"text": str} — never both, never empty. The module-level helper is
         # more lenient (returns whichever blocks were present); apply the legacy

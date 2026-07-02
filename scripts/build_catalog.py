@@ -267,7 +267,7 @@ def main() -> None:
         "stores": _classes_implementing("adapters/stores"),
         "trace_sinks": _classes_implementing("adapters/trace"),
         "transports": _classes_implementing("adapters/transports"),
-        "backends": _classes_implementing("adapters/backends"),
+        "backends": _classes_implementing("adapters/providers"),
         "filters": _classes_implementing("adapters/filters"),
     }
 
@@ -339,7 +339,7 @@ def main() -> None:
     md.append(_md_section_classes("Store adapters (`adapters/stores/`)", "adapters/stores"))
     md.append(_md_section_classes("Trace-sink adapters (`adapters/trace/`)", "adapters/trace"))
     md.append(_md_section_classes("Transport adapters (`adapters/transports/`)", "adapters/transports"))
-    md.append(_md_section_classes("Model-backend adapters (`adapters/backends/`)", "adapters/backends"))
+    md.append(_md_section_classes("Model-backend adapters (`adapters/providers/`)", "adapters/providers"))
     md.append(_md_section_classes("Filter adapters (`adapters/filters/`)", "adapters/filters"))
     md.append(_md_section_classes("Trace contributors (`trace/contributors/`)", "trace/contributors"))
 
@@ -353,7 +353,7 @@ def main() -> None:
     md.append("")
     # Walk every class/function across all scanned directories looking for Args blocks
     sec_entries: List[Tuple[str, str, List[Dict[str, str]]]] = []  # (label, module, args_doc)
-    scan_roots = ["agents", "adapters/filters", "adapters/data", "adapters/backends",
+    scan_roots = ["agents", "adapters/filters", "adapters/data", "adapters/providers",
                   "adapters/trace", "nodes", "validators.py", "build"]
     for rel in scan_roots:
         full = ROOT / rel

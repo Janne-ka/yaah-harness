@@ -77,13 +77,13 @@ async for ev in provider.stream(ctx):
 ```
 
 **Honest limits:** TTFT only meaningful for real streaming backends. The
-adapter wrapping FakeBackend emits one `text_delta` at end-of-call, so
+adapter wrapping FakeProvider emits one `text_delta` at end-of-call, so
 TTFT == total latency. Capture it anyway — equal-to-end is a valid
 signal that "this backend doesn't stream."
 
-## 4. Capability simplification (RoutingBackend)
+## 4. Capability simplification (RoutingProvider)
 
-**Scenario:** `RoutingBackend` currently has a `supports_turn()` helper
+**Scenario:** `RoutingProvider` currently has a `supports_turn()` helper
 because some legacy backends (claude_cli) don't implement `turn()` and
 some do (LiteLLM, ScriptedTool). Callers check the capability before
 choosing tool-loop vs. manifest-fallback paths.
@@ -187,6 +187,6 @@ plumbing hidden.
 | 1 — Token UI | future `yaah ui live` (Phase 2+) |
 | 2 — Tool-call surfacing | `tests/test_agent_loop.py` (B5 regression) |
 | 3 — Per-token trace | Phase 2 outcome capture |
-| 4 — Capability simplification | `tests/test_routing_backend.py` (B7) |
+| 4 — Capability simplification | `tests/test_api_provider.py` + `tests/test_ports.py` (B7) |
 | 5 — Provider hedge | Phase 3 H6 sibling (not yet scoped) |
 | 6 — Audit replay | Phase 2 outcome capture |

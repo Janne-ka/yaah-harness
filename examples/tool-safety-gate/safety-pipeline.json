@@ -1,0 +1,22 @@
+{
+  "_doc": "Tool-safety-gate — cheap-model composition. A CHEAP haiku gate checks a proposed shell command BEFORE a destructive stage runs. The agent is parse:false and emits ONE keyword (SAFE/UNSAFE) — never JSON — so haiku's reliable JSON-mangling (BUG-697) can't break the gate. `extract` pulls the keyword into `safety`; `branch` routes SAFE -> approve (a stand-in for the real action), UNSAFE -> block. Fail-safe: a missing/garbled verdict becomes BLOCK and hits `default: block`, never approve. Scope honestly: a cheap model is competent at this PATTERN check (does the command match a destructive shape?), not at nuanced judgement.",
+  "nodes": {
+    "role:check":   {"type": "agent", "prompt": "file:safety-check", "model": "claude:claude-haiku-4-5",
+                     "stage": "safety-check", "parse": false, "carry": ["command"]},
+    "role:extract": {"type": "transform", "target": "fn:transforms:extract_verdict", "call": "envelope"},
+    "role:approve": {"type": "transform", "target": "fn:transforms:approve", "call": "envelope"},
+    "role:block":   {"type": "transform", "target": "fn:transforms:block", "call": "envelope"}
+  },
+  "graph": {
+    "start": "check",
+    "stages": {
+      "check":   {"node": "role:check", "then": "extract"},
+      "extract": {"node": "role:extract",
+                  "branch": {"on": "safety",
+                             "routes": {"SAFE": "approve", "UNSAFE": "block"},
+                             "default": "block"}},
+      "approve": {"node": "role:approve", "then": null},
+      "block":   {"node": "role:block",   "then": null}
+    }
+  }
+}

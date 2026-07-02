@@ -6,9 +6,9 @@ Shows the worker-factory shape end to end with NO external services:
   - the harness retry-with-feedback loop;
   - event-mode progress (push) to a printing subscriber.
 
-Runs on InProcessComms with FakeBackend — no Dapr, no NATS, no network.
+Runs on InProcessComms with FakeProvider — no Dapr, no NATS, no network.
 To run against real local Claude, swap one line (see BACKEND below): that uses
-ClaudeCliBackend (`claude -p`). LiteLLMBackend is another drop-in.
+ClaudeCliProvider (`claude -p`). LiteLLMProvider is another drop-in.
 
 Run: cd yaah && PYTHONPATH=src python3 examples/agent_stage_poc.py
 """
@@ -29,10 +29,10 @@ from yaah import (
     Stage,
     Verdict,
 )
-from yaah.agents import Agent, FakeBackend, RoutingBackend
+from yaah.agents import Agent, FakeProvider, RoutingProvider
 from yaah.jsonio import extract_json  # fence-tolerant — real models wrap JSON in markdown
 
-# from yaah.agents import ClaudeCliBackend, LiteLLMBackend  # real backends
+# from yaah.agents import ClaudeCliProvider, LiteLLMProvider  # real backends
 
 
 class JsonObjectValidator:
@@ -68,22 +68,22 @@ Task: {{task}}
 
 # One backend that routes by the model string's 'provider:' prefix, so a node
 # chooses its backend purely via config (NodeConfig.model) — no code change.
-BACKEND = RoutingBackend(
+BACKEND = RoutingProvider(
     {
-        "fake": FakeBackend(responses=[
+        "fake": FakeProvider(responses=[
             '{"summary": "two issues found", "items": ["a", "b"  ',   # invalid → triggers retry
             '{"summary": "two issues found", "items": ["a", "b"]}',   # valid
         ]),
-        # "claude": ClaudeCliBackend(),    # real local Claude (`claude -p`, MCP stripped)
-        # "litellm": LiteLLMBackend(),     # any provider via litellm (pip install litellm + key)
+        # "claude": ClaudeCliProvider(),    # real local Claude (`claude -p`, MCP stripped)
+        # "litellm": LiteLLMProvider(),     # any provider via litellm (pip install litellm + key)
     },
     default="fake",
 )
 
 # The node's backend is selected by this model string — config, not code:
-#   "fake:spec"                 -> FakeBackend
-#   "claude:claude-sonnet-4-6"  -> ClaudeCliBackend   (uncomment "claude" above)
-#   "litellm:gpt-4o"            -> LiteLLMBackend
+#   "fake:spec"                 -> FakeProvider
+#   "claude:claude-sonnet-4-6"  -> ClaudeCliProvider   (uncomment "claude" above)
+#   "litellm:gpt-4o"            -> LiteLLMProvider
 NODE_MODEL = "fake:spec"
 
 

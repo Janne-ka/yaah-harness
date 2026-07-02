@@ -26,7 +26,9 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 import importlib.resources as ir
+import json
 import os
+import re
 from typing import Dict, List
 
 
@@ -76,9 +78,66 @@ def load_template(archetype: str) -> Dict[str, str]:
     return out
 
 
+def _with_schema_ref(content: str, ref: str) -> str:
+    """Insert a `"$schema": "<ref>"` pointer as the FIRST key of a JSON object,
+    preserving the template's hand-formatting (string insertion, not
+    reparse-redump — the scaffolded config is the first thing a user reads, so
+    its layout matters). No-op if `content` isn't an object or is empty `{}`."""
+    i = content.find("{")
+    if i < 0:
+        return content
+    after = content[i + 1:]
+    if after.lstrip().startswith("}"):
+        return content  # empty object — a trailing comma would break it
+    m = re.match(r"[^\n]*\n([ \t]*)", after)  # indent of the existing first key
+    indent = m.group(1) if (m and m.group(1)) else "  "
+    return content[:i + 1] + "\n" + indent + '"$schema": "' + ref + '",' + after
+
+
+def _schema_targets(template: Dict[str, str]) -> Dict[str, str]:
+    """Map each config file in `template` to the schema it should point at:
+    every `*.local.json` is a root config; the file each names via its
+    `pipeline` key is a pipeline config. Returns {relpath: schema-filename}."""
+    targets: Dict[str, str] = {}
+    for rel, content in template.items():
+        if not rel.endswith(".local.json"):
+            continue
+        targets[rel] = "root.schema.json"
+        try:
+            cfg = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+        pipeline = cfg.get("pipeline")
+        if isinstance(pipeline, str):
+            prel = os.path.normpath(os.path.join(os.path.dirname(rel), pipeline))
+            targets[prel] = "pipeline.schema.json"
+    return targets
+
+
+def _write_generated_schemas(target_dir: str) -> int:
+    """Generate the root + pipeline JSON Schemas from the INSTALLED engine's own
+    tables (yaah.schema_gen) and write them under `<target_dir>/schemas/`. Doing
+    it at scaffold time — rather than shipping a snapshot — means the `$schema`
+    autocomplete a user gets always matches the engine that will run their
+    config. Returns the number of schema files written."""
+    from . import schema_gen
+    sdir = os.path.join(target_dir, "schemas")
+    os.makedirs(sdir, exist_ok=True)
+    for name, schema in (("root.schema.json", schema_gen.build_root_schema()),
+                         ("pipeline.schema.json", schema_gen.build_pipeline_schema())):
+        with open(os.path.join(sdir, name), "w", encoding="utf-8") as f:
+            f.write(json.dumps(schema, indent=2, sort_keys=True) + "\n")
+    return 2
+
+
 def scaffold(target_dir: str, archetype: str = "linear") -> int:
-    """Write the named archetype's template into `target_dir`. Returns file
-    count.
+    """Write the named archetype's template into `target_dir`. Returns the total
+    file count (template files + the 2 generated schema files).
+
+    Each config file gets a `$schema` pointer to a freshly GENERATED schema under
+    `<target_dir>/schemas/` (see `_write_generated_schemas`), so editors give
+    autocomplete + typo-highlighting for free. The schema is autocomplete, NOT the
+    correctness gate — `yaah validate` / `lint_pipeline` remain that.
 
     Refuses to overwrite if `target_dir` already exists and is non-empty —
     `yaah init` / `yaah scaffold` must never silently clobber a user's work.
@@ -93,11 +152,19 @@ def scaffold(target_dir: str, archetype: str = "linear") -> int:
         raise FileExistsError(
             "{!r} exists and is not empty — refusing to overwrite".format(target_dir))
     template = load_template(archetype)
+    targets = _schema_targets(template)
     for relpath, content in template.items():
+        schema_name = targets.get(relpath)
+        if schema_name:
+            # ref is relative to the config file's own dir (all archetypes keep
+            # configs at the root, but honor a nested layout too).
+            ref = "../" * relpath.count("/") + "schemas/" + schema_name
+            content = _with_schema_ref(content, ref)
         path = os.path.join(target_dir, relpath)
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(path, "w") as f:
-            f.write(content)
-    return len(template)
+        with open(path, "w", encoding="utf-8") as f:   # templates carry em-dash/arrow; force
+            f.write(content)                            # UTF-8 so a non-UTF-8 locale can't crash
+    written = len(template) + _write_generated_schemas(target_dir)
+    return written

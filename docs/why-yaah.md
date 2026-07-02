@@ -238,7 +238,7 @@ Be honest about these — adopting an engine you don't need is its own cost:
   **compose, not replace** — let YAAH own the graph and keep the platform (e.g. an
   MLflow trace sink, SK agents as nodes).
 - **You need a hosted UI, dataset versioning, or a large integration catalogue
-  today.** YAAH is minimal-first (~6.5k lines, file-based, no hosted anything). It
+  today.** YAAH is minimal-first (~13k lines, zero-dependency core, file-based, no hosted anything). It
   composes with platforms that provide those; it does not replace them.
 
 ---
@@ -257,7 +257,7 @@ Honest comparison — every tool here is good; the question is fit.
 | Stage isolation | **enforced (fresh agent, named carry)** | shared state object | activity boundaries | per-node |
 | Durability / replay | swappable Store (minimal) | checkpointer | **best-in-class** | run history |
 | Ecosystem / UI / integrations | minimal (compose with others) | **large (LangChain/LangSmith)** | large | **Azure-native UI** |
-| Engine size / lock-in | **~6.5k lines, domain-free** | framework | platform | platform |
+| Engine size / lock-in | **~13k lines, zero-dep core, domain-free** | framework | platform | platform |
 
 **Where YAAH clearly wins**
 

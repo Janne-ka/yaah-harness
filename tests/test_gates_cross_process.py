@@ -1,4 +1,4 @@
-"""Cross-PROCESS human gate over a durable FileStore.
+"""Cross-PROCESS human gate over a durable FileBackend.
 
 The payoff of durable state: one OS process suspends a run at a human gate (the
 baton persisted to a file store), a SEPARATE process lists the open gate and

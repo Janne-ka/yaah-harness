@@ -114,6 +114,68 @@ The shipping commit:
   migration completes, a follow-up may flag `json_object` as
   rarely-needed and recommend `parse: true` in its docstring.
 
+## Extension (2026-06-29) — `output_schema` as the contract foothold; toward lintability
+
+Parse-by-default gave the agent a default JSON-extraction step. Two follow-on beats
+turned the optional `output_schema` into the spine of a contract model. The first is
+SHIPPED; the second is PROPOSED and wants its own design pass before any build.
+
+### Shipped — `output_schema` now does three jobs (commit `fe0d56d`; nested recovery pending eval)
+
+1. **Self-validation.** A `parse: true` agent validates its parsed reply against
+   `output_schema` via `yaah.jsonschema.check_schema` — the SAME dependency-free checker
+   the `json_schema` validator node uses, so the validator-path and agent-path can't
+   diverge. Drift (a valid-but-off-contract reply) fails loud with `schema_mismatch`.
+2. **Weak-executor recovery.** `output_schema`'s `required` + typed `properties` drive
+   tolerant recovery in `extract_json(text, keys, schema)`, so a cheap model's
+   not-quite-JSON still satisfies the contract instead of dead-dropping:
+   - Y4 — unquoted KEYS (`{verdict:"FIX"}`);
+   - Y5 — unquoted/bare VALUES, enum members, `type:string` free-form, the
+     one-`key: value`-per-line shape, and bare keys/values INSIDE nested objects/arrays
+     (schema-guided recursion, `max_depth` object levels, default 2).
+   Recovery is schema-GATED and all-or-nothing: it never fabricates a value the schema
+   doesn't sanction. Orchestrated by `HardenedParser` (candidate selection + an ambiguity
+   guard, a decoy-example filter, and a truncation signal).
+3. **(Next) lint** — the same declaration is the foothold for the graph linter below.
+
+Net: `output_schema` moved from "an optional validator you could add" to the per-stage
+OUTPUT CONTRACT — recovery + self-validation today, lint next. Authoring guide for the
+client: [`docs/json-recovery.md`](../json-recovery.md).
+
+### Proposed (NOT built) — lintable typed composition: shape extracted, obligation declared
+
+Goal: `requires`/`provides` typed composition so the topology is statically lintable
+(CHECK-B first: flag a `parse:true` agent with no `output_schema`; then edge-soundness).
+The design that makes "extract from code to stay modifiable" and "lintable" the same
+sentence — captured so it survives a context reset:
+
+- **Contract = SHAPE + OBLIGATION.** Shape (`type`/`enum`/`properties`) is what
+  `check_schema` and mypy already cover. The defensible tier is OBLIGATION — flow-sensitive
+  cross-node rules no type system expresses: `NonEmpty`, "exists only on the success
+  branch", "must exist before the loop guard". This is *why* "types already catch it"
+  does not kill the lint; lose it and yaah slides back to a shape-checker types subsume.
+- **Sourcing: extract where there's code, declare where there's config.** A `transform`
+  node IS typed Python — a decorator registers its input/output model, introspected at
+  import, emitted as contract JSON (shape for free). An `agent` node is config (prompt +
+  authored `output_schema`, no Python body) — its contract stays authored. So two sources,
+  one contract format.
+- **Obligation is declared, never inferred.** A bare signature gives shape, not obligation,
+  so obligations ride as annotations the extractor also reads (`Annotated[str, Required,
+  NonEmpty]`, Field metadata, a small decorator).
+- **Engine stays domain-free.** The extractor is an authoring TOOL that introspects app
+  components and emits JSON; `src/yaah/` only ever consumes JSON contracts and runs the
+  join (cf. [ADR-0001](0001-three-concepts.md); the meta-pipeline is replaceable).
+- **The join is graph DATAFLOW, not set-subset.** Edge-soundness is "on every path reaching
+  B, are B's required keys provided with their obligations satisfied?" — branch/loop-aware.
+  The decorator/extract part is cheap; this analysis is the spine and the real work.
+- **Self-modification surface = the topology, not component internals.** Contracts live in
+  code (trusted, typed substrate); the AI composes via the bounded DATA topology, and the
+  lint proves the wiring sound. Keeps the bounded-mutation edge (the AI-control north-star)
+  intact even though contracts are code-sourced.
+
+Status: PROPOSED. Needs a design pass (obligation vocabulary + dataflow join semantics)
+before build; may graduate to its own ADR when it does.
+
 ## Cross-references
 
 - [`why-not-yaah.md`](../../.notes/why-not-yaah.md) §1.5 — the original

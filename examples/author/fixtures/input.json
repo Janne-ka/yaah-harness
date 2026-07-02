@@ -1,0 +1,4 @@
+{
+  "request": "A two-stage summarize-then-review pipeline with a human gate: an agent summarizes the input text, a human approves or asks for a revision, and the approved summary is rendered to an HTML page.",
+  "out_dir": "generated"
+}

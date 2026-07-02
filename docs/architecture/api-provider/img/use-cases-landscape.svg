@@ -39,7 +39,7 @@
   <text x="56" y="340" font-size="11" font-weight="700" fill="#1a1a1a">4. Capability simplification</text>
   <text x="56" y="358" font-size="10" fill="#666">supports_turn() check goes</text>
   <text x="56" y="370" font-size="10" fill="#666">away — one path everywhere</text>
-  <text x="56" y="388" font-size="9" font-style="italic" fill="#888">unlocks: RoutingBackend cleanup</text>
+  <text x="56" y="388" font-size="9" font-style="italic" fill="#888">unlocks: RoutingProvider cleanup</text>
   <line x1="240" y1="360" x2="318" y2="262" stroke="#5da050" stroke-width="1.2"/>
 
   <!-- Use case 5: Hedge / fan-out (bottom center) -->

@@ -115,7 +115,7 @@ for what's wired today.
 |---|---|
 | `{"type": "memory"}` | Tests + smoke runs only. Lost on restart. |
 | `{"type": "file", "dir": "..."}` | Single-host service. Mount the dir as a volume. Resumes on restart. |
-| Custom durable store | Multi-host: you implement `Store` against Redis / Postgres / DynamoDB / etc. and register it. The protocol is in `src/yaah/store/store.py`. |
+| Custom durable store | Multi-host: you implement `StoreBackend` against Redis / Postgres / DynamoDB / etc. and register it. The protocol is in `src/yaah/store/store.py`. |
 
 The same store backs four things: parked-baton (suspend/resume),
 idempotency (execute-once across retries), envelope buffering

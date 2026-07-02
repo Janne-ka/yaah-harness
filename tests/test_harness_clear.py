@@ -13,7 +13,7 @@ import asyncio
 
 from yaah import Cleared, Envelope, Graph, Harness, InProcessComms, Stage, Suspended
 from yaah.core import Kind, NodeConfig
-from yaah.store import EnvelopeStore, MemoryStore
+from yaah.store import EnvelopeStore, MemoryBackend
 
 
 class Slow:
@@ -53,7 +53,7 @@ async def scenario_harness_clear_resets() -> None:
     # park envelopes + suspend a run, then clear() drops both
     comms = InProcessComms()
     comms.register("role:gate", Gate())
-    es = EnvelopeStore(MemoryStore())
+    es = EnvelopeStore(MemoryBackend())
     await es.save("g:R:a", Envelope(Kind.RESULT, {"n": 1}))
     await es.save("g:R:b", Envelope(Kind.RESULT, {"n": 2}))
     graph = Graph.of(Stage("g", node="role:gate", then=None))

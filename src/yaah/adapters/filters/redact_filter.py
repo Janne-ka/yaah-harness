@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import re
 from typing import Any, List, Optional
+from ...filters import Filter
 
 
-class RedactFilter:
+class RedactFilter(Filter):
     def __init__(self, default_patterns: Optional[List[str]] = None,
                  replacement: str = "[REDACTED]") -> None:
         """Build a RedactFilter.

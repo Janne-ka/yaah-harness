@@ -15,11 +15,11 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from ..core import Envelope, NodeConfig
+from ..core import Node, Envelope, NodeConfig
 from ..cwd import resolve_cwd
 
 
-class PostNode:
+class PostNode(Node):
     def __init__(self, data_sink: Any, key: str, *, field: str = "data",
                  into: str = "stored", cwd_from: Optional[str] = None) -> None:
         if data_sink is None:
@@ -40,4 +40,4 @@ class PostNode:
         handle = await self._sink.store(self._key, input.payload[self._field], **opts)
         payload = dict(input.payload)  # enrich, don't replace — keep run context
         payload[self._into] = handle
-        return input.reply("result", **payload)
+        return input.reply_with("result", payload)

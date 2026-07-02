@@ -33,7 +33,7 @@ from typing import Any, Dict, Optional
 # schemas use the JSON-Schema SUBSET yaah's own validator understands (type,
 # enum, required, properties); `additionalProperties: false` is included for
 # the benefit of consumer skills using a full JSON Schema validator, even though
-# yaah's subset checker (validators._check_schema) does not enforce it.
+# yaah's subset checker (yaah.jsonschema.check_schema) does not enforce it.
 FORMS: Dict[str, Dict[str, Any]] = {
     "approve": {
         "schema": {

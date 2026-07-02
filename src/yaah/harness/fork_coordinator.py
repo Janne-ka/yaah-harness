@@ -276,7 +276,7 @@ class ForkCoordinator:
             ctx.tasks.append(asyncio.ensure_future(
                 self._fanin_coordinator(stage, join, ctx)))
         # PARK the arriving envelope through the one EnvelopeStore utility (memory
-        # default = behaviour-neutral; a durable Store makes it survive + inspectable
+        # default = behaviour-neutral; a durable StoreBackend makes it survive + inspectable
         # + flushable). `arrived` (in-memory) tracks WHICH branches came, for policy.
         await self._envelopes.save("{}:{}".format(join["addr"], branch_id), input)
         join["arrived"].add(branch_id)

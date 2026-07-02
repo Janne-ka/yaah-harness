@@ -16,7 +16,7 @@ node that drove that loop. Phase 1a closes that gap:
   the pipeline author built).
 - `src/yaah/build/builders.py` — `_build_agent_loop` is wired into
   the default registry, so `"type": "agent_loop"` loads.
-- `src/yaah/adapters/backends/fake_tool_backend.py` — scripted
+- `src/yaah/adapters/providers/fake_tool_provider.py` — scripted
   backend that drives the loop with canned turn responses. Proves
   the protocol seam is replaceable.
 - `src/yaah/runtime_factories.py` — `fake_tool` registered as a
@@ -42,7 +42,7 @@ envelope with `answer: "Task complete."`, `turns: 3`,
   author put in the catalog. No MCP discovery, no improvisation.
 - **AI is layered, optional, replaceable** — `agent_loop` lives
   in `nodes/` (protocol-bound, not impl-bound, same layer as
-  `Agent`); FakeToolBackend lives in `adapters/backends/`.
+  `Agent`); FakeToolProvider lives in `adapters/providers/`.
   Engine works without any specific backend.
 - **Compose, don't invent** — tool dispatch reuses `call_target`
   (the same machinery transforms use). No new dispatch concept.
@@ -54,7 +54,7 @@ envelope with `answer: "Task complete."`, `turns: 3`,
 Phase 1a deliberately keeps things small:
 
 - Backend is **scripted-only** (`fake_tool`). A real
-  `claude_cli_backend.stream()` implementation **shipped in 1b**.
+  `claude_cli_provider.stream()` implementation **shipped in 1b**.
 - Tools are `fn:` dispatch only here. `node:`, `http:`, and a
   future `mcp_tool` adapter node would compose without engine
   change.
@@ -69,7 +69,7 @@ Read in this order (~150 lines of new code total):
 1. `src/yaah/nodes/agent_loop_node.py` — the loop body (~100 lines)
 2. `src/yaah/build/builders.py` — `_build_agent_loop` + registration
    (~45 lines added)
-3. `src/yaah/adapters/backends/fake_tool_backend.py` — scripted
+3. `src/yaah/adapters/providers/fake_tool_provider.py` — scripted
    backend (~50 lines, unchanged from spike)
 4. `examples/spike-harness/pipeline.json` — author's declaration
 5. `examples/spike-harness/local.json` — runtime wiring
@@ -82,6 +82,6 @@ all three follow-ons:
 - Provider unification — one streaming `ApiProvider` seam with
   `stream()` as the single required method (the old `ModelBackend`/
   `ToolBackend` Protocols are gone).
-- `claude_cli_backend.stream()` — a real backend driving the loop.
+- `claude_cli_provider.stream()` — a real backend driving the loop.
 - A realistic coding-agent example (read/edit/test on a fixture) —
   see `examples/coding-agent/`.

@@ -14,10 +14,11 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from ..contributor import TraceContributor
 from ..span import Span
 
 
-class CostContributor:
+class CostContributor(TraceContributor):
     name = "cost"
 
     def contribute(self, span: Span) -> Dict[str, Any]:

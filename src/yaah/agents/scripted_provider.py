@@ -1,9 +1,9 @@
-"""ScriptedBackend — a deterministic ApiProvider keyed by model name.
+"""ScriptedProvider — a deterministic ApiProvider keyed by model name.
 
 Used by: multi-stage offline runs (the runtime's `fake_scripted` provider) and
 tests, where each stage needs its own canned output.
 Where: offline pipelines with more than one agent.
-Why: FakeBackend is one shared sequence; this returns per-model sequences, so
+Why: FakeProvider is one shared sequence; this returns per-model sequences, so
 `fake:spec` and `fake:eval` get different canned outputs.
 
 CURSOR (assessment #7 / cluster 3 B2): the turn index is the MAX of two
@@ -22,17 +22,16 @@ gracefully across cross-process resume:
     (drive grill in-process, not via `--resume`).
 
 EXHAUSTION (assessment cluster 3 B2): when the cursor passes the end of the
-sequence, return `self._default` — same shape as FakeBackend, so the offline
+sequence, return `self._default` — same shape as FakeProvider, so the offline
 defaults aren't three answers to one question. Callers wanting loud failure
 pass `on_exhaustion="raise"` (raises IndexError, preserved through the new
 stream protocol because the exception propagates naturally — error events
 are for soft errors; truly exceptional cases raise); `"repeat_last"`
 restores the old behavior.
 
-After B2.2 (provider unification): native ApiProvider. `stream()` is the
-canonical method, `complete()` is a thin wrapper delegating to the module-
-level helper. Both share the same cursor state, so legacy callers and
-new consumers can interleave without surprise.
+A native ApiProvider: `stream()` is its only completion method. Collected-text
+callers go through the module-level `api_provider.complete()` (which drives
+stream()), so there is a single cursor state, no second path to sync.
 
 Targets Python 3.9+.
 """
@@ -40,10 +39,10 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 
-from . import api_provider as _ap
+from .api_provider import ApiProvider, Context, StreamEvent
 
 
-class ScriptedBackend:
+class ScriptedProvider(ApiProvider):
     def __init__(self, by_model: Dict[str, Sequence[str]], default: str = "",
                  *, on_exhaustion: str = "default") -> None:
         if on_exhaustion not in ("default", "raise", "repeat_last"):
@@ -59,10 +58,10 @@ class ScriptedBackend:
         self._default = default
         self._on_exhaustion = on_exhaustion
 
-    def stream(self, context: _ap.Context, **opts: Any) -> AsyncIterator[_ap.StreamEvent]:
+    def stream(self, context: Context, **opts: Any) -> AsyncIterator[StreamEvent]:
         return self._iter(context)
 
-    async def _iter(self, context: _ap.Context) -> AsyncIterator[_ap.StreamEvent]:
+    async def _iter(self, context: Context) -> AsyncIterator[StreamEvent]:
         yield {"type": "start"}
         prompt = _prompt_text(context.get("messages") or [])
         model = context.get("model") or ""
@@ -86,14 +85,11 @@ class ScriptedBackend:
             return seq[turn]
         if self._on_exhaustion == "raise":
             raise IndexError(
-                "ScriptedBackend exhausted for model {!r} (seq has {} entries)"
+                "ScriptedProvider exhausted for model {!r} (seq has {} entries)"
                 .format(model, len(seq)))
         if self._on_exhaustion == "repeat_last":
             return seq[-1]
         return self._default
-
-    async def complete(self, prompt: str, *, model: Optional[str] = None, **opts: Any) -> str:
-        return await _ap.complete(self, prompt, model=model, **opts)
 
 
 def _prompt_text(messages: List[Dict[str, Any]]) -> str:

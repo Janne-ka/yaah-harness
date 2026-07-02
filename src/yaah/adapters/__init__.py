@@ -6,7 +6,7 @@ outside system lives here, grouped by the port it fulfils:
   prompts/     PromptSource — file, http, langfuse         (the engine ships Static/Routing)
   data/        DataSource/Sink — file, git_diff, file_sink (the engine ships Routing)
   mcp/         McpSource    — file                          (the engine ships Static/Routing)
-  stores/      Store        — file                          (the engine ships MemoryStore)
+  stores/      StoreBackend        — file                          (the engine ships MemoryBackend)
 
 The contract (the Protocol / port) lives WITH the engine next to its zero-config
 default; this package holds only the swap-ins. Dependency direction is strict:

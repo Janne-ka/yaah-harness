@@ -18,9 +18,10 @@ import os
 from typing import Any, Dict, Tuple
 
 from ...safepath import safe_join
+from ...prompts import PromptSource
 
 
-class FilePromptSource:
+class FilePromptSource(PromptSource):
     def __init__(self, base_dir: str, ext: str = ".md") -> None:
         self._base = base_dir
         self._ext = ext

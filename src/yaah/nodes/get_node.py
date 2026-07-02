@@ -16,11 +16,11 @@ from __future__ import annotations
 
 from typing import Any, Optional, Sequence
 
-from ..core import Envelope, NodeConfig
+from ..core import Node, Envelope, NodeConfig
 from ..cwd import resolve_cwd
 
 
-class GetNode:
+class GetNode(Node):
     def __init__(self, data_source: Any, key: str, *, into: str = "data",
                  cwd_from: Optional[str] = None, context: Optional[int] = None,
                  paths: Optional[Sequence[str]] = None) -> None:
@@ -45,4 +45,4 @@ class GetNode:
         data = await self._source.fetch(self._key, **opts)
         payload = dict(input.payload)  # enrich, don't replace — keep workdir etc.
         payload[self._into] = data
-        return input.reply("result", **payload)
+        return input.reply_with("result", payload)

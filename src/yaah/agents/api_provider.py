@@ -1,14 +1,16 @@
 """ApiProvider — the streaming model interface.
 
 Used by: call sites that want event-level visibility (token deltas, tool-call
-assembly, usage events) — e.g. run_tool_loop consumes provider.stream()
-directly. Implemented by: every backend natively (FakeBackend, ScriptedBackend,
-FakeToolBackend, ScriptedToolBackend, LiteLLMBackend, ClaudeCliBackend,
-RoutingBackend).
+assembly, usage events) — run_tool_loop consumes provider.stream() directly,
+and Agent.invoke's plain path collects it via complete(). Implemented by: every
+shipped backend natively (FakeProvider, ScriptedProvider, FakeToolProvider,
+ScriptedToolProvider, LiteLLMProvider, ClaudeCliProvider, RoutingProvider).
 Where: the model seam. A backend author implements `stream()` and nothing
 else. Module-level helpers `complete()` and `turn()` project a stream into
 collected-result shapes (a string / a `{text, calls}` dict) for call sites
-that don't want to drain the stream themselves.
+that don't want to drain the stream themselves; both are stream-first with a
+fallback to a collected-only provider's native complete()/turn() (a test
+double or external legacy backend), mirroring run_tool_loop's turn() fallback.
 Why: a collected-result `complete() -> str` / `turn() -> {text|calls}` pair
 can't surface partial outputs, makes streaming backends impossible to wire
 cleanly, and forces the tool-loop to assemble tool calls from whatever ad-hoc
@@ -34,13 +36,11 @@ Content-block shape for AssistantMessage.content (Anthropic-style):
 - {"type": "thinking", "thinking": str}
 - {"type": "tool_use", "id": str, "name": str, "input": dict}
 
-This module is ADDITIVE — no existing code path imports it yet. Migration
-order is documented in `.notes/phase-1-resume-context.md` (B2 onward).
-
 Targets Python 3.9+.
 """
 from __future__ import annotations
 
+from abc import abstractmethod
 from typing import Any, AsyncIterator, Dict, List, Optional, Protocol, runtime_checkable
 
 try:
@@ -133,11 +133,27 @@ class ApiProvider(Protocol):
     Implementations MUST yield a `start` event first and a `done` (or
     `error`) event last. Between them: any number of `text_delta` events
     interleaved with `toolcall_end` events, in the order the provider
-    produces them. Streams that aren't natively streaming (FakeBackend
+    produces them. Streams that aren't natively streaming (FakeProvider
     wrapping a canned string) yield a single `text_delta` with the full
     text, then `done` — consumers shouldn't have to care."""
 
+    @abstractmethod
     def stream(self, context: Context, **opts: Any) -> AsyncIterator[StreamEvent]:
+        ...
+
+
+@runtime_checkable
+class SupportsTurn(Protocol):
+    """OPTIONAL tool-loop capability — a backend that runs one provider-native
+    tool turn (`{text, calls}`) instead of delegating to the engine's tool loop.
+    Kept explicit and separate from ApiProvider because it's optional: claude_cli
+    has NO native turn (it runs its own tool loop), so Agent checks for this
+    capability (`supports_turn`/hasattr) rather than assuming every provider has it.
+    A tool-capable backend declares `class X(ApiProvider, SupportsTurn)`."""
+
+    @abstractmethod
+    async def turn(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]], *,
+                   model: Optional[str] = None, **opts: Any) -> Dict[str, Any]:
         ...
 
 
@@ -187,41 +203,95 @@ async def assemble_message(events: AsyncIterator[StreamEvent]) -> AssistantMessa
     return msg
 
 
+# --- Adapt any provider to a stream -----------------------------------------
+
+def _prompt_of(context: Context) -> str:
+    """The most recent user-role string message — the single-prompt a collected
+    `complete()` expects when we only have a messages list."""
+    for msg in reversed(context.get("messages") or []):
+        if msg.get("role") == "user" and isinstance(msg.get("content"), str):
+            return msg["content"]
+    return ""
+
+
+async def stream_of(provider: Any, context: Context, **opts: Any) -> AsyncIterator[StreamEvent]:
+    """Yield `provider`'s event stream. A provider with a native `stream()` is
+    used as-is; a collected-only provider (just `complete()`/`turn()` — a test
+    double or an external legacy backend, possibly sitting behind a router) is
+    wrapped into a one-shot stream so any stream consumer (assemble_message,
+    RoutingProvider.stream) works against it uniformly.
+
+    `**opts` (incl. the `on_usage` cost callback) is forwarded verbatim: a
+    collected-only provider is expected to accept `**opts` like every shipped
+    backend does, and MAY fire `on_usage` itself to report cost."""
+    if hasattr(provider, "stream"):
+        async for ev in provider.stream(context, **opts):
+            yield ev
+        return
+    yield {"type": "start"}
+    tools = list(context.get("tools") or [])
+    # Prefer turn() whenever the provider has it — even with NO tools: turn
+    # preserves the full message history + system, and run_tool_loop calls it
+    # regardless of empty schemas. (The old `tools and hasattr` guard made a
+    # turn-only provider with no tools fall through to a bare done — an empty
+    # "success" without ever calling the model. Fail-silent is the one thing
+    # this seam must never do.)
+    if hasattr(provider, "turn"):
+        out = await provider.turn(list(context.get("messages") or []), tools,
+                                  model=context.get("model"), **opts) or {}
+        for c in out.get("calls") or []:
+            yield {"type": "toolcall_end", "id": c.get("id", ""),
+                   "name": c.get("name", ""), "args": c.get("args", {}) or {}}
+        if out.get("text"):
+            yield {"type": "text_delta", "delta": out["text"]}
+    elif hasattr(provider, "complete"):
+        if tools:  # complete() can't serve a tool call — dropping them silently
+            # would return prose where the caller expects tool_use blocks
+            raise TypeError(
+                "provider {} has no turn()/stream() — cannot serve a tool-using "
+                "context via complete()".format(type(provider).__name__))
+        text = await provider.complete(_prompt_of(context), model=context.get("model"), **opts)
+        if text:
+            yield {"type": "text_delta", "delta": text}
+    else:
+        raise TypeError("provider {} has none of stream()/turn()/complete()"
+                        .format(type(provider).__name__))
+    yield {"type": "done", "stop_reason": "end_turn"}
+
+
 # --- Module-level helpers (bridge to old return shapes) ---------------------
 
-async def complete(provider: ApiProvider, prompt: str, *,
+async def complete(provider: Any, prompt: str, *,
                    model: Optional[str] = None, system: Optional[str] = None,
                    **opts: Any) -> str:
-    """Collect a stream into a single string (the `complete()` shape).
+    """Collect a model reply into a single string (the `complete()` shape).
 
-    Drives the provider with a one-message user prompt, collects every
-    text block into one string. Migration helper: call sites can swap
-    `backend.complete(prompt)` for `complete(provider, prompt)` without
-    changing the rest of the code."""
+    Routes through `stream_of`, so a collected-only provider (a test double or
+    an external legacy backend) works too — that fallback lives in ONE place."""
     ctx: Context = {"messages": [{"role": "user", "content": prompt}]}
     if system is not None:
         ctx["system"] = system
     if model is not None:
         ctx["model"] = model
-    msg = await assemble_message(provider.stream(ctx, **opts))
+    msg = await assemble_message(stream_of(provider, ctx, **opts))
     return "".join(b.get("text", "") for b in msg.get("content", []) if b.get("type") == "text")
 
 
-async def turn(provider: ApiProvider, messages: List[Dict[str, Any]],
+async def turn(provider: Any, messages: List[Dict[str, Any]],
                tools: List[Dict[str, Any]], *,
                model: Optional[str] = None, system: Optional[str] = None,
                **opts: Any) -> Dict[str, Any]:
-    """Collect a stream into a `{text, calls}` dict (the `turn()` shape).
+    """Collect a model reply into a `{text, calls}` dict (the `turn()` shape).
 
-    Calls are projected from tool_use content blocks into the
-    `{id, name, args}` shape the existing tool-loop expects. Text is
-    joined across any text blocks. Migration helper for the tool-loop."""
+    Routes through `stream_of` (same one-place fallback as `complete()`); calls
+    are projected from tool_use content blocks into the `{id, name, args}` shape
+    the tool-loop expects; text is joined across any text blocks."""
     ctx: Context = {"messages": list(messages), "tools": list(tools)}
     if system is not None:
         ctx["system"] = system
     if model is not None:
         ctx["model"] = model
-    msg = await assemble_message(provider.stream(ctx, **opts))
+    msg = await assemble_message(stream_of(provider, ctx, **opts))
     text_parts: List[str] = []
     calls: List[Dict[str, Any]] = []
     for block in msg.get("content", []):

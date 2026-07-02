@@ -1,6 +1,7 @@
 """The `yaah list --json` mailbox shape.
 
-What it proves: the stable JSON shape `{id, stage, awaiting, concerns, question}`
+What it proves: the stable JSON shape `{id, stage, awaiting, concerns,
+escalation, question}`
 the CLI emits for each suspended baton — the contract a driver skill consumes
 instead of parsing the prose `GATE …` lines. Covers: question lifted from
 `payload['question']` OR `payload['ask']`, null when neither is present, full
@@ -27,6 +28,7 @@ def main() -> None:
     assert j1 == {"id": "b-1", "stage": "review",
                   "awaiting": "human:approve_or_revise",
                   "concerns": [{"by": "schema", "msg": "missing key"}],
+                  "escalation": None,
                   "question": "ship it?"}, j1
 
     # gate that used `ask` instead of `question` (HumanGate's default key)
@@ -48,13 +50,24 @@ def main() -> None:
                concerns=[], pending=None)
     j4 = _baton_json(b4)
     assert j4 == {"id": "b-4", "stage": None, "awaiting": None,
-                  "concerns": [], "question": None}, j4
+                  "concerns": [], "escalation": None, "question": None}, j4
+
+    # gate that escalated after exhausting attempts — the failed verdict folded
+    # onto the parked payload (Y3) surfaces under `escalation`
+    b5 = Baton(id="b-5", stage="audit", awaiting="human:audit",
+               status="suspended", concerns=[],
+               pending=Envelope(Kind.AWAIT, {"escalation": {
+                   "stage": "audit",
+                   "failures": [{"code": "not_ok", "message": "needs ok=true",
+                                 "fix_hint": "set ok=true"}]}}))
+    j5 = _baton_json(b5)
+    assert j5["escalation"]["failures"][0]["code"] == "not_ok", j5
 
     # the contract is the keyset itself — a skill iterating fields must not be
     # surprised by drift
-    assert set(j1.keys()) == {"id", "stage", "awaiting", "concerns", "question"}
+    assert set(j1.keys()) == {"id", "stage", "awaiting", "concerns", "escalation", "question"}
 
-    print("PASS yaah list --json shape: {id, stage, awaiting, concerns, question}")
+    print("PASS yaah list --json shape: {id, stage, awaiting, concerns, escalation, question}")
 
 
 if __name__ == "__main__":

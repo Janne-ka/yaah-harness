@@ -1,9 +1,9 @@
-"""IdempotencyStore — execute-once result cache over a Store (Phase A).
+"""IdempotencyStore — execute-once result cache over a StoreBackend (Phase A).
 
 Used by: OnceNode (yaah.nodes.once_node), which wraps a side-effecting node when
 its config says `idempotent: true`. Built by the runtime from root `state:` and
 handed to builders via BuildContext.
-Where: a typed facade over the Store substrate, namespace 'idem:'.
+Where: a typed facade over the StoreBackend substrate, namespace 'idem:'.
 Why: a retried/replayed side-effecting node (e.g. a git commit, an external POST)
 must run ONCE (early_review #14). This stores the first run's result keyed by the
 envelope's idempotency_key; a later attempt with the same key returns the cached
@@ -20,12 +20,12 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Optional
 
+from .facade import StoreBackedFacade
+from .store import StoreBackend
 
-class IdempotencyStore:
+
+class IdempotencyStore(StoreBackedFacade[StoreBackend]):  # core tier only
     PREFIX = "idem:"
-
-    def __init__(self, store: Any) -> None:  # store: yaah.store.Store (core tier)
-        self._store = store
 
     async def lookup(self, key: str) -> Optional[Dict[str, Any]]:
         """The cached result for `key`, or None if this key hasn't run yet."""
@@ -33,14 +33,11 @@ class IdempotencyStore:
         return json.loads(raw.decode()) if raw is not None else None
 
     async def finalize(self, key: str, result: Dict[str, Any]) -> None:
-        """Record the result of the first (and only) run for `key`. Uses CAS
-        with expected=None (create-if-absent) when the backing store supports
-        it (assessment cluster 2 B4): two concurrent first-runs both called
-        `put` previously, so both wrote and both executed the side effect.
-        With CAS, only the first writer wins; the second `finalize` is a
-        no-op (the cached result is whatever the first writer recorded —
-        callers must lookup() to read it). Stores without `cas` fall back to
-        `put` (Phase A sequential-only guarantee per docs/durable-state.md)."""
+        """Record the first run's result. Uses CAS create-if-absent when the
+        backend supports it, so concurrent first-runs commit exactly one winner
+        (a losing finalize is a no-op; lookup() reads the winner). Core-tier
+        backends fall back to put — sequential-only guarantee, see
+        docs/durable-state.md."""
         encoded = json.dumps(result).encode()
         cas = getattr(self._store, "cas", None)
         if cas is not None:

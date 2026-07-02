@@ -10,34 +10,13 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 import os
-import re
 from typing import Optional, Tuple
 
-from ..core import Envelope, Failure, Kind, NodeConfig, Verdict
-
-_PLACEHOLDER = re.compile(r"{{\s*(\w+)\s*}}")
-
-
-def _fill(template: str, payload: dict) -> Tuple[str, list]:
-    """Fill {{mustache}} placeholders; also return the names with NO payload value.
-    A missing key renders the LITERAL `{{key}}` (unchanged behaviour) — but that
-    silently shipped a broken report/spec at exit 0, the worst fault class. The
-    caller surfaces the unfilled set so it's observable instead of silent."""
-    unfilled: list = []
-
-    def sub(m: "re.Match") -> str:
-        k = m.group(1)
-        if k not in payload:
-            if k not in unfilled:
-                unfilled.append(k)
-            return m.group(0)
-        v = payload[k]
-        return v if isinstance(v, str) else str(v)
-
-    return _PLACEHOLDER.sub(sub, template), unfilled
+from ..core import Node, Envelope, Failure, Kind, NodeConfig, Verdict
+from ..templating import fill as _fill
 
 
-class RenderNode:
+class RenderNode(Node):
     def __init__(self, *, template: Optional[str] = None, template_file: Optional[str] = None,
                  out_path: Optional[str] = None, allow_unfilled: bool = False) -> None:
         if template is None and template_file is None:

@@ -74,7 +74,7 @@ def build(
     base_dir: Optional[str] = None,
     live_config_path: Optional[str] = None,
 ) -> Harness:
-    validate_pipeline(config)
+    validate_pipeline(config, base_path=base_dir)
     comms = comms or InProcessComms()
     registry = registry or default_registry()
     ctx = BuildContext(comms=comms, backend=backend, prompt_source=prompt_source,
@@ -90,13 +90,8 @@ def build(
     # of its mutable leaves (model/knobs/numeric bounds) from the file — edit
     # the committed pipeline, the next invocation picks it up, no restart
     live = LiveLeafConfig(live_config_path) if live_config_path else None
-    for role, spec in config.get("nodes", {}).items():
-        spec = dict(spec)
-        spec["_role"] = role
-        node = _wrap_node(_build_named(registry, spec, ctx, role), spec, ctx)
-        if live is not None:
-            node = LiveConfigNode(node, role, live)
-        register(role, node, _node_config(spec))
+    for role, node, node_cfg in _built_nodes(config, registry, ctx, live):
+        register(role, node, node_cfg)
     return Harness(comms, build_graph(config["graph"]),
                    baton_store=baton_store, envelope_store=envelope_store, tracer=tracer)
 
@@ -111,6 +106,22 @@ def _build_named(registry: Registry, spec: Dict[str, Any], ctx: BuildContext,
         return registry.build(spec, ctx)
     except (KeyError, TypeError, ValueError) as e:
         raise ValueError("node {!r}: {}".format(role, e)) from e
+
+
+def _built_nodes(config: Dict[str, Any], registry: Registry, ctx: BuildContext,
+                 live: Optional[Any], roles: Optional[Any] = None):
+    """Yield (role, wrapped_node, node_config) for each node — the construction that build()
+    (in-process register) and serve_from_config() (serve over the bus) share; each caller then
+    does its own sync/async delivery. `roles`, if given, restricts to a worker's subset."""
+    for role, spec in config.get("nodes", {}).items():
+        if roles is not None and role not in roles:
+            continue
+        spec = dict(spec)
+        spec["_role"] = role
+        node = _wrap_node(_build_named(registry, spec, ctx, role), spec, ctx)
+        if live is not None:
+            node = LiveConfigNode(node, role, live)
+        yield role, node, _node_config(spec)
 
 
 def harness_from_config(config: Dict[str, Any], comms: Comms,
@@ -143,7 +154,7 @@ async def serve_from_config(
     """Worker side: build each node from config and serve it over the bus.
     `roles` optionally restricts which nodes this worker serves. Returns the
     list of served roles."""
-    validate_pipeline(config)
+    validate_pipeline(config, base_path=base_dir)
     registry = registry or default_registry()
     ctx = BuildContext(comms=comms, backend=backend, prompt_source=prompt_source,
                        data_source=data_source, data_sink=data_sink, mcp_source=mcp_source,
@@ -153,15 +164,8 @@ async def serve_from_config(
         raise TypeError("this Comms has no serve_node(); use build() for in-process register()")
     live = LiveLeafConfig(live_config_path) if live_config_path else None
     served = []
-    for role, spec in config.get("nodes", {}).items():
-        if roles is not None and role not in roles:
-            continue
-        spec = dict(spec)
-        spec["_role"] = role
-        node = _wrap_node(_build_named(registry, spec, ctx, role), spec, ctx)
-        if live is not None:
-            node = LiveConfigNode(node, role, live)
-        await serve(role, node, _node_config(spec))
+    for role, node, node_cfg in _built_nodes(config, registry, ctx, live, roles=roles):
+        await serve(role, node, node_cfg)
         served.append(role)
     return served
 

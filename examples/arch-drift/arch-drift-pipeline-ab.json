@@ -8,7 +8,7 @@
                            "model": "claude:claude-sonnet-4-6", "stage": "extract-a",
                            "carry": ["repo_path", "arch_svg_path", "arch_svg_dir", "committed_svg", "committed_svg_path", "snapshot", "feedback"],
                            "attach": ["fn:transforms:UsageAttacher"]},
-    "role:extract-b":    {"type": "agent", "prompt": "file:extract",
+    "role:extract-b":    {"type": "agent", "prompt": "file:extract-haiku",
                            "model": "claude:claude-haiku-4-5", "stage": "extract-b",
                            "carry": ["repo_path", "arch_svg_path", "arch_svg_dir", "committed_svg", "committed_svg_path", "snapshot", "feedback"],
                            "attach": ["fn:transforms:UsageAttacher"]},
@@ -20,10 +20,12 @@
                               "claude-sonnet-4-6": {"in": 3.0, "out": 15.0},
                               "claude-haiku-4-5": {"in": 0.25, "out": 1.25}}}},
 
-    "role:report":       {"type": "render", "template_file": "templates/report-ab.html", "out": "arch-report-ab.html"},
+    "role:report":       {"type": "render", "template_file": "templates/report-ab.html", "out": "diagrams/arch-report-ab.html"},
+    "role:report-stamp": {"type": "transform", "target": "fn:transforms:stamp_report", "call": "envelope"},
+    "role:write-both":   {"type": "transform", "target": "fn:transforms:write_both_candidates", "call": "envelope"},
 
     "role:gate":         {"type": "human_gate",
-                           "ask": "Review arch-report-ab.html (two candidates: A=sonnet, B=haiku). Pick one with {\"decision\":\"approve_a\"} or {\"decision\":\"approve_b\"}, or revise with {\"decision\":\"revise\",\"feedback\":\"...\"}.",
+                           "ask": "Open the report: examples/arch-drift/diagrams/arch-report-ab.html (A=sonnet, B=haiku, with tokens + $ each). To continue, copy the baton_id printed just above this line and run:  yaah resume <your-root.json> <baton_id> decision.json  — where decision.json is {\"decision\":\"approve_a\"} (ship A) / {\"decision\":\"approve_b\"} (ship B) / {\"decision\":\"revise\",\"feedback\":\"...\"}.",
                            "awaiting": "human:arch-review-ab",
                            "form": "json_schema",
                            "decision_schema": {"type": "object",
@@ -57,7 +59,9 @@
                           "then": null},
 
       "prepare":        {"node": "role:prepare", "then": "report"},
-      "report":         {"node": "role:report",  "then": "gate"},
+      "report":         {"node": "role:report",  "then": "report-stamp"},
+      "report-stamp":   {"node": "role:report-stamp", "then": "write-both"},
+      "write-both":     {"node": "role:write-both", "then": "gate"},
 
       "gate":           {"node": "role:gate",
                           "branch": {"on": "decision",

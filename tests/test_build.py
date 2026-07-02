@@ -8,7 +8,7 @@ import asyncio
 import json
 
 from yaah import Done, Envelope
-from yaah.agents import FakeBackend, RoutingBackend
+from yaah.agents import FakeProvider, RoutingProvider
 from yaah.build import build
 
 CONFIG = {
@@ -27,8 +27,8 @@ CONFIG = {
 
 
 async def scenario_build_and_run() -> None:
-    backend = RoutingBackend(
-        {"fake": FakeBackend(responses=['{"x": 1', '{"x": 1}'])}, default="fake"
+    backend = RoutingProvider(
+        {"fake": FakeProvider(responses=['{"x": 1', '{"x": 1}'])}, default="fake"
     )
     harness = build(CONFIG, backend=backend)
     out = await harness.run(Envelope("task", {"task": "go"}))
@@ -103,7 +103,7 @@ async def scenario_base_dir_in_agent_tool_strings() -> None:
             "tools": [{"name": "fetch", "impl": "fn:json:loads",
                        "usage": "Run `bash {base_dir}/tools/fetch.sh`"}]}
     ctx = BuildContext(comms=InProcessComms(),
-                       backend=FakeBackend(responses=["ok"]), base_dir="rel/dir")
+                       backend=FakeProvider(responses=["ok"]), base_dir="rel/dir")
     agent = default_registry().build(spec, ctx)
     want = os.path.abspath("rel/dir")
     assert agent._allowed_tools == ["Bash(bash {}/tools/fetch.sh*)".format(want)], agent._allowed_tools
@@ -111,7 +111,7 @@ async def scenario_base_dir_in_agent_tool_strings() -> None:
 
     try:
         default_registry().build(spec, BuildContext(
-            comms=InProcessComms(), backend=FakeBackend(responses=["ok"])))
+            comms=InProcessComms(), backend=FakeProvider(responses=["ok"])))
         raise AssertionError("expected ValueError for {base_dir} without base_dir")
     except ValueError:
         pass

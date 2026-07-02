@@ -12,14 +12,21 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from ..contributor import TraceContributor
 from ..span import Span
 
 
-class PhaseContributor:
+class PhaseContributor(TraceContributor):
     name = "phase"
 
     def contribute(self, span: Span) -> Dict[str, Any]:
         out: Dict[str, Any] = {"status": span.status, "duration_ms": span.duration_ms}
-        if "stage" in span.attrs:
-            out["stage"] = span.attrs["stage"]
+        # Progress-UX attrs the progress sink renders: the stage name, plus the
+        # suspend context (who/what a park is waiting for, and where its rendered
+        # artifact is). These must reach the projected record, not just sit in
+        # span.attrs — else the inline `awaiting=`/`-> open` lines are dead in real
+        # runs (the sink only sees the record, never the raw span).
+        for k in ("stage", "awaiting", "artifact"):
+            if k in span.attrs:
+                out[k] = span.attrs[k]
         return out

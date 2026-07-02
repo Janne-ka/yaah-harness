@@ -41,5 +41,6 @@ class Stage:
     on_error: Optional[Any] = "clear"  # EVERY node has an error-clearing function; default = "clear":
                                        #   "clear"            → reversible (most nodes): drop this node's state (clear signal + store delete-by-node)
                                        #   {"compensate": T}  → side-effecting: run undo target T (call_target) then propagate
+                                       #       + optional "on_compensate_fail": "error" (default, escalate loud if the undo itself fails) | "warn" (note in trace, tolerate)
                                        #   None               → opt out: fail straight through, no recovery
                                        # Run on TERMINAL failure, then the failure still propagates. clear stays dumb; this composes it.

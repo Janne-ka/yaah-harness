@@ -38,12 +38,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from ..core import Envelope, Kind
+from ..core import Node, Envelope, Kind, NodeConfig
 from ..agents.tool import Tool
 from ..agents.tool_loop import run_tool_loop
 
 
-class AgentLoopNode:
+class AgentLoopNode(Node):
     def __init__(
         self,
         *,
@@ -101,8 +101,8 @@ class AgentLoopNode:
         self._model = model
         self._resolved_system: Optional[str] = None    # lazy-resolved on first invoke
 
-    async def invoke(self, input_envelope: Envelope, config: Dict[str, Any]) -> Envelope:
-        goal = input_envelope.payload.get("goal") or input_envelope.payload.get("input") or ""
+    async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
+        goal = input.payload.get("goal") or input.payload.get("input") or ""
         system = await self._system_text()
         # B8: delegate to the canonical loop. The system prompt becomes a
         # system-role message (OpenAI/Anthropic convention); the goal becomes
@@ -117,10 +117,10 @@ class AgentLoopNode:
             model=self._model,
             max_iters=self._max_turns,
             return_meta=True,
-            corr=input_envelope.correlation_id or "",
+            corr=input.correlation_id or "",
         )
-        return input_envelope.reply_with(Kind.RESULT, {
-            **input_envelope.payload,
+        return input.reply_with(Kind.RESULT, {
+            **input.payload,
             "answer": answer,
             "turns": meta["turns"],
             "outcome": meta["outcome"],

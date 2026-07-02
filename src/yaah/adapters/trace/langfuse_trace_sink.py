@@ -35,6 +35,7 @@ import re
 from typing import Any, Dict, Optional, Set
 
 from ...core import Envelope
+from ...trace import TraceSink
 
 _OTEL_TRACE_ID = re.compile(r"\A[0-9a-f]{32}\Z")
 
@@ -47,7 +48,7 @@ def _trace_context(corr: str) -> Optional[Dict[str, str]]:
     return None
 
 
-class LangfuseTraceSink:
+class LangfuseTraceSink(TraceSink):
     def __init__(self, *, client: Any = None, **client_opts: Any) -> None:
         # `client` is the external dependency, injected for testability: any object
         # exposing the v2 (.trace/.generation/.span) or v4 (.start_observation)

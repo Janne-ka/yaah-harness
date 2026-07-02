@@ -18,13 +18,14 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Awaitable, Callable, Optional
 
+from ...comms import Comms, Subscription
 from ...core import Envelope, Kind, Node, NodeConfig
 
 RequestHandler = Callable[[Envelope], Awaitable[Envelope]]
 EventHandler = Callable[[Envelope], Awaitable[None]]
 
 
-class _NatsSubscription:
+class _NatsSubscription(Subscription):
     """Sync `.cancel()` over a NATS native subscription so the harness can drop
     a subscription the same way it does for InProcessComms/LocalBus (which
     return a `Subscription` dataclass with `.cancel()`). NATS's native
@@ -42,7 +43,7 @@ class _NatsSubscription:
         loop.create_task(self._native.unsubscribe())
 
 
-class NatsComms:
+class NatsComms(Comms):
     def __init__(self, servers: str = "nats://127.0.0.1:4222", *, request_timeout: float = 300.0,
                  connect_timeout: float = 10.0,
                  user: Optional[str] = None, password: Optional[str] = None,
@@ -137,7 +138,7 @@ class NatsComms:
     async def publish(self, topic: str, envelope: Envelope) -> None:
         await self._nc.publish(topic, envelope.to_json().encode())
 
-    async def subscribe(self, topic: str, handler: EventHandler) -> Any:
+    async def subscribe(self, topic: str, handler: EventHandler) -> Subscription:
         async def cb(msg: Any) -> None:
             await handler(Envelope.from_json(msg.data.decode()))
 

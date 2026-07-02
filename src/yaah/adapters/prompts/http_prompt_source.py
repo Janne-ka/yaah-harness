@@ -10,6 +10,7 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 from typing import Any, Awaitable, Callable, Optional
+from ...prompts import PromptSource
 
 # Mirrors external_call's _DEFAULT_HTTP_TIMEOUT (assessment cluster 5 security #1).
 # `httpx.AsyncClient()` defaults to no timeout — a misbehaving prompt server
@@ -18,7 +19,7 @@ from typing import Any, Awaitable, Callable, Optional
 _DEFAULT_TIMEOUT = 30.0
 
 
-class HttpPromptSource:
+class HttpPromptSource(PromptSource):
     def __init__(self, base_url: str, *,
                  fetch: Optional[Callable[..., Awaitable[str]]] = None,
                  timeout: Optional[float] = None, **opts: Any) -> None:

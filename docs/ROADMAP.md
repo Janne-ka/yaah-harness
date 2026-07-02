@@ -27,7 +27,7 @@ connection-state callbacks. Forward work from the same analysis:
   per-stage cursor (crash-between-stages).
 - **RecordingBackend + input snapshot → offline replay** — capture
   `(rendered_prompt, model, opts, completion)` per call + the stage input at
-  failure, so any failed stage becomes a `ScriptedBackend` fixture. Blocked on a
+  failure, so any failed stage becomes a `ScriptedProvider` fixture. Blocked on a
   redaction/retention policy (same reason `reasoning` capture is opt-in).
 - **Baton CAS + graph fingerprint + delete-tombstone** — optimistic-version save
   (double/concurrent resume is a silent lost-update today), a wiring-hash checked

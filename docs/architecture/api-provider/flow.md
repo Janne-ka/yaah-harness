@@ -129,7 +129,7 @@ specific consumers demand them:
 - [`src/yaah/agents/api_provider.py`](../../../src/yaah/agents/api_provider.py)
   — protocol, content blocks, helpers (one file; the `LegacyBackendAdapter`
   shown above was removed in MED-001)
-- [`src/yaah/agents/fake_backend.py`](../../../src/yaah/agents/fake_backend.py)
+- [`src/yaah/agents/fake_provider.py`](../../../src/yaah/agents/fake_provider.py)
   — first backend migrated to native `stream()` (B2.1)
 - [`tests/test_api_provider.py`](../../../tests/test_api_provider.py)
   — helpers + assembly coverage

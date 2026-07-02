@@ -16,9 +16,10 @@ import os
 from typing import Any, Optional
 
 from ...safepath import safe_join
+from ...data import DataSink
 
 
-class FileSink:
+class FileSink(DataSink):
     def __init__(self, base_dir: str = "") -> None:
         self._base = base_dir
 

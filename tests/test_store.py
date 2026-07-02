@@ -1,4 +1,4 @@
-"""Durable state Phase 1: the Store substrate + BatonStore + IdempotencyStore.
+"""Durable state Phase 1: the StoreBackend substrate + BatonStore + IdempotencyStore.
 
 Proves the memory extender's tiers (core/scan/cas), baton (de)serialization +
 sweep + the mailbox view, execute-once via OnceNode, and the headline payoff —
@@ -27,12 +27,38 @@ from yaah import (
 from yaah.harness import BatonStore
 from yaah.harness.baton import Baton
 from yaah.nodes import OnceNode
-from yaah.store import EnvelopeStore, IdempotencyStore, MemoryStore
-from yaah.adapters.stores import FileStore
+from yaah.store import EnvelopeStore, IdempotencyStore, MemoryBackend
+from yaah.adapters.stores import FileBackend
+
+
+def test_facade_rejects_backend_missing_its_tier_at_construction() -> None:
+    # "Validated up front" (store.py docstring): a facade whose verbs need +SCAN
+    # must reject a core-only backend AT CONSTRUCTION — not AttributeError deep
+    # in a baton sweep. This is the extender path the tiers exist for (e.g. a
+    # blob store with no scan).
+    class CoreOnly:  # structural core tier: get/put/delete, no scan
+        async def get(self, key): return None
+        async def put(self, key, value, *, ttl=None): pass
+        async def delete(self, key): pass
+
+    try:
+        EnvelopeStore(CoreOnly())
+    except TypeError as e:
+        assert "ScannableBackend" in str(e) and "CoreOnly" in str(e), e
+    else:
+        raise AssertionError("EnvelopeStore must reject a scan-less backend up front")
+    try:
+        BatonStore(CoreOnly())
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("BatonStore must reject a scan-less backend up front")
+    # IdempotencyStore needs only the core tier — a core-only backend is FINE there.
+    IdempotencyStore(CoreOnly())
 
 
 async def scenario_memory_store() -> None:
-    s = MemoryStore()
+    s = MemoryBackend()
     assert await s.get("a") is None
     await s.put("a", b"1")
     assert await s.get("a") == b"1"
@@ -55,7 +81,7 @@ async def scenario_memory_store() -> None:
 
 
 async def scenario_baton_store() -> None:
-    bs = BatonStore(MemoryStore())
+    bs = BatonStore(MemoryBackend())
     b = Baton(id="x", stage="s", status="suspended", parked_at=0.0, ttl=100.0,
               concerns=[{"code": "c"}], pending=Envelope("result", {"k": 1}))
     await bs.save(b)
@@ -76,10 +102,10 @@ async def scenario_baton_store() -> None:
 
 
 async def scenario_file_store() -> None:
-    """The durable FileStore extender: same tiers as memory, but persisted to disk
+    """The durable FileBackend extender: same tiers as memory, but persisted to disk
     so a SECOND store over the same dir (a fresh process) sees what the first wrote."""
     with tempfile.TemporaryDirectory() as d:
-        s = FileStore(d)
+        s = FileBackend(d)
         await s.put("k", b"v")
         assert await s.get("k") == b"v"
         # keys with ':' and '/' survive the on-disk encoding
@@ -102,7 +128,7 @@ async def scenario_file_store() -> None:
         # the SAME dir (stand-in for a different process)
         await BatonStore(s).save(Baton(id="z", stage="g", status="suspended",
                                        parked_at=0.0, ttl=99.0, awaiting="human:g"))
-        reopened = BatonStore(FileStore(d))
+        reopened = BatonStore(FileBackend(d))
         got = await reopened.load("z")
         assert got is not None and got.awaiting == "human:g", got
         assert [b.id for b in await reopened.list_suspended()] == ["z"]
@@ -120,7 +146,7 @@ class Counter:
 
 async def scenario_idempotency_once() -> None:
     inner = Counter()
-    once = OnceNode(inner, IdempotencyStore(MemoryStore()))
+    once = OnceNode(inner, IdempotencyStore(MemoryBackend()))
     env = Envelope("task", {})
 
     # same key twice -> inner runs ONCE, second call returns the cached output
@@ -163,7 +189,7 @@ async def scenario_cross_instance_resume() -> None:
     comms.register("role:check", OkValidator())
     graph = Graph.of(Stage("g", node="role:stubborn", validators=["role:check"],
                            max_attempts=1, escalate="human"))
-    shared = BatonStore(MemoryStore())
+    shared = BatonStore(MemoryBackend())
 
     a = Harness(comms, graph, baton_store=shared)
     susp = await a.run(Envelope("task", {}))
@@ -178,9 +204,9 @@ async def scenario_cross_instance_resume() -> None:
 
 
 async def scenario_envelope_store() -> None:
-    """The gate-parking utility: save/load/delete/list Envelopes over a Store. The
-    SAME facade works over MemoryStore (here) or FileStore/db (swap the backend)."""
-    es = EnvelopeStore(MemoryStore())
+    """The gate-parking utility: save/load/delete/list Envelopes over a StoreBackend. The
+    SAME facade works over MemoryBackend (here) or FileBackend/db (swap the backend)."""
+    es = EnvelopeStore(MemoryBackend())
     assert await es.load("g:1") is None                       # nothing parked yet
     await es.save("g:1", Envelope("task", {"n": 1}, {"correlation_id": "C"}))
     await es.save("g:2", Envelope("result", {"n": 2}))
@@ -196,10 +222,10 @@ async def scenario_envelope_store() -> None:
     n = await es.flush("g:")
     assert n == 2 and await es.list("g:") == []
 
-    # durable backend, same facade: park on one FileStore, reload on another
+    # durable backend, same facade: park on one FileBackend, reload on another
     with tempfile.TemporaryDirectory() as d:
-        await EnvelopeStore(FileStore(d)).save("p", Envelope("task", {"x": 9}))
-        again = await EnvelopeStore(FileStore(d)).load("p")
+        await EnvelopeStore(FileBackend(d)).save("p", Envelope("task", {"x": 9}))
+        again = await EnvelopeStore(FileBackend(d)).load("p")
         assert again is not None and again.payload == {"x": 9}, again
 
 
@@ -218,7 +244,7 @@ async def scenario_idempotency_does_not_cache_failures() -> None:
     # so a transient error became permanent. Now: only committed successes are
     # cached; a failure return lets the next attempt retry.
     inner = FailingInner()
-    once = OnceNode(inner, IdempotencyStore(MemoryStore()))
+    once = OnceNode(inner, IdempotencyStore(MemoryBackend()))
     env = Envelope("task", {})
     await once.invoke(env, NodeConfig(idempotency_key="kf"))
     await once.invoke(env, NodeConfig(idempotency_key="kf"))
@@ -231,10 +257,10 @@ async def scenario_filestore_cas_under_concurrent_writers() -> None:
     # one update. Under flock, exactly ONE writer wins per round.
     import tempfile
 
-    from yaah.adapters.stores import FileStore
+    from yaah.adapters.stores import FileBackend
 
     with tempfile.TemporaryDirectory() as d:
-        store = FileStore(d)
+        store = FileBackend(d)
         await store.put("k", b"v0")                                    # rev=1 established
 
         async def writer(i: int) -> int:
@@ -254,10 +280,10 @@ async def scenario_idempotency_finalize_uses_cas_when_available() -> None:
     # winner commits.
     import tempfile
 
-    from yaah.adapters.stores import FileStore
+    from yaah.adapters.stores import FileBackend
 
     with tempfile.TemporaryDirectory() as d:
-        store = FileStore(d)
+        store = FileBackend(d)
         idem = IdempotencyStore(store)
         await idem.finalize("k", {"first": True})                      # first writer
         await idem.finalize("k", {"first": False})                     # second is a no-op

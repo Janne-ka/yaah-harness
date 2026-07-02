@@ -28,7 +28,8 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 import difflib
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+import re
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 # Lazy imports for enum tables that depend on third-party modules — pulled inside
 # functions to keep this module cheap to import (validators may run in CI sandboxes).
@@ -49,7 +50,7 @@ _ROOT_KEYS = frozenset({
     "transport", "trace", "state",
     "pipeline", "input",
     "decisions", "interactive", "run", "serve", "baton_ttl",
-    "live_config",
+    "live_config", "plugins",
 })
 
 
@@ -84,8 +85,9 @@ _NAMED_MAP_KEYS = (
 _STRING_KEYS = (
     "default_provider", "default_prompt_source",
     "default_data_source", "default_data_sink", "default_mcp_source",
-    "pipeline",
 )
+# `pipeline` (like `input`) is a path string OR an inline object — the schema,
+# the runtime, and `yaah validate` all accept both; checked separately below.
 _BOOL_KEYS = ("run", "interactive", "live_config")
 
 # Type enums and per-type spec keys are NOT hand-copied here: they are read from
@@ -93,7 +95,7 @@ _BOOL_KEYS = ("run", "interactive", "live_config")
 # lazily via `_factory_tables`. One entry there = enum value + key check here.
 # `_NAMED_MAP_FACTORIES` maps each named-map root key to its factory-map name.
 _NAMED_MAP_FACTORIES = {
-    "providers": "_BACKEND_TYPES",
+    "providers": "_PROVIDER_TYPES",
     "prompt_sources": "_PROMPT_TYPES",
     "data_sources": "_DATA_SOURCE_TYPES",
     "data_sinks": "_DATA_SINK_TYPES",
@@ -137,7 +139,10 @@ def _suggest(bad: str, known: Iterable[str]) -> str:
 
 def _check_top_level_keys(root: Dict[str, Any], errs: List[str]) -> None:
     for k in root:
-        if k.startswith("_") or k in _ROOT_KEYS:
+        # `$schema` is the editor-side autocomplete pointer the scaffold writes
+        # (`yaah init`); it's metadata for the IDE, ignored by the runtime. Allow
+        # it the same way `_`-prefixed comment keys are allowed.
+        if k.startswith("_") or k == "$schema" or k in _ROOT_KEYS:
             continue
         errs.append("unknown top-level key {!r}{}; known: {}".format(
             k, _suggest(k, _ROOT_KEYS), ", ".join(sorted(_ROOT_KEYS))))
@@ -187,6 +192,15 @@ def _check_shapes(root: Dict[str, Any], errs: List[str]) -> None:
     if "input" in root and not isinstance(root["input"], (str, dict)):
         errs.append("'input': expected a fixture path or an inline payload object, got {} {!r}".format(
             type(root["input"]).__name__, root["input"]))
+    pipe = root.get("pipeline")
+    if pipe is not None and not isinstance(pipe, (str, dict)):
+        errs.append("'pipeline': expected a path string or an inline pipeline "
+                    "object, got {} {!r}".format(type(pipe).__name__, pipe))
+    plugins = root.get("plugins")
+    if plugins is not None and not (isinstance(plugins, list)
+                                    and all(isinstance(m, str) and m for m in plugins)):
+        errs.append('`plugins` must be a list of module-path strings '
+                    '(imported before validation; see yaah.plugins)')
     for k in _BOOL_KEYS:
         if k in root and not isinstance(root[k], bool):
             errs.append("{!r}: expected bool, got {} {!r}".format(
@@ -367,6 +381,36 @@ _GRAPH_KEYS = frozenset({"start", "stages", "sticky", "constraints", "note"})
 _CONSTRAINT_KEYS = frozenset({"precedes", "note"})
 
 
+def _check_on_error(stage: str, oe: Any, errs: List[str]) -> None:
+    """Hard-check the `on_error` recovery shape (the contract harness._handle_error
+    executes): "clear" | null | {"compensate": target, "on_compensate_fail"?:
+    "error"|"warn"}. A typo here would otherwise silently DISABLE recovery
+    ("claer" matches no branch — no clear, no compensate, ever) or silently flip
+    the rollback-failure severity ("warning" -> the "error" default). Recovery an
+    author believes is configured must not be a no-op, so this is a load ERROR,
+    not a lint."""
+    if oe == "clear":
+        return
+    if isinstance(oe, dict):
+        target = oe.get("compensate")
+        if not (isinstance(target, str) and target):
+            errs.append("stage {!r}: on_error object needs a non-empty `compensate` "
+                        "target string (fn:/node:/http:)".format(stage))
+        ocf = oe.get("on_compensate_fail", "error")
+        if ocf not in ("error", "warn"):
+            errs.append("stage {!r}: on_compensate_fail must be \"error\" or \"warn\", "
+                        "got {!r}".format(stage, ocf))
+        unknown = sorted(k for k in oe
+                         if k not in ("compensate", "on_compensate_fail", "note")
+                         and not k.startswith("_"))  # note/_* = config comments
+        if unknown:
+            errs.append("stage {!r}: unknown on_error key(s) {}; known: compensate, "
+                        "on_compensate_fail".format(stage, unknown))
+        return
+    errs.append("stage {!r}: on_error must be \"clear\", null, or "
+                "{{\"compensate\": target}}, got {!r}".format(stage, oe))
+
+
 def _successor_edges(stages: Dict[str, Any]) -> Dict[str, set]:
     """stage -> set of possible NEXT stages, from every routing key build_graph
     reads (then, branch routes + default, fork targets). The fanin `expect`
@@ -449,14 +493,18 @@ def _check_constraints(cons: Any, start: Any, stages: Dict[str, Any],
                         "bypassing the required stage".format(i, late, early))
 
 
-def validate_pipeline(config: Dict[str, Any]) -> None:
+def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -> None:
     """Fail fast on a malformed pipeline at BUILD time instead of mid-run. Every
     cross-reference must resolve: graph.start, each `then`, branch routes/default
     → a declared stage; each stage's node, validators, fanout roles → a declared
     node. Every stage key must be known (an unknown key is a silent no-op — the
     sink/sinks bug class). Catches the typo'd `then` (KeyError deep in the loop)
     and the missing node role (LookupError in-proc, silent NATS timeout when
-    distributed) before anything runs. Raises ValueError with every problem found."""
+    distributed) before anything runs. Raises ValueError with every problem found.
+
+    `base_path` (the root config's dir, as `build` passes its `base_dir`) lets the
+    data-flow contract check read `template_file` renders; omit it and a
+    `template_file` edge is left to the runtime's fail-loud instead of guessed at."""
     nodes = set(config.get("nodes", {}))
     g = config.get("graph") or {}
     stages = g.get("stages", {})
@@ -473,6 +521,16 @@ def validate_pipeline(config: Dict[str, Any]) -> None:
                 "node {!r} has no 'type'{} — if this comes from an `_extends` "
                 "overlay, the base pipeline has no such node (stale overlay key "
                 "after a rename/removal?)".format(role, _suggest(role, nodes - {role})))
+            continue
+        # ADR-0005 `provides` (data-flow contract): the keys a node GUARANTEES on the
+        # payload. Required to lint across an envelope-transform (whose output keys are
+        # otherwise opaque), optional elsewhere as an explicit override. Must be a list
+        # of non-empty key strings; the requires↔provides lint reads it.
+        prov = n.get("provides")
+        if prov is not None and (not isinstance(prov, list)
+                                 or not all(isinstance(k, str) and k for k in prov)):
+            errs.append("node {!r}: 'provides' must be a list of non-empty payload-key "
+                        "strings (the keys this node guarantees on the payload)".format(role))
     for k in g:
         if k not in _GRAPH_KEYS and not k.startswith("_"):
             errs.append("graph: unknown key {!r}{}; known: {}".format(
@@ -532,6 +590,8 @@ def validate_pipeline(config: Dict[str, Any]) -> None:
         ci = s.get("concerns_into")
         if ci is not None and not (isinstance(ci, str) and ci):
             errs.append("stage {!r}: concerns_into must be a non-empty payload-key string".format(name))
+        if s.get("on_error"):  # falsy (absent/null/false) = default-or-opt-out, like the harness
+            _check_on_error(name, s["on_error"], errs)
         for k in s:
             if k not in _STAGE_KEYS and not k.startswith("_"):
                 errs.append("stage {!r}: unknown key {!r}; known: {}".format(
@@ -539,80 +599,169 @@ def validate_pipeline(config: Dict[str, Any]) -> None:
     cons = g.get("constraints")
     if cons is not None:
         _check_constraints(cons, start, stages, errs)
-    _check_data_flow_contract(config.get("nodes") or {}, stages, errs)
+    # The data-flow contract (ADR-0005 + ADR-0006 §D5): fail loud at LOAD on a consumer that
+    # reads a key provably ABSENT on a closed path. One analysis, shared with lint_pipeline —
+    # validate takes the ERRORS (here), the lint takes the WARNINGS.
+    from .dataflow import analyze_dataflow
+    df_errors, _ = analyze_dataflow(config.get("nodes") or {}, stages,
+                                    g.get("sticky") or [], g.get("start"), base_path)
+    errs.extend(df_errors)
     if errs:
         raise ValueError("invalid pipeline:\n  - " + "\n  - ".join(errs))
 
 
-def _check_data_flow_contract(
-    nodes_dict: Dict[str, Any],
-    stages: Dict[str, Any],
-    errs: List[str],
-) -> None:
-    """The data-flow contract (AGENTS.md §rules-that-bite): an agent's reply
-    is a STRING in payload['raw']. Nothing merges it until a `transform`
-    with `call: "envelope"` does. So an `agent` stage flowing directly to a
-    `render` stage or a stage with a `branch:` attribute is silent-wrong:
-    render finds {{placeholders}} it cannot fill; branch reads payload keys
-    that were never merged.
+def _augment_provides_from_code(nodes: Dict[str, Any],
+                                resolve: Callable[[Any], Optional[List[str]]]) -> Dict[str, Any]:
+    """Return a shallow copy of `nodes` with `provides` filled in for any UNDECLARED
+    envelope-transform whose fn: target `resolve` maps to keys (ADR-0005 slice D, the
+    @provides decorator read from code). Pure — never mutates the input; a node that
+    resolves to nothing is left untouched, so the lint taints it exactly as before."""
+    out: Dict[str, Any] = {}
+    for role, n in nodes.items():
+        # "undeclared" == provides is not a list — the SAME predicate dataflow._transfer uses,
+        # so a deliberate `provides: []` (declares "adds nothing") counts as declared here too
+        # and is never overridden by code-read keys.
+        if (isinstance(n, dict) and n.get("type") == "transform"
+                and n.get("call") == "envelope" and not isinstance(n.get("provides"), list)):
+            keys = resolve(n.get("target"))
+            if keys:
+                n = dict(n)
+                n["provides"] = list(keys)
+        out[role] = n
+    return out
 
-    This check catches at LOAD what previously surfaced at runtime
-    (the CHECK 8 footgun in the pre-submission rubric)."""
-    for s_name, s in stages.items():
-        s_node_name = s.get("node")
-        if not s_node_name:
+
+def lint_pipeline(config: Dict[str, Any], base_path: Optional[str] = None,
+                  resolve: Optional[Callable[[Any], Optional[List[str]]]] = None) -> List[str]:
+    """Advisory lint over a VALID pipeline config — returns WARNINGS, never raises.
+
+    Catches valid-but-RISKY shapes that otherwise bite deep in a run, each rule traced
+    to a real failure (mailbox M5-r). Distinct from `validate_pipeline` (hard errors):
+    a config can be perfectly valid yet weak enough that a run dies far from the cause.
+    Callers surface these (e.g. `yaah validate` prints them) WITHOUT blocking the run;
+    `yaah validate --strict` fails (exit 2) on any warning for CI.
+
+    `base_path` is the directory the pipeline's `template_file` paths resolve against — the
+    ROOT config's dir, which the runtime passes to `build` as `base_dir` (so it must match
+    `_build_render`'s resolution, NOT the pipeline file's own dir). When omitted, the
+    render-template lint checks only inline `template_text`; a `template_file` it can't
+    locate is skipped, never a false warning.
+
+    `resolve` (ADR-0005 slice D, OPT-IN) maps a transform's `target` to the keys its
+    `@provides`-decorated fn declares, so the lint sees across an envelope-transform without
+    the author writing `provides` in config too. It IMPORTS app code, so it is injected by
+    the caller only on opt-in (`yaah validate --from-code`); the default lint stays pure.
+
+    SCOPE (be honest — a clean lint is NOT "production-safe"): these rules catch CONFIG
+    contract weakness only — they do NOT check transform/agent LOGIC, semantic output
+    correctness, or runtime data values. That's the job of tests, the counterfactual
+    agents, and the followability eval, not the linter."""
+    warnings: List[str] = []
+    nodes = config.get("nodes") or {}
+    if resolve is not None:
+        nodes = _augment_provides_from_code(nodes, resolve)
+    g = config.get("graph") or {}
+    stages = g.get("stages") or {}
+    sticky = g.get("sticky") or []
+    _lint_weak_output_schema(nodes, warnings)
+    _lint_gate_ignores_rejection(nodes, stages, warnings)
+    # ADR-0005 slice B: the broad requires↔provides graph analysis (absorbs the 1a
+    # single-hop render/branch checks as the 1-length-path case). Lives in its own module
+    # (the dataflow lattice + fixpoint are independently testable); imported lazily to keep
+    # this module cheap to import.
+    from .dataflow import analyze_dataflow
+    _, df_warnings = analyze_dataflow(nodes, stages, sticky, g.get("start"), base_path)
+    warnings.extend(df_warnings)
+    return warnings
+
+
+def _lint_weak_output_schema(nodes: Dict[str, Any], warnings: List[str]) -> None:
+    """Rule `weak-output-schema` (M5-r row 3 — the validation wall in lint form). A
+    `parse:true` agent whose `output_schema` REQUIRES keys but does not TYPE them only
+    checks key PRESENCE, so a parseable-but-WRONG value passes `check_schema` and
+    surfaces as a confusing symptom many stages downstream. Declare `type`/`enum` on
+    each required key so bad output is caught at the stage that produced it.
+
+    Known limit (we can't read intent): a `type: string` field is treated as constrained
+    and does NOT warn — even when an `enum` was meant — because a genuine free-form field
+    (a `reason`) legitimately is `type: string`. The rule flags the unambiguous case (a
+    required key with NO type/enum at all), not weak-but-plausible typing."""
+    for role, node in nodes.items():
+        if role.startswith("_") or not isinstance(node, dict):
             continue
-        s_node = nodes_dict.get(s_node_name) or {}
-        if s_node.get("type") != "agent":
+        if node.get("type") != "agent" or node.get("parse") is False:
             continue
-        # ADR-0004: an agent with parse=True (the default) runs extract_json
-        # on its own output and merges parsed keys onto the reply. The
-        # data-flow contract is satisfied by the agent itself; downstream
-        # render/branch find the keys they expect. Only flag when the user
-        # explicitly opts out via parse=False.
-        if s_node.get("parse", True):
+        schema = node.get("output_schema")
+        if not isinstance(schema, dict):
             continue
-        t_name = s.get("then")
-        if t_name is None or t_name not in stages:
-            continue  # terminal or already-flagged by the .then validity check
-        t = stages[t_name]
-        t_node_name = t.get("node")
-        t_node = nodes_dict.get(t_node_name) or {} if t_node_name else {}
-        t_type = t_node.get("type") or ""
-        # Agent → render is silent-wrong: render finds {{placeholders}} it
-        # cannot fill. `allow_unfilled: true` on the render node is the
-        # explicit opt-out for "the raw payload is intentional".
-        if t_type == "render" and not t_node.get("allow_unfilled"):
-            errs.append(
-                "stage {!r} (agent) → stage {!r} (render) with no parse "
-                "between — the agent's reply is a STRING in payload['raw'], "
-                "so `render` finds {{placeholders}} it cannot fill. Insert a "
-                "`transform` stage with `call: \"envelope\"` that parses + "
-                "merges (e.g. `examples/hello-yaah/hello_transforms.py:parse`), "
-                "OR set `allow_unfilled: true` on the render node if the "
-                "unparsed payload is intentional".format(s_name, t_name))
+        # `required`/`properties` may be malformed (e.g. `required: 5`, `properties: [...]`):
+        # validate_pipeline doesn't check output_schema internals, so guard here — the lint
+        # NEVER raises (it's advisory; a bad schema is for the schema validator, not a crash).
+        required = schema.get("required")
+        if not isinstance(required, list):
             continue
-        # Agent → stage-with-branch is silent-wrong WHEN the merging stage's
-        # NODE doesn't itself merge keys onto the payload. Two node types
-        # legitimately merge here and so are exceptions:
-        #   - `transform`: the canonical parse step (the whole point).
-        #   - `human_gate`: the operator's `decision.json` becomes the
-        #     payload's `decision` key during resume; the branch reads what
-        #     the human typed, not the agent's raw.
-        # Anything else (json_object validator, expect_field, render with
-        # branch, another agent, etc.) does NOT merge, so branching on a key
-        # the agent never produced reads as missing → branch.default fires
-        # every time.
-        if t.get("branch") and t_type not in ("transform", "human_gate"):
-            errs.append(
-                "stage {!r} (agent) → stage {!r} (type {!r}) which has a "
-                "`branch:` — the agent's reply is a STRING in payload['raw'], "
-                "and {!r} does not merge keys onto the payload, so `branch.on` "
-                "reads as missing and the run takes `branch.default` every "
-                "time. Insert a `transform` stage with `call: \"envelope\"` "
-                "between them that parses + merges (see `examples/hello-yaah/"
-                "hello_transforms.py:parse` for the canonical shape).".format(
-                    s_name, t_name, t_type or "?", t_type or "?"))
+        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        untyped = [k for k in required
+                   if not isinstance(props.get(k), dict)
+                   or not ("type" in props[k] or "enum" in props[k])]
+        if required and untyped:
+            warnings.append(
+                "node {!r}: output_schema requires {} but leaves {} untyped (no "
+                "type/enum). A parseable-but-wrong value then passes check_schema and "
+                "surfaces far downstream — declare type/enum on each so bad output is "
+                "caught here. [lint: weak-output-schema]".format(role, required, untyped))
+
+
+def _gate_decision_outcomes(node: Dict[str, Any], forms: Dict[str, Any]) -> Optional[int]:
+    """How many values a human_gate's `decision` may take, per its declared form (the built-in
+    catalog, or the inline `decision_schema` for form 'json_schema'). None when the form declares
+    no `decision` enum — free_text (key is `answer`), an unconstrained decision, or no form — so
+    there is nothing to branch on. A count >= 2 means the gate needs the decision routed."""
+    form = node.get("form")
+    if form == "json_schema":
+        schema = node.get("decision_schema")
+    elif isinstance(form, str) and form in forms:
+        schema = forms[form].get("schema")
+    else:
+        return None
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    dec = props.get("decision") if isinstance(props, dict) else None
+    enum = dec.get("enum") if isinstance(dec, dict) else None
+    return len(enum) if isinstance(enum, list) else None
+
+
+def _lint_gate_ignores_rejection(nodes: Dict[str, Any], stages: Dict[str, Any],
+                                 warnings: List[str]) -> None:
+    """Rule `gate-decision-ignored`. A human_gate whose form admits >= 2 decision
+    outcomes (e.g. `approve_or_revise`) is only meaningful if the run ROUTES on `decision` — the
+    harness's `_next_stage` returns `then` whenever a stage has no branch, so with nothing
+    branching on `decision` a non-approve decision is silently ignored (the worst HITL failure).
+
+    Heuristic, hence a WARNING not a load error: the engine can't PROVE the decision is unhandled
+    — a transform could consume it instead of a branch (opaque to the linter). So we only nudge,
+    and we suppress the nudge if ANY stage branches on `decision` (assume it's handled → no false
+    positive). `approve` (one outcome) and `free_text` (no decision) never trigger.
+
+    The suppression is pipeline-wide, so a SECOND gate whose decision goes unrouted is a false
+    negative — acceptable while gates share one `decision` key."""
+    from .harness.decision_forms import FORMS
+    branches_on_decision = any(
+        (s.get("branch") or {}).get("on") == "decision" for s in stages.values())
+    if branches_on_decision:
+        return
+    for name, s in stages.items():
+        node = nodes.get(s.get("node"))
+        if not (isinstance(node, dict) and node.get("type") == "human_gate"):
+            continue
+        outcomes = _gate_decision_outcomes(node, FORMS)
+        if outcomes is not None and outcomes >= 2:
+            warnings.append(
+                "stage {!r}: human_gate form {!r} admits {} decision outcomes, but nothing in "
+                "the pipeline branches on `decision` — every outcome routes to `then`, so a "
+                "non-approve decision is silently ignored. Add `branch: {{\"on\": \"decision\", "
+                "\"routes\": {{...}}}}` on this gate (or confirm a transform consumes the "
+                "decision). [lint: gate-decision-ignored]".format(
+                    name, node.get("form"), outcomes))
 
 
 def validate_budgets(root: Dict[str, Any], pipeline: Dict[str, Any]) -> None:
@@ -671,3 +820,64 @@ def is_fork_config(stage_config: Dict[str, Any], stage_names: set) -> bool:
     the `fork` key (no more target-sniffing); `stage_names` kept for signature
     compatibility."""
     return _is_fork(stage_config, stage_names)
+
+
+# ---------- the whole-config check + its machine-readable diagnostics ---------
+# Shared by the two operator surfaces (`yaah validate [--json]` in cli.py, the
+# MCP `validate` tool in adapters/mcp_server/tools.py) so their diagnostics
+# can never drift — they were hand-copied before, with a "kept in step" comment
+# doing the synchronization.
+
+def validate_config(root: Dict[str, Any], base_path: str,
+                    resolve: Optional[Callable[[Any], Optional[List[str]]]] = None) -> List[str]:
+    """Validate a loaded root AND the pipeline it references — the full check
+    behind `yaah validate` and the MCP `validate` tool. Raises ValueError on the
+    first invalid layer (root, then pipeline); returns the pipeline's lint
+    WARNINGS when everything is valid.
+
+    The one I/O here: `root["pipeline"]` as a string is read as a JSON file
+    relative to `base_path` (the ROOT config's dir — the same base the runtime
+    builds with, so `template_file` lint paths match `_build_render`'s
+    resolution). An inline pipeline dict is validated as-is; an absent/bad
+    `pipeline` key is validate_root's to report. `resolve` is the opt-in
+    `--from-code` @provides resolver, passed through to lint_pipeline."""
+    validate_root(root)
+    pipeline_ref = root.get("pipeline")
+    if isinstance(pipeline_ref, str):
+        from .runtime_factories import _read_json, _rel
+        pipeline_cfg = _read_json(_rel(base_path, pipeline_ref))
+    elif isinstance(pipeline_ref, dict):
+        pipeline_cfg = pipeline_ref
+    else:
+        return []   # no pipeline to check; root validation already vouched for the shape
+    validate_pipeline(pipeline_cfg, base_path=base_path)
+    return lint_pipeline(pipeline_cfg, base_path=base_path, resolve=resolve)
+
+
+def split_diagnostics(exc_text: str) -> List[Dict[str, Any]]:
+    """A validate ValueError's bulleted message as per-item diagnostics:
+    [{message, stage?}]. Best-effort structure — `stage` is extracted where the
+    message follows this module's "stage '<name>': ..." convention (a full
+    code/path taxonomy is a follow-up; it needs per-site changes at every
+    errs.append). The `{ok, errors, warnings}` shapes both operator surfaces
+    emit are built from this."""
+    header, sep, rest = exc_text.partition(":\n  - ")
+    items = rest.split("\n  - ") if sep else [exc_text]
+    out: List[Dict[str, Any]] = []
+    for msg in items:
+        d: Dict[str, Any] = {"message": msg}
+        m = re.match(r"stage '([^']+)':", msg)
+        if m:
+            d["stage"] = m.group(1)
+        out.append(d)
+    return out
+
+
+def split_lint_id(warning: str) -> "Tuple[Optional[str], str]":
+    """A lint warning's (rule_id, message) — the "[lint: id]" trailer every
+    lint_pipeline message carries, parsed HERE because this module owns that
+    format. (None, warning) when there is no trailer."""
+    m = re.search(r"\s*\[lint: ([a-z0-9-]+)\]$", warning)
+    if m:
+        return m.group(1), warning[:m.start()]
+    return None, warning

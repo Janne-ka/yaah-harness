@@ -1,9 +1,9 @@
-"""BatonStore — durable run-state (the resume cursor), over a Store.
+"""BatonStore — durable run-state (the resume cursor), over a StoreBackend.
 
 Used by: Harness (replaces the in-memory `_batons` dict). The default is
-BatonStore(MemoryStore()) = today's behavior; a durable Store extender makes a
+BatonStore(MemoryBackend()) = today's behavior; a durable StoreBackend extender makes a
 parked human gate survive a restart and lets resume() run in ANOTHER process.
-Where: the harness's persistence seam — a typed facade over the yaah.store Store
+Where: the harness's persistence seam — a typed facade over the yaah.store StoreBackend
 substrate, namespace 'baton:'.
 Why: keep the harness ignorant of WHERE state lives. It calls save/load/delete/
 sweep/list; this serializes the Baton to bytes and back. Needs the +SCAN tier
@@ -18,16 +18,15 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 import json
-from typing import Any, List, Optional
+from typing import List, Optional
 
+from ..store import ScannableBackend, StoreBackedFacade
 from .baton import Baton
 
 
-class BatonStore:
+class BatonStore(StoreBackedFacade[ScannableBackend]):  # +SCAN: sweep/list need scan
     PREFIX = "baton:"
-
-    def __init__(self, store: Any) -> None:  # store: yaah.store.Store (+Scannable for sweep/list)
-        self._store = store
+    REQUIRES = ScannableBackend  # checked at construction (fail fast)
 
     async def save(self, baton: Baton) -> None:
         await self._store.put(self.PREFIX + baton.id, json.dumps(baton.to_dict()).encode())

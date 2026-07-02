@@ -1,0 +1,12 @@
+{
+  "_doc": "Canonical root for the authoring meta-pipeline: real claude_cli, parks at the config-review gate for a human decision (resume with `yaah list` / `yaah resume`). For the offline / CI run use author.fake.json (scripted drafts, auto-approve).",
+  "transport": {"type": "inproc"},
+  "providers": {"claude": {"type": "claude_cli"}},
+  "default_provider": "claude",
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "file", "dir": ".author-state"},
+  "pipeline": "author-pipeline.json",
+  "input": "fixtures/input.json",
+  "run": true
+}

@@ -29,3 +29,6 @@ coverage.xml
 # banlist of a consuming app's proper nouns (see docs/contributor/banlist.txt)
 .claude/settings.local.json
 docs/contributor/banlist.local.txt
+
+# internal dogfood (opposer pipeline + its output) — not shipped
+.opposer/

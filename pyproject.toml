@@ -31,7 +31,7 @@ langfuse = ["langfuse>=4"]  # trace sink maps onto the v4 (OTEL) client surface;
                             # the legacy v2 surface is still handled if you pin <3
 http = ["httpx"]           # HttpPromptSource default fetcher
 all = ["litellm", "nats-py", "langfuse>=4", "httpx"]
-dev = ["coverage[toml]"]   # run_tests.py enforces the fail_under floor when present
+dev = ["coverage[toml]", "mypy"]   # run_tests.py enforces the coverage floor; mypy is the contract gate
 
 [project.scripts]
 yaah = "yaah.cli:main"
@@ -82,3 +82,19 @@ exclude_lines = [
     "if TYPE_CHECKING:",
     "\\.\\.\\.",                 # Protocol method bodies (abstract `...`, never run)
 ]
+
+[tool.mypy]
+# Contract typecheck config. Enforced by scripts/run_tests.py as a RATCHET:
+# error count must not exceed scripts/mypy_baseline.txt (lower it as the
+# legacy Any-seam tail is paid down; never raise it).
+# python_version is 3.10 (the floor mypy 2.x supports); the engine's actual 3.9
+# compatibility is validated by running the suite on 3.9, not by this gate.
+python_version = "3.10"
+mypy_path = "src"
+packages = ["yaah"]
+
+[[tool.mypy.overrides]]
+# Optional adapters lazily import third-party libs not installed in the check
+# env; their absence is expected, not a type error.
+module = ["litellm.*", "langfuse.*", "nats.*", "httpx.*"]
+ignore_missing_imports = true

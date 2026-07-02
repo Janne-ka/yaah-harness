@@ -22,10 +22,11 @@ import os
 from typing import Any, Dict, List, Optional
 
 from ...core import Envelope
+from ...trace import TraceSink
 from ...trace.aggregate import aggregate
 
 
-class StatsFileSink:
+class StatsFileSink(TraceSink):
     def __init__(self, path: str, *, price_map: Optional[Dict[str, Any]] = None) -> None:
         self._path = path
         self._price_map = price_map

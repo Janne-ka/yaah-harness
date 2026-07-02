@@ -18,9 +18,10 @@ from typing import Any, Dict, Tuple
 
 from ...mcp import normalize_servers
 from ...safepath import safe_join
+from ...mcp import McpSource
 
 
-class FileMcpSource:
+class FileMcpSource(McpSource):
     def __init__(self, base_dir: str, ext: str = ".json") -> None:
         self._base = base_dir
         self._ext = ext
