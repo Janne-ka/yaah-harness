@@ -357,9 +357,8 @@ class Agent:
                                    schema=self._output_schema)
             except json.JSONDecodeError as e:
                 await self._emit("parse failed: {}".format(e))
-                return Verdict.failed(Failure(
-                    "not_json", "agent output is not valid JSON: {}".format(e),
-                    "return a single JSON object")).to_envelope(input)
+                return Verdict.failed(
+                    Failure.not_json(e, subject="agent output")).to_envelope(input)
             if not isinstance(obj, dict):
                 return Verdict.failed(Failure(
                     "not_object", "agent output top-level is not a JSON object",
@@ -376,9 +375,8 @@ class Agent:
                 errors = check_schema(obj, self._output_schema, "$")
                 if errors:
                     await self._emit("output_schema mismatch: {}".format("; ".join(errors[:3])))
-                    return Verdict.failed(Failure(
-                        "schema_mismatch", "; ".join(errors[:8]),
-                        "match the declared output_schema")).to_envelope(input)
+                    return Verdict.failed(Failure.schema_mismatch(
+                        errors, fix_hint="match the declared output_schema")).to_envelope(input)
             parsed = obj
         # R6 envelope carriage: the drain does NOT happen here. It lives at the
         # serve boundary (CarriageBoundaryNode, applied by build._wrap_node) —

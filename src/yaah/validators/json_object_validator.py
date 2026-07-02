@@ -30,9 +30,7 @@ class JsonObjectValidator:
         try:
             obj = extract_json(raw)
         except json.JSONDecodeError as e:
-            return Verdict.failed(Failure(
-                "not_json", "output is not valid JSON: {}".format(e),
-                "return a single JSON object")).to_envelope(input)
+            return Verdict.failed(Failure.not_json(e)).to_envelope(input)
         if not isinstance(obj, dict):
             return Verdict.failed(Failure(
                 "not_object", "top level is not a JSON object",

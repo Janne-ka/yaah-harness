@@ -43,12 +43,9 @@ class JsonSchemaValidator:
             # (Y5), gated by the schema so nothing is fabricated. No-op if both absent.
             obj = extract_json(raw, keys=self._schema.get("required"), schema=self._schema)
         except json.JSONDecodeError as e:
-            return Verdict.failed(Failure(
-                "not_json", "output is not valid JSON: {}".format(e),
-                "return a single JSON value")).to_envelope(input)
+            return Verdict.failed(
+                Failure.not_json(e, fix_hint="return a single JSON value")).to_envelope(input)
         errors = check_schema(obj, self._schema, "$")
         if errors:
-            return Verdict.failed(Failure(
-                "schema_mismatch", "; ".join(errors[:8]),
-                "match the declared schema")).to_envelope(input)
+            return Verdict.failed(Failure.schema_mismatch(errors)).to_envelope(input)
         return Verdict.passed().to_envelope(input)
