@@ -56,4 +56,4 @@ class ShellNode:
         # any explicitly-carried payload keys (e.g. the spec, on through to code).
         fields.update(carry_cwd(input, self._cwd_from))
         fields.update({k: input.payload[k] for k in self._carry if k in input.payload})
-        return input.reply(Kind.RESULT, **fields)
+        return input.reply_with(Kind.RESULT, fields)

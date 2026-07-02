@@ -64,7 +64,7 @@ class TransformNode:
                                    timeout=config.timeout, reply_to=input)
         payload = dict(input.payload)  # enrich, don't replace — keep run context
         payload[self._into] = result
-        return input.reply("result", **payload)
+        return input.reply_with("result", payload)
 
     async def _invoke_envelope(self, input: Envelope, config: NodeConfig) -> Envelope:
         """The envelope-style realization (subsumes the old python node): call the

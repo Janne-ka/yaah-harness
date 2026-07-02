@@ -650,7 +650,7 @@ class Harness:
         merged_payload.update(results=[res.payload for _, res in outs],
                               roles=[role for role, _ in outs],
                               failed_roles=[role for role, _ in errors])
-        merged = input.reply(Kind.RESULT, **merged_payload)
+        merged = input.reply_with(Kind.RESULT, merged_payload)
         if errors:
             return merged, Verdict.failed(Failure(
                 "fanout_error",

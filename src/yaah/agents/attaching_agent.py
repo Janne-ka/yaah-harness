@@ -55,4 +55,4 @@ class AttachingAgent:
             return result
         # merge over the agent's output payload, attacher keys winning a
         # collision (the attacher's whole point is to add named data)
-        return result.reply(result.kind, **{**result.payload, **attached})
+        return result.reply_with(result.kind, {**result.payload, **attached})

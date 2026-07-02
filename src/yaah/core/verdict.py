@@ -46,7 +46,7 @@ class Verdict:
             ],
         }
         if in_reply_to is not None:  # preserve the correlation chain
-            return in_reply_to.reply(Kind.VERDICT, **payload)
+            return in_reply_to.reply_with(Kind.VERDICT, payload)
         return Envelope(kind=Kind.VERDICT, payload=payload)
 
     @classmethod

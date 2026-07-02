@@ -45,4 +45,4 @@ class GetNode:
         data = await self._source.fetch(self._key, **opts)
         payload = dict(input.payload)  # enrich, don't replace — keep workdir etc.
         payload[self._into] = data
-        return input.reply("result", **payload)
+        return input.reply_with("result", payload)
