@@ -23,10 +23,11 @@ from __future__ import annotations
 from typing import Any
 
 from ..core import Node, Envelope, NodeConfig
+from .tracer import Tracer
 
 
 class CarriageBoundaryNode(Node):
-    def __init__(self, inner: Any, tracer: Any) -> None:
+    def __init__(self, inner: Node, tracer: Tracer) -> None:
         self._inner = inner
         self._tracer = tracer
 

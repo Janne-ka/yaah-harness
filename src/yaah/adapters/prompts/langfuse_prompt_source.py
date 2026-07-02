@@ -11,9 +11,10 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+from ...prompts import PromptSource
 
 
-class LangfusePromptSource:
+class LangfusePromptSource(PromptSource):
     def __init__(self, *, label: Optional[str] = None, client: Any = None,
                  **client_opts: Any) -> None:
         # `client` is the external dependency, injected for testability: any object

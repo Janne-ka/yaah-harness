@@ -10,8 +10,10 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from .prompt_source import PromptSource
 
-class StaticPromptSource:
+
+class StaticPromptSource(PromptSource):
     def __init__(self, prompts: Optional[Dict[str, str]] = None) -> None:
         self._prompts = dict(prompts or {})
 

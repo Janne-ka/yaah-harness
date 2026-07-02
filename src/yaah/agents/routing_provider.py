@@ -24,7 +24,7 @@ from __future__ import annotations
 from typing import Any, AsyncIterator, List, Optional
 
 from ..prefix_router import PrefixRouter
-from . import api_provider as _ap
+from .api_provider import ApiProvider, Context, StreamEvent, SupportsTurn, stream_of
 
 
 # PrefixRouter's generic parameter stays Any: a leaf backend is resolved and
@@ -32,11 +32,11 @@ from . import api_provider as _ap
 # the registry can't be statically typed to one leaf class. The ROUTER itself
 # declares ApiProvider + SupportsTurn — it presents both to Agent (forwards
 # stream to the selected leaf, turn when that leaf supports it).
-class RoutingProvider(PrefixRouter[Any], _ap.ApiProvider, _ap.SupportsTurn):
+class RoutingProvider(PrefixRouter[Any], ApiProvider, SupportsTurn):
     label = "backend"
     prefix = "provider"
 
-    def stream(self, context: _ap.Context, **opts: Any) -> AsyncIterator[_ap.StreamEvent]:
+    def stream(self, context: Context, **opts: Any) -> AsyncIterator[StreamEvent]:
         """Forward an ApiProvider.stream call to the selected provider. Every leaf
         backend implements stream() natively; no capability check needed. The
         context's `model` is rewritten to the post-prefix rest so the leaf sees
@@ -45,11 +45,11 @@ class RoutingProvider(PrefixRouter[Any], _ap.ApiProvider, _ap.SupportsTurn):
         backend, rest = self._select(model)
         # Rebuild the context with the resolved leaf-side model. Use dict() so
         # we don't mutate the caller's context.
-        new_ctx: _ap.Context = dict(context)  # type: ignore[assignment]
+        new_ctx: Context = dict(context)  # type: ignore[assignment]
         new_ctx["model"] = (rest or None)
         # stream_of adapts a collected-only leaf (no native stream(), e.g. an
         # external legacy backend) into a one-shot stream, so routing to it works.
-        return _ap.stream_of(backend, new_ctx, **opts)
+        return stream_of(backend, new_ctx, **opts)
 
     async def turn(self, messages: List[dict], tools: List[dict], *,
                    model: Optional[str] = None, **opts: Any) -> dict:

@@ -17,7 +17,7 @@ from ..prefix_router import PrefixRouter
 from .mcp_source import McpSource
 
 
-class RoutingMcpSource(PrefixRouter[McpSource]):
+class RoutingMcpSource(PrefixRouter[McpSource], McpSource):
     label = "mcp source"
     prefix = "source"
 

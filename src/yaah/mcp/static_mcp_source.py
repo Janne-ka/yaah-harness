@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .mcp_source import normalize_servers
+from .mcp_source import McpSource, normalize_servers
 
 
-class StaticMcpSource:
+class StaticMcpSource(McpSource):
     def __init__(self, configs: Dict[str, Dict[str, Any]]) -> None:
         self._configs = dict(configs)
 

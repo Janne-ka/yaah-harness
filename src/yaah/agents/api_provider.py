@@ -252,20 +252,14 @@ async def complete(provider: Any, prompt: str, *,
                    **opts: Any) -> str:
     """Collect a model reply into a single string (the `complete()` shape).
 
-    Stream-first: assembles the answer from `provider.stream()`. A provider that
-    only implements the collected `complete()` method — a test double, or an
-    external legacy backend — is called directly instead. This is the same
-    stream-first-with-collected-fallback pattern run_tool_loop uses for turn(),
-    so `stream()` is the one contract shipped backends implement while a
-    collected-only provider still works."""
-    if not hasattr(provider, "stream") and hasattr(provider, "complete"):
-        return await provider.complete(prompt, model=model, **opts)
+    Routes through `stream_of`, so a collected-only provider (a test double or
+    an external legacy backend) works too — that fallback lives in ONE place."""
     ctx: Context = {"messages": [{"role": "user", "content": prompt}]}
     if system is not None:
         ctx["system"] = system
     if model is not None:
         ctx["model"] = model
-    msg = await assemble_message(provider.stream(ctx, **opts))
+    msg = await assemble_message(stream_of(provider, ctx, **opts))
     return "".join(b.get("text", "") for b in msg.get("content", []) if b.get("type") == "text")
 
 
@@ -275,18 +269,15 @@ async def turn(provider: Any, messages: List[Dict[str, Any]],
                **opts: Any) -> Dict[str, Any]:
     """Collect a model reply into a `{text, calls}` dict (the `turn()` shape).
 
-    Stream-first, same as `complete()`: assembles from `provider.stream()`, or
-    calls a collected-only provider's native `turn()` directly. Calls are
-    projected from tool_use content blocks into the `{id, name, args}` shape the
-    tool-loop expects; text is joined across any text blocks."""
-    if not hasattr(provider, "stream") and hasattr(provider, "turn"):
-        return await provider.turn(messages, tools, model=model, **opts)
+    Routes through `stream_of` (same one-place fallback as `complete()`); calls
+    are projected from tool_use content blocks into the `{id, name, args}` shape
+    the tool-loop expects; text is joined across any text blocks."""
     ctx: Context = {"messages": list(messages), "tools": list(tools)}
     if system is not None:
         ctx["system"] = system
     if model is not None:
         ctx["model"] = model
-    msg = await assemble_message(provider.stream(ctx, **opts))
+    msg = await assemble_message(stream_of(provider, ctx, **opts))
     text_parts: List[str] = []
     calls: List[Dict[str, Any]] = []
     for block in msg.get("content", []):

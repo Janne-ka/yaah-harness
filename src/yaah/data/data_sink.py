@@ -13,11 +13,13 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
+from abc import abstractmethod
 from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
 class DataSink(Protocol):
+    @abstractmethod
     async def store(self, key: str, value: Any, **opts: Any) -> str:
         """Persist `value` under `key`; return a handle/locator for it."""
         ...

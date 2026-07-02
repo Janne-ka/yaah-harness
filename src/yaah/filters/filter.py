@@ -16,10 +16,12 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
+from abc import abstractmethod
 from typing import Any, Protocol, runtime_checkable
 
 
 @runtime_checkable
 class Filter(Protocol):
+    @abstractmethod
     async def apply(self, value: Any, **params: Any) -> Any:
         ...

@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
-from ...agents import api_provider as _ap
+from ...agents.api_provider import ApiProvider, Context, StreamEvent, SupportsTurn, turn as collect_turn
 
 
 # Agent-plumbing opts that claude-native backends consume but are NOT litellm /
@@ -76,7 +76,7 @@ def _report_usage(on_usage: Optional[Callable[..., Any]], resp: Any, model: Opti
               "model": resp_model or model})
 
 
-class LiteLLMProvider(_ap.ApiProvider, _ap.SupportsTurn):
+class LiteLLMProvider(ApiProvider, SupportsTurn):
     def __init__(self, *, acompletion: Optional[Callable[..., Awaitable[Any]]] = None,
                  **default_opts: Any) -> None:
         # `acompletion` is the one external dependency, injected for testability:
@@ -92,10 +92,10 @@ class LiteLLMProvider(_ap.ApiProvider, _ap.SupportsTurn):
         import litellm  # pragma: no cover - real SDK shim (lazy, integration-only)
         return litellm.acompletion  # pragma: no cover
 
-    def stream(self, context: _ap.Context, **opts: Any) -> AsyncIterator[_ap.StreamEvent]:
+    def stream(self, context: Context, **opts: Any) -> AsyncIterator[StreamEvent]:
         return self._iter(context, opts)
 
-    async def _iter(self, context: _ap.Context, opts: Dict[str, Any]) -> AsyncIterator[_ap.StreamEvent]:
+    async def _iter(self, context: Context, opts: Dict[str, Any]) -> AsyncIterator[StreamEvent]:
         yield {"type": "start"}
         merged = dict(self._default_opts)
         merged.update(opts)
@@ -156,7 +156,7 @@ class LiteLLMProvider(_ap.ApiProvider, _ap.SupportsTurn):
 
     async def turn(self, messages: List[dict], tools: List[dict], *,
                    model: Optional[str] = None, **opts: Any) -> Dict[str, Any]:
-        out = await _ap.turn(self, messages, tools, model=model, **opts)
+        out = await collect_turn(self, messages, tools, model=model, **opts)
         # Legacy LiteLLM turn() contract: always returns either {"calls": [...]}
         # OR {"text": str} — never both, never empty. The module-level helper is
         # more lenient (returns whichever blocks were present); apply the legacy

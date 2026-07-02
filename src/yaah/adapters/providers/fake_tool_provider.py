@@ -23,10 +23,10 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 
-from ...agents import api_provider as _ap
+from ...agents.api_provider import ApiProvider, Context, StreamEvent, SupportsTurn, turn as collect_turn
 
 
-class FakeToolProvider(_ap.ApiProvider, _ap.SupportsTurn):
+class FakeToolProvider(ApiProvider, SupportsTurn):
     def __init__(self, *, turns: Sequence[Dict[str, Any]]) -> None:
         # Each turn is one of:
         #   {"text": "..."}                        -> final answer
@@ -35,10 +35,10 @@ class FakeToolProvider(_ap.ApiProvider, _ap.SupportsTurn):
         self._turns: List[Dict[str, Any]] = list(turns)
         self._cursor = 0
 
-    def stream(self, context: _ap.Context, **opts: Any) -> AsyncIterator[_ap.StreamEvent]:
+    def stream(self, context: Context, **opts: Any) -> AsyncIterator[StreamEvent]:
         return self._iter()
 
-    async def _iter(self) -> AsyncIterator[_ap.StreamEvent]:
+    async def _iter(self) -> AsyncIterator[StreamEvent]:
         yield {"type": "start"}
         if self._cursor >= len(self._turns):
             # Out of script — yield a synthetic final so the loop terminates cleanly.
@@ -64,4 +64,4 @@ class FakeToolProvider(_ap.ApiProvider, _ap.SupportsTurn):
                    model: Optional[str] = None, **opts: Any) -> Dict[str, Any]:
         # Kept as the tool-capability marker (Agent._supports_turn keys on `turn`);
         # the body delegates to the stream bridge like every collected shape.
-        return await _ap.turn(self, messages, tools, model=model, **opts)
+        return await collect_turn(self, messages, tools, model=model, **opts)

@@ -18,7 +18,7 @@ from .live_leaf_config import LiveLeafConfig
 
 
 class LiveConfigNode(Node):
-    def __init__(self, inner: object, role: str, live: LiveLeafConfig) -> None:
+    def __init__(self, inner: Node, role: str, live: LiveLeafConfig) -> None:
         self._inner = inner
         self._role = role
         self._live = live

@@ -17,7 +17,7 @@ from ..prefix_router import PrefixRouter
 from .data_sink import DataSink
 
 
-class RoutingDataSink(PrefixRouter[DataSink]):
+class RoutingDataSink(PrefixRouter[DataSink], DataSink):
     label = "data sink"
     prefix = "sink"
 

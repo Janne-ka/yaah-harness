@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Awaitable, Callable, List, Optional, Sequence
+from ...data import DataSource
 
 
-class GitDiffSource:
+class GitDiffSource(DataSource):
     def __init__(self, *, repo: Optional[str] = None, context: int = 3,
                  intent_to_add: bool = False, timeout: Optional[float] = None,
                  spawn: Optional[Callable[..., Awaitable[Any]]] = None) -> None:

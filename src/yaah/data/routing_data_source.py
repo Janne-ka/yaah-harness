@@ -17,7 +17,7 @@ from ..prefix_router import PrefixRouter
 from .data_source import DataSource
 
 
-class RoutingDataSource(PrefixRouter[DataSource]):
+class RoutingDataSource(PrefixRouter[DataSource], DataSource):
     label = "data source"
     prefix = "source"
 

@@ -35,7 +35,7 @@ import os
 import re
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Sequence
 
-from ...agents import api_provider as _ap
+from ...agents.api_provider import ApiProvider, Context, StreamEvent
 
 # Config-named-executable trust (BUG-629: an env-var-named binary was executed
 # with --allow-dangerously-skip-permissions). The binary is config — and config
@@ -106,7 +106,7 @@ def _validate_extra_args(extra_args: Sequence[str], allow_dangerous: bool) -> Li
     return args
 
 
-class ClaudeCliProvider(_ap.ApiProvider):
+class ClaudeCliProvider(ApiProvider):
     def __init__(
         self,
         *,
@@ -159,10 +159,10 @@ class ClaudeCliProvider(_ap.ApiProvider):
         args += self._extra_args
         return args
 
-    def stream(self, context: _ap.Context, **opts: Any) -> AsyncIterator[_ap.StreamEvent]:
+    def stream(self, context: Context, **opts: Any) -> AsyncIterator[StreamEvent]:
         return self._iter(context, opts)
 
-    async def _iter(self, context: _ap.Context, opts: Dict[str, Any]) -> AsyncIterator[_ap.StreamEvent]:
+    async def _iter(self, context: Context, opts: Dict[str, Any]) -> AsyncIterator[StreamEvent]:
         """B3 (2026-06-23): real `--output-format stream-json` parsing. Spawns
         claude with --verbose --output-format stream-json, writes the prompt
         to stdin, reads stdout line-by-line as JSONL, maps each claude event

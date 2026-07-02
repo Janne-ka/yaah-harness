@@ -16,19 +16,19 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator, List, Optional, Sequence
 
-from . import api_provider as _ap
+from .api_provider import ApiProvider, Context, StreamEvent
 
 
-class FakeProvider(_ap.ApiProvider):
+class FakeProvider(ApiProvider):
     def __init__(self, responses: Optional[Sequence[str]] = None, default: str = "") -> None:
         self._responses: List[str] = list(responses or [])
         self._default = default
         self._i = 0
 
-    def stream(self, context: _ap.Context, **opts: Any) -> AsyncIterator[_ap.StreamEvent]:
+    def stream(self, context: Context, **opts: Any) -> AsyncIterator[StreamEvent]:
         return self._iter()
 
-    async def _iter(self) -> AsyncIterator[_ap.StreamEvent]:
+    async def _iter(self) -> AsyncIterator[StreamEvent]:
         yield {"type": "start"}
         if self._i < len(self._responses):
             text = self._responses[self._i]

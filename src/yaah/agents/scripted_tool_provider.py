@@ -25,10 +25,10 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator, List, Optional, Sequence
 
-from . import api_provider as _ap
+from .api_provider import ApiProvider, Context, StreamEvent, SupportsTurn, turn as collect_turn
 
 
-class ScriptedToolProvider(_ap.ApiProvider, _ap.SupportsTurn):
+class ScriptedToolProvider(ApiProvider, SupportsTurn):
     def __init__(self, turns: Sequence[dict], default: str = "",
                  *, on_exhaustion: str = "default") -> None:
         if on_exhaustion not in ("default", "raise", "repeat_last"):
@@ -41,10 +41,10 @@ class ScriptedToolProvider(_ap.ApiProvider, _ap.SupportsTurn):
         self._default = default
         self._on_exhaustion = on_exhaustion
 
-    def stream(self, context: _ap.Context, **opts: Any) -> AsyncIterator[_ap.StreamEvent]:
+    def stream(self, context: Context, **opts: Any) -> AsyncIterator[StreamEvent]:
         return self._iter()
 
-    async def _iter(self) -> AsyncIterator[_ap.StreamEvent]:
+    async def _iter(self) -> AsyncIterator[StreamEvent]:
         yield {"type": "start"}
         spec = self._next_turn()  # may raise IndexError on exhaustion='raise'
         text = spec.get("text")
@@ -78,4 +78,4 @@ class ScriptedToolProvider(_ap.ApiProvider, _ap.SupportsTurn):
                    model: Optional[str] = None, **opts: Any) -> dict:
         # Kept as the tool-capability marker (Agent._supports_turn keys on `turn`);
         # the body delegates to the stream bridge like every collected shape.
-        return await _ap.turn(self, messages, tools, model=model, **opts)
+        return await collect_turn(self, messages, tools, model=model, **opts)

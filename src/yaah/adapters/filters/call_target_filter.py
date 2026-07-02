@@ -17,9 +17,10 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from ...external_call import call_target
+from ...filters import Filter
 
 
-class CallTargetFilter:
+class CallTargetFilter(Filter):
     def __init__(self, target: str, *, comms: Optional[Any] = None) -> None:
         """Wrap a `fn:`/`node:`/`http:` target as a Filter.
 

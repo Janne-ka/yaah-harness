@@ -19,8 +19,16 @@ from yaah.agents import (
 from yaah.agents.api_provider import SupportsTurn
 from yaah.agents.agent import Agent
 from yaah.agents.attaching_agent import AttachingAgent
+from yaah.adapters.data import FileDataSource, FileSink, GitDiffSource
+from yaah.adapters.filters import AroundKeywordFilter, CallTargetFilter, RedactFilter
+from yaah.adapters.mcp import FileMcpSource
+from yaah.adapters.prompts import FilePromptSource, HttpPromptSource, LangfusePromptSource
 from yaah.adapters.providers import ClaudeCliProvider, FakeToolProvider, LiteLLMProvider
 from yaah.adapters.stores import FileBackend
+from yaah.data import DataSink, DataSource, RoutingDataSink, RoutingDataSource
+from yaah.filters import Filter
+from yaah.mcp import McpSource, RoutingMcpSource, StaticMcpSource
+from yaah.prompts import PromptSource, RoutingPromptSource, StaticPromptSource
 from yaah.adapters.trace import (
     ConsoleTraceSink, FileTraceSink, LangfuseTraceSink, ProgressFileSink, StatsFileSink,
 )
@@ -65,12 +73,19 @@ PORTS = {
     TraceSink: [ConsoleTraceSink, FileTraceSink, LangfuseTraceSink, ProgressFileSink,
                 StatsFileSink],
     TraceContributor: [CostContributor, PhaseContributor, ToolsContributor],
+    PromptSource: [StaticPromptSource, FilePromptSource, HttpPromptSource,
+                   LangfusePromptSource, RoutingPromptSource],
+    DataSource: [FileDataSource, GitDiffSource, RoutingDataSource],
+    DataSink: [FileSink, RoutingDataSink],
+    McpSource: [StaticMcpSource, FileMcpSource, RoutingMcpSource],
+    Filter: [AroundKeywordFilter, CallTargetFilter, RedactFilter],
 }
 
 # Ports whose abstract methods make an empty declared subclass unbuildable.
 # (StoreBackedFacade is a concrete base, not a Protocol — excluded.)
 ENFORCED = [Node, ApiProvider, SupportsTurn, StoreBackend, Scannable, CompareAndSet,
-            Comms, Subscription, Tracer, TraceSink, TraceContributor]
+            Comms, Subscription, Tracer, TraceSink, TraceContributor,
+            PromptSource, DataSource, DataSink, McpSource, Filter]
 
 # claude_cli deliberately has NO native turn() (it runs its own tool loop) —
 # the capability must read as ABSENT both nominally and structurally.

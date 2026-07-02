@@ -18,7 +18,7 @@ from ..prefix_router import PrefixRouter
 from .prompt_source import PromptSource
 
 
-class RoutingPromptSource(PrefixRouter[PromptSource]):
+class RoutingPromptSource(PrefixRouter[PromptSource], PromptSource):
     label = "prompt source"
     prefix = "source"
 

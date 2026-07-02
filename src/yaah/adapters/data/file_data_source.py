@@ -13,9 +13,10 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from ...safepath import safe_join
+from ...data import DataSource
 
 
-class FileDataSource:
+class FileDataSource(DataSource):
     def __init__(self, base_dir: str = "") -> None:
         self._base = base_dir
 

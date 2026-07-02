@@ -105,7 +105,7 @@ _RESERVED_REPLY_KWARGS = frozenset({"raw"})
 class Agent(Node):
     def __init__(
         self,
-        backend: Any,
+        backend: _ap.ApiProvider,
         template: Optional[str] = None,
         *,
         prompt_source: Optional[Any] = None,   # a yaah.prompts.PromptSource
