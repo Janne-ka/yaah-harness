@@ -15,21 +15,35 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from typing import AsyncIterator, Optional, Protocol, Tuple, runtime_checkable
+from abc import abstractmethod
+from typing import AsyncGenerator, Optional, Protocol, Tuple, runtime_checkable
+
+# The tier methods are @abstractmethod so a class that DECLARES a tier
+# (`class MemoryStore(Store, Scannable, CompareAndSet)`) can't be instantiated
+# unless it implements every method — a visible, runtime-enforced contract.
+# Structural conformance still works for an impl that doesn't inherit the tier.
 
 
 @runtime_checkable
 class Store(Protocol):
     """CORE tier — every extender provides this (enough for working-memory get/post)."""
+    @abstractmethod
     async def get(self, key: str) -> Optional[bytes]: ...
+    @abstractmethod
     async def put(self, key: str, value: bytes, *, ttl: Optional[float] = None) -> None: ...
+    @abstractmethod
     async def delete(self, key: str) -> None: ...
 
 
 @runtime_checkable
 class Scannable(Protocol):
     """+SCAN tier — list by key prefix; needed for the baton sweep and the mailbox view."""
-    def scan(self, prefix: str) -> AsyncIterator[Tuple[str, bytes]]: ...
+    @abstractmethod
+    def scan(self, prefix: str) -> AsyncGenerator[Tuple[str, bytes], None]:
+        # AsyncGenerator (not AsyncIterator): the impl MUST be an async generator
+        # (`async def ... yield`); a sync generator would satisfy AsyncIterator's
+        # name check but crash at `async for`. This makes the required shape explicit.
+        ...
 
 
 @runtime_checkable
@@ -37,6 +51,8 @@ class CompareAndSet(Protocol):
     """+CAS tier — atomic write-if-unchanged; needed only for distributed single-owner
     resume and concurrent-replica idempotency. `expected` is the revision the caller
     last saw (None = create-if-absent); returns the new revision, or None on conflict."""
+    @abstractmethod
     async def get_rev(self, key: str) -> Tuple[Optional[bytes], Optional[int]]: ...
+    @abstractmethod
     async def cas(self, key: str, value: bytes, *, expected: Optional[int],
                   ttl: Optional[float] = None) -> Optional[int]: ...
