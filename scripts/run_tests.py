@@ -59,9 +59,21 @@ def _mypy_ratchet(env: dict) -> int:
               "(pip install mypy to enforce it).")
         return 0
     baseline_file = os.path.join(HERE, "mypy_baseline.txt")
-    baseline = int(open(baseline_file).read().strip())
+    try:
+        baseline = int(open(baseline_file).read().strip())
+    except (OSError, ValueError) as e:
+        print("FAIL: mypy baseline unreadable ({}): {} — restore it (an int, e.g. "
+              "the last committed value); do NOT skip the gate.".format(baseline_file, e))
+        return 1
     r = subprocess.run([sys.executable, "-m", "mypy"], cwd=ROOT, env=env,
                        capture_output=True, text=True)
+    # rc 0 = clean, 1 = type errors found (counted below). Anything else is mypy
+    # itself failing (bad config, crash) — that must FAIL the gate, not count as
+    # zero errors and invite a baseline wipe.
+    if r.returncode not in (0, 1):
+        print("FAIL: mypy exited {} (not a type-error result). stderr:\n{}"
+              .format(r.returncode, r.stderr[-2000:]))
+        return 1
     count = sum(1 for line in r.stdout.splitlines() if ": error:" in line)
     if count > baseline:
         print("FAIL: mypy errors went {} -> {} (baseline {}). New type errors:"

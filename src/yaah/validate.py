@@ -399,7 +399,9 @@ def _check_on_error(stage: str, oe: Any, errs: List[str]) -> None:
         if ocf not in ("error", "warn"):
             errs.append("stage {!r}: on_compensate_fail must be \"error\" or \"warn\", "
                         "got {!r}".format(stage, ocf))
-        unknown = sorted(set(oe) - {"compensate", "on_compensate_fail"})
+        unknown = sorted(k for k in oe
+                         if k not in ("compensate", "on_compensate_fail", "note")
+                         and not k.startswith("_"))  # note/_* = config comments
         if unknown:
             errs.append("stage {!r}: unknown on_error key(s) {}; known: compensate, "
                         "on_compensate_fail".format(stage, unknown))
@@ -587,7 +589,7 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
         ci = s.get("concerns_into")
         if ci is not None and not (isinstance(ci, str) and ci):
             errs.append("stage {!r}: concerns_into must be a non-empty payload-key string".format(name))
-        if s.get("on_error") is not None:  # absent -> default "clear"; null -> opt out
+        if s.get("on_error"):  # falsy (absent/null/false) = default-or-opt-out, like the harness
             _check_on_error(name, s["on_error"], errs)
         for k in s:
             if k not in _STAGE_KEYS and not k.startswith("_"):

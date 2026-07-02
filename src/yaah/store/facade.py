@@ -25,10 +25,16 @@ class StoreBackedFacade(Generic[B]):
     REQUIRES: type = StoreBackend
 
     def __init__(self, backend: B) -> None:
-        if not isinstance(backend, self.REQUIRES):
+        # Checked by METHOD PRESENCE (the tier protocols' abstract methods), not
+        # isinstance: since 3.12 runtime_checkable isinstance uses getattr_static,
+        # which rejects working __getattr__-delegating proxies (a legit wrapper
+        # pattern for plugin backends) and made accept/reject version-skewed.
+        missing = [m for m in sorted(getattr(self.REQUIRES, "__abstractmethods__", ()))
+                   if not callable(getattr(backend, m, None))]
+        if missing:
             raise TypeError(
-                "{} needs a {} backend; {} does not provide that tier "
+                "{} needs a {} backend; {} does not provide {} "
                 "(see docs/durable-state.md)".format(
                     type(self).__name__, self.REQUIRES.__name__,
-                    type(backend).__name__))
+                    type(backend).__name__, "/".join(missing)))
         self._store: B = backend

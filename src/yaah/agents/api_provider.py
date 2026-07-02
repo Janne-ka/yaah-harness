@@ -229,9 +229,15 @@ async def stream_of(provider: Any, context: Context, **opts: Any) -> AsyncIterat
             yield ev
         return
     yield {"type": "start"}
-    tools = context.get("tools")
-    if tools and hasattr(provider, "turn"):
-        out = await provider.turn(list(context.get("messages") or []), list(tools),
+    tools = list(context.get("tools") or [])
+    # Prefer turn() whenever the provider has it — even with NO tools: turn
+    # preserves the full message history + system, and run_tool_loop calls it
+    # regardless of empty schemas. (The old `tools and hasattr` guard made a
+    # turn-only provider with no tools fall through to a bare done — an empty
+    # "success" without ever calling the model. Fail-silent is the one thing
+    # this seam must never do.)
+    if hasattr(provider, "turn"):
+        out = await provider.turn(list(context.get("messages") or []), tools,
                                   model=context.get("model"), **opts) or {}
         for c in out.get("calls") or []:
             yield {"type": "toolcall_end", "id": c.get("id", ""),
@@ -239,9 +245,17 @@ async def stream_of(provider: Any, context: Context, **opts: Any) -> AsyncIterat
         if out.get("text"):
             yield {"type": "text_delta", "delta": out["text"]}
     elif hasattr(provider, "complete"):
+        if tools:  # complete() can't serve a tool call — dropping them silently
+            # would return prose where the caller expects tool_use blocks
+            raise TypeError(
+                "provider {} has no turn()/stream() — cannot serve a tool-using "
+                "context via complete()".format(type(provider).__name__))
         text = await provider.complete(_prompt_of(context), model=context.get("model"), **opts)
         if text:
             yield {"type": "text_delta", "delta": text}
+    else:
+        raise TypeError("provider {} has none of stream()/turn()/complete()"
+                        .format(type(provider).__name__))
     yield {"type": "done", "stop_reason": "end_turn"}
 
 

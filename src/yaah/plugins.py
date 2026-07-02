@@ -87,6 +87,9 @@ def register_type(kind: str, name: str, factory: Factory, *,
         raise ValueError(
             "{} type {!r} is already registered — a plugin must not silently "
             "replace an existing type; pick another name".format(kind, name))
+    if isinstance(spec_keys, str):   # frozenset("url") would mean per-CHARACTER keys
+        raise ValueError("spec_keys must be a list/set of key names, not a string "
+                         "(got {!r})".format(spec_keys))
     keys = frozenset(spec_keys) if spec_keys is not None else None
     type_map[name] = (factory, keys)
 
@@ -112,9 +115,22 @@ def load_plugins(modules: Any, base: str) -> None:
     import sys
     if base and base not in sys.path:
         sys.path.insert(0, base)   # same convention as fn: targets (cli does this too)
+    import os
     for mod in modules:
         try:
-            importlib.import_module(mod)
+            m = importlib.import_module(mod)
         except Exception as e:
             raise ValueError("plugins: failed to load {!r}: {}: {}".format(
                 mod, type(e).__name__, e)) from e
+        # Shadow check: if the config dir ships <mod>.py but the import resolved
+        # elsewhere (stdlib/already-imported name, e.g. a plugin file named
+        # json.py), the author's file NEVER RAN — that must be loud, not a
+        # "plugins imported" note over dead registrations.
+        local = os.path.join(base, mod.split(".")[0] + ".py")
+        got = getattr(m, "__file__", None)
+        if os.path.exists(local) and (got is None or
+                                      os.path.abspath(got) != os.path.abspath(local)):
+            raise ValueError(
+                "plugins: {!r} resolved to {} — NOT your {} (the name is already "
+                "taken by an installed/stdlib module, so your file never ran). "
+                "Rename the extension module.".format(mod, got or "a builtin", local))

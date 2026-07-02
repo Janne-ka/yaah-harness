@@ -82,6 +82,42 @@ def test_stream_of_wraps_collected_only_tool_backend():
     assert events[2]["delta"] == "done"
 
 
+def test_stream_of_turn_only_provider_without_tools_still_calls_the_model():
+    # REGRESSION (bug hunt): a turn-only collected provider + NO tools used to
+    # fall through both fallback arms -> empty "success" WITHOUT calling the
+    # model. turn() must be called whenever present, tools or not.
+    calls = []
+    class TurnOnly:
+        async def turn(self, messages, tools, *, model=None, **opts):
+            calls.append((messages, tools))
+            return {"text": "answered"}
+    out = asyncio.run(complete(TurnOnly(), "the prompt"))
+    assert out == "answered" and len(calls) == 1, (out, calls)
+    assert calls[0][1] == [], "no tools -> turn still called with an empty list"
+
+
+def test_stream_of_fails_loud_on_capability_mismatch():
+    class CompleteOnly:
+        async def complete(self, prompt, *, model=None, **opts):
+            return "prose"
+    ctx = {"messages": [{"role": "user", "content": "go"}],
+           "tools": [{"name": "read", "description": "", "input_schema": {}}]}
+    async def _drain(be):
+        return [e async for e in stream_of(be, ctx)]
+    try:
+        asyncio.run(_drain(CompleteOnly()))   # tools need turn(); dropping them = wrong prose
+        raise AssertionError("complete-only + tools must fail loud")
+    except TypeError as e:
+        assert "turn" in str(e), e
+    class NoVerbs:
+        pass
+    try:
+        asyncio.run(_drain(NoVerbs()))
+        raise AssertionError("a verb-less provider must fail loud")
+    except TypeError as e:
+        assert "stream" in str(e), e
+
+
 def test_module_complete_collects_text_from_native_stream():
     # FakeProvider is a native ApiProvider (B2.1); complete() drains its stream
     # into a single string — same result as the backend's own complete().
@@ -155,6 +191,8 @@ def test_supports_turn_is_a_distinct_optional_capability():
 
 if __name__ == "__main__":
     test_stream_of_wraps_collected_only_tool_backend()
+    test_stream_of_turn_only_provider_without_tools_still_calls_the_model()
+    test_stream_of_fails_loud_on_capability_mismatch()
     test_module_complete_collects_text_from_native_stream()
     test_module_turn_roundtrips_tool_calls()
     test_assemble_message_merges_text_deltas()
