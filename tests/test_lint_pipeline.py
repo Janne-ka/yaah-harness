@@ -625,6 +625,52 @@ def custom_node_type_is_opaque_not_false_positive() -> None:
     assert not _has(cfg, "render-key-unprovided")
 
 
+# ── #5: a >=2-outcome gate whose decision nothing branches on (silently ignores rejection) ──
+
+def _gate_cfg(gate_node, *, branch_on_decision=False):
+    stage = {"node": "g"}
+    nodes = {"g": gate_node}
+    if branch_on_decision:
+        stage["branch"] = {"on": "decision", "routes": {"approve": "done"}, "default": "done"}
+        nodes["d"] = {"type": "agent", "parse": False}
+        stages = {"s": stage, "done": {"node": "d"}}
+    else:
+        stages = {"s": stage}
+    return {"nodes": nodes, "graph": {"start": "s", "stages": stages}}
+
+
+def warns_gate_two_outcomes_no_branch() -> None:
+    assert _has(_gate_cfg({"type": "human_gate", "form": "approve_or_revise"}),
+                "gate-decision-ignored")
+
+
+def quiet_gate_two_outcomes_with_branch_on_decision() -> None:
+    assert not _has(_gate_cfg({"type": "human_gate", "form": "approve_or_revise"},
+                              branch_on_decision=True), "gate-decision-ignored")
+
+
+def quiet_gate_single_outcome_approve() -> None:
+    assert not _has(_gate_cfg({"type": "human_gate", "form": "approve"}), "gate-decision-ignored")
+
+
+def quiet_gate_free_text_has_no_decision() -> None:
+    assert not _has(_gate_cfg({"type": "human_gate", "form": "free_text"}), "gate-decision-ignored")
+
+
+def warns_gate_json_schema_two_outcomes() -> None:
+    node = {"type": "human_gate", "form": "json_schema",
+            "decision_schema": {"type": "object", "required": ["decision"],
+                                "properties": {"decision": {"enum": ["ship", "block"]}}}}
+    assert _has(_gate_cfg(node), "gate-decision-ignored")
+
+
+def quiet_gate_json_schema_single_outcome() -> None:
+    node = {"type": "human_gate", "form": "json_schema",
+            "decision_schema": {"type": "object", "required": ["decision"],
+                                "properties": {"decision": {"enum": ["ack"]}}}}
+    assert not _has(_gate_cfg(node), "gate-decision-ignored")
+
+
 def main() -> None:
     warns_on_required_only_schema()
     quiet_on_typed_properties()
@@ -677,6 +723,12 @@ def main() -> None:
     quiet_render_parse_false_agent_forwards_cwd_from()
     lint_never_raises_on_malformed_output_schema()
     placeholder_regex_is_single_source()
+    warns_gate_two_outcomes_no_branch()
+    quiet_gate_two_outcomes_with_branch_on_decision()
+    quiet_gate_single_outcome_approve()
+    quiet_gate_free_text_has_no_decision()
+    warns_gate_json_schema_two_outcomes()
+    quiet_gate_json_schema_single_outcome()
     opaque_nodes_provide_their_real_keys()
     quiet_render_default_into_for_get_and_post()
     custom_node_type_is_opaque_not_false_positive()

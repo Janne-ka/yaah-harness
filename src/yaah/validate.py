@@ -621,6 +621,7 @@ def lint_pipeline(config: Dict[str, Any], base_path: Optional[str] = None,
     stages = g.get("stages") or {}
     sticky = g.get("sticky") or []
     _lint_weak_output_schema(nodes, warnings)
+    _lint_gate_ignores_rejection(nodes, stages, warnings)
     # ADR-0005 slice B: the broad requires↔provides graph analysis (absorbs the 1a
     # single-hop render/branch checks as the 1-length-path case). Lives in its own module
     # (the dataflow lattice + fixpoint are independently testable); imported lazily to keep
@@ -666,6 +667,55 @@ def _lint_weak_output_schema(nodes: Dict[str, Any], warnings: List[str]) -> None
                 "type/enum). A parseable-but-wrong value then passes check_schema and "
                 "surfaces far downstream — declare type/enum on each so bad output is "
                 "caught here. [lint: weak-output-schema]".format(role, required, untyped))
+
+
+def _gate_decision_outcomes(node: Dict[str, Any], forms: Dict[str, Any]) -> Optional[int]:
+    """How many values a human_gate's `decision` may take, per its declared form (the built-in
+    catalog, or the inline `decision_schema` for form 'json_schema'). None when the form declares
+    no `decision` enum — free_text (key is `answer`), an unconstrained decision, or no form — so
+    there is nothing to branch on. A count >= 2 means the gate needs the decision routed."""
+    form = node.get("form")
+    if form == "json_schema":
+        schema = node.get("decision_schema")
+    elif isinstance(form, str) and form in forms:
+        schema = forms[form].get("schema")
+    else:
+        return None
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    dec = props.get("decision") if isinstance(props, dict) else None
+    enum = dec.get("enum") if isinstance(dec, dict) else None
+    return len(enum) if isinstance(enum, list) else None
+
+
+def _lint_gate_ignores_rejection(nodes: Dict[str, Any], stages: Dict[str, Any],
+                                 warnings: List[str]) -> None:
+    """Rule `gate-decision-ignored` (slop-fix #5). A human_gate whose form admits >= 2 decision
+    outcomes (e.g. `approve_or_revise`) is only meaningful if the run ROUTES on `decision` — the
+    harness's `_next_stage` returns `then` whenever a stage has no branch, so with nothing
+    branching on `decision` a non-approve decision is silently ignored (the worst HITL failure).
+
+    Heuristic, hence a WARNING not a load error: the engine can't PROVE the decision is unhandled
+    — a transform could consume it instead of a branch (opaque to the linter). So we only nudge,
+    and we suppress the nudge if ANY stage branches on `decision` (assume it's handled → no false
+    positive). `approve` (one outcome) and `free_text` (no decision) never trigger."""
+    from .harness.decision_forms import FORMS
+    branches_on_decision = any(
+        (s.get("branch") or {}).get("on") == "decision" for s in stages.values())
+    if branches_on_decision:
+        return
+    for name, s in stages.items():
+        node = nodes.get(s.get("node"))
+        if not (isinstance(node, dict) and node.get("type") == "human_gate"):
+            continue
+        outcomes = _gate_decision_outcomes(node, FORMS)
+        if outcomes is not None and outcomes >= 2:
+            warnings.append(
+                "stage {!r}: human_gate form {!r} admits {} decision outcomes, but nothing in "
+                "the pipeline branches on `decision` — every outcome routes to `then`, so a "
+                "non-approve decision is silently ignored. Add `branch: {{\"on\": \"decision\", "
+                "\"routes\": {{...}}}}` on this gate (or confirm a transform consumes the "
+                "decision). [lint: gate-decision-ignored]".format(
+                    name, node.get("form"), outcomes))
 
 
 def validate_budgets(root: Dict[str, Any], pipeline: Dict[str, Any]) -> None:
