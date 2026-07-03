@@ -532,6 +532,18 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
                                  or not all(isinstance(k, str) and k for k in prov)):
             errs.append("node {!r}: 'provides' must be a list of non-empty payload-key "
                         "strings (the keys this node guarantees on the payload)".format(role))
+        # M7 ladder: escalate_model's trigger is a PARSED `help` key, so it needs
+        # the parse path — with parse:false it would silently never fire (the
+        # silent-misconfig class); reject loud instead.
+        em = n.get("escalate_model")
+        if em is not None:
+            if not (isinstance(em, str) and em):
+                errs.append("node {!r}: escalate_model must be a non-empty model "
+                            "string (e.g. \"claude:sonnet\")".format(role))
+            elif n.get("parse") is False:
+                errs.append("node {!r}: escalate_model needs parse (the `help` "
+                            "trigger is a parsed key) — remove `parse: false` or "
+                            "drop escalate_model".format(role))
     for k in g:
         if k not in _GRAPH_KEYS and not k.startswith("_"):
             errs.append("graph: unknown key {!r}{}; known: {}".format(

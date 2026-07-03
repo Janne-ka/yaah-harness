@@ -15,7 +15,7 @@ import json
 import re
 import secrets
 import time
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from ..comms import Comms
 from ..core import Node, Envelope, Failure, NodeConfig, Verdict
@@ -155,6 +155,7 @@ class Agent(Node):
         parse: bool = True,                    # ADR-0004: agent extract_json + merges parsed keys onto reply (default True)
         strict_render: bool = False,           # Y1: fail loud on an unfilled {{placeholder}} (default off = leave literal)
         output_schema: Optional[dict] = None,  # the agent's declared output CONTRACT (json_schema subset): self-validates the parsed reply + its `required` keys gate parse-failure recovery
+        escalate_model: Optional[str] = None,  # M7 ladder: on a parsed reply with truthy `help`, re-call the SAME prompt ONCE with this model (see invoke)
     ) -> None:
         """Construct an Agent. See the module docstring for the design contract;
         most kwargs are routine wiring. The security-relevant ones are documented
@@ -204,6 +205,16 @@ class Agent(Node):
         # None -> both skipped (byte-identical to before).
         self._output_schema = output_schema
         self._output_required = (output_schema or {}).get("required") or None
+        # M7 model ladder (mailbox; the client's measured blocked-agent class):
+        # a model that CANNOT do its job replies {"help": "<blocker>", ...} (the
+        # app-side contract). With escalate_model set, the agent re-calls the
+        # SAME rendered prompt ONCE with the stronger model and returns THAT
+        # reply whatever it is — a repeated help flows out to the normal
+        # concern/gate path (infra blockage must reach the human, never a third
+        # model). Trigger is `help` ONLY; parse failures keep the stage
+        # retry+feedback path (measured: escalation class is help/prose, not
+        # JSON shape). Requires parse (validate rejects parse:false + this).
+        self._escalate_model = escalate_model
         self._backend = backend
         self._template = template
         self._prompt_source = prompt_source
@@ -343,27 +354,42 @@ class Agent(Node):
         broker_tool = self._build_context_broker_tool(input) if self._broker else None
         if broker_tool is not None:
             tools.append(broker_tool)
-        await self._emit("calling model {}".format(config.model or "default"))
-        t0 = time.monotonic()
-        if tools and is_tool_capable:
-            # model-initiated tool-loop (invisible to the harness); the agent's
-            # comms resolves any node: tool impls
-            text = await run_tool_loop(self._backend, prompt, tools,
-                                       comms=self._events, model=config.model,
-                                       tracer=self._tracer, corr=input.correlation_id,
-                                       parent=input.id, **opts)
-        else:
-            # Plain (non-tool) path: collect the stream into a string. Stream-first
-            # via the bridge — a collected-only backend/double falls back to its
-            # native complete() inside _ap.complete (see api_provider).
-            text = await _ap.complete(self._backend, prompt, model=config.model, **opts)
-        t1 = time.monotonic()
-        await self._tracer.emit(Span.timed(
-            "model_call", corr=input.correlation_id, parent=input.id, t0=t0, t1=t1,
-            tokens_in=int(usage.get("tokens_in", 0)), tokens_out=int(usage.get("tokens_out", 0)),
-            model=usage.get("model") or config.model, status="ok",
-            attrs={"stage": self._stage}))
-        await self._emit("model returned {} chars".format(len(text)))
+        async def _call_model(model: Optional[str], span_attrs: dict) -> str:
+            """One model call + its span. Shared by the primary call and the M7
+            escalation rung — same prompt, same tools/opts, only the model (and
+            the span's ladder attrs) differ. KNOWN LIMIT (tools + a
+            mixed-capability ladder): the prompt's tool MANIFEST was rendered
+            once for the PRIMARY model's capability, so a turn-capable primary
+            + non-turn escalate_model leaves the rung with neither
+            function-calling nor a manifest — don't mix capabilities on a
+            tool-using laddered agent (documented in node-reference)."""
+            await self._emit("calling model {}".format(model or "default"))
+            in0, out0 = usage["tokens_in"], usage["tokens_out"]  # per-call delta
+            usage["model"] = None  # per-call too: a stale value from the previous
+            # rung would mislabel this span when THIS call's backend doesn't report
+            t0 = time.monotonic()
+            if tools and self._supports_turn(model):
+                # model-initiated tool-loop (invisible to the harness); the agent's
+                # comms resolves any node: tool impls
+                text = await run_tool_loop(self._backend, prompt, tools,
+                                           comms=self._events, model=model,
+                                           tracer=self._tracer, corr=input.correlation_id,
+                                           parent=input.id, **opts)
+            else:
+                # Plain (non-tool) path: collect the stream into a string. Stream-first
+                # via the bridge — a collected-only backend/double falls back to its
+                # native complete() inside _ap.complete (see api_provider).
+                text = await _ap.complete(self._backend, prompt, model=model, **opts)
+            t1 = time.monotonic()
+            await self._tracer.emit(Span.timed(
+                "model_call", corr=input.correlation_id, parent=input.id, t0=t0, t1=t1,
+                tokens_in=int(usage["tokens_in"] - in0), tokens_out=int(usage["tokens_out"] - out0),
+                model=usage.get("model") or model, status="ok",
+                attrs={"stage": self._stage, **span_attrs}))
+            await self._emit("model returned {} chars".format(len(text)))
+            return text
+
+        text = await _call_model(config.model, {})
         # Forward run context: the worktree path (so the next repo-bound stage/gate
         # stays in it) plus any explicitly-carried payload keys (so a multi-turn
         # dialogue's state survives this stage). A plain agent adds nothing extra.
@@ -381,13 +407,16 @@ class Agent(Node):
         # catches it cleanly — same shape json_object would have produced.
         # Parsed keys override `extra` (carry/cwd) on conflict: the agent
         # just produced the key, that wins over what was carried.
-        parsed: dict = {}
-        if self._parse:
+        def _parse_reply(reply_text: str) -> "Union[dict, Envelope]":
+            """extract_json + the output_schema contract gate on ONE reply.
+            Returns the parsed dict, or a failed-Verdict envelope (not_json /
+            not_object / schema_mismatch) for the harness's retry+feedback
+            loop. Shared by the primary reply and the M7 escalation rung —
+            the stronger model's reply passes the SAME gate."""
             try:
-                obj = extract_json(text, keys=self._output_required,
+                obj = extract_json(reply_text, keys=self._output_required,
                                    schema=self._output_schema)
             except json.JSONDecodeError as e:
-                await self._emit("parse failed: {}".format(e))
                 return Verdict.failed(
                     Failure.not_json(e, subject="agent output")).to_envelope(input)
             if not isinstance(obj, dict):
@@ -405,10 +434,38 @@ class Agent(Node):
             if self._output_schema is not None:
                 errors = check_schema(obj, self._output_schema, "$")
                 if errors:
-                    await self._emit("output_schema mismatch: {}".format("; ".join(errors[:3])))
                     return Verdict.failed(Failure.schema_mismatch(
                         errors, fix_hint="match the declared output_schema")).to_envelope(input)
-            parsed = obj
+            return obj
+
+        async def _emit_parse_failure(env: Envelope) -> None:
+            # keep the progress stream as informative as the pre-ladder emits
+            # ("parse failed: <exc>" / "output_schema mismatch: <errors>")
+            f = (Verdict.from_envelope(env).failures or [Failure("?", "", "")])[0]
+            await self._emit("{}: {}".format(f.code, f.message))
+
+        parsed: dict = {}
+        if self._parse:
+            p = _parse_reply(text)
+            if isinstance(p, Envelope):
+                await _emit_parse_failure(p)
+                return p
+            parsed = p
+            # M7 ladder: the model says it CANNOT do the job ({"help": ...},
+            # the app-side blocked-agent contract). Re-call the SAME prompt
+            # ONCE with the stronger model and take THAT reply through the
+            # same parse/contract gate — a repeated help flows out to the
+            # normal concern/gate path (never a third model, per M7-r).
+            if parsed.get("help") and self._escalate_model:
+                await self._emit("help from {} — escalating once to {}".format(
+                    config.model or "default", self._escalate_model))
+                text = await _call_model(self._escalate_model, {
+                    "ladder_from": config.model or "default", "ladder_trigger": "help"})
+                p2 = _parse_reply(text)
+                if isinstance(p2, Envelope):
+                    await _emit_parse_failure(p2)
+                    return p2
+                parsed = p2
         # R6 envelope carriage: the drain does NOT happen here. It lives at the
         # serve boundary (CarriageBoundaryNode, applied by build._wrap_node) —
         # draining inside the agent body lost spans whenever a NESTED agent

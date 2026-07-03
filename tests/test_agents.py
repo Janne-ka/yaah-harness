@@ -241,6 +241,155 @@ async def scenario_bare_payload_fence_mimic_is_neutralized() -> None:
     assert "[UNTRUSTED DATA — cfg]" in p, p       # config.extras = author-trusted, untouched
 
 
+class LadderBackend:
+    """Records (prompt, model) per call; scripted reply per model — the M7
+    escalate_model fixture (a weak model that asks for help, a strong one
+    that answers, or scripted otherwise)."""
+
+    def __init__(self, replies: dict) -> None:
+        self.replies = replies   # model -> reply text
+        self.calls: list = []    # (model, prompt)
+
+    async def complete(self, prompt, *, model=None, **opts):
+        self.calls.append((model, prompt))
+        return self.replies[model]
+
+
+async def scenario_escalate_model_ladders_once_on_help() -> None:
+    """Mailbox M7: a parsed reply whose top-level `help` is truthy re-calls the
+    SAME prompt once with `escalate_model`; the strong reply wins. One rung by
+    design — the strong model's reply is returned WHATEVER it is."""
+    backend = LadderBackend({
+        "fake:weak": '{"findings": [], "help": "no spec provided"}',
+        "fake:strong": '{"findings": [{"id": "F1"}]}',
+    })
+    agent = Agent(backend, "review {{task}}", escalate_model="fake:strong")
+    out = await agent.invoke(Envelope("task", {"task": "t"}, {"correlation_id": "c"}),
+                             NodeConfig(model="fake:weak"))
+    assert [m for m, _ in backend.calls] == ["fake:weak", "fake:strong"], backend.calls
+    assert backend.calls[0][1] == backend.calls[1][1], "same rendered prompt both rungs"
+    assert out.payload["findings"] == [{"id": "F1"}], out.payload
+    assert "help" not in out.payload, out.payload   # the weak reply is replaced
+
+
+async def scenario_escalate_model_repeated_help_surfaces() -> None:
+    """M7-r: never ladder past a repeated help — the strong model's help reply
+    flows OUT (the app lifts it as a blocked-concern; infra blockage reaches
+    the human), no third call."""
+    backend = LadderBackend({
+        "fake:weak": '{"findings": [], "help": "file missing"}',
+        "fake:strong": '{"findings": [], "help": "file missing here too"}',
+    })
+    agent = Agent(backend, "go", escalate_model="fake:strong")
+    out = await agent.invoke(Envelope("task", {}, {"correlation_id": "c"}),
+                             NodeConfig(model="fake:weak"))
+    assert len(backend.calls) == 2, backend.calls
+    assert out.payload["help"] == "file missing here too", out.payload
+
+
+async def scenario_escalate_model_span_labels_reach_the_record() -> None:
+    """The ladder's observability contract (eval RED-class catch): the
+    escalation labels must survive PROJECTION to the record — sinks never see
+    raw span.attrs, so ladder_from/ladder_trigger sitting only there means no
+    real run can tell an escalation from two ordinary calls. Also pins per-rung
+    token DELTAS and per-rung model labels (a stale usage['model'] from rung 1
+    must not label rung 2)."""
+    from yaah.trace import RecordingTracer
+    from yaah.trace.contributors import CostContributor, PhaseContributor
+
+    class UsageLadderBackend(LadderBackend):
+        async def complete(self, prompt, *, model=None, on_usage=None, **opts):
+            if on_usage:
+                # rung 1 reports its model; rung 2 reports only tokens — the
+                # stale-model trap the eval's probe caught
+                u = {"tokens_in": 10, "tokens_out": 5}
+                if model == "fake:weak":
+                    u["model"] = "weak-resolved"
+                on_usage(u)
+            return await super().complete(prompt, model=model, **opts)
+
+    tracer = RecordingTracer([PhaseContributor(), CostContributor()])
+    backend = UsageLadderBackend({
+        "fake:weak": '{"help": "stuck"}',
+        "fake:strong": '{"done": true}',
+    })
+    agent = Agent(backend, "go", escalate_model="fake:strong", tracer=tracer)
+    await agent.invoke(Envelope("task", {}, {"correlation_id": "c"}),
+                       NodeConfig(model="fake:weak"))
+    calls = [r for r in tracer.records if r["name"] == "model_call"]
+    assert len(calls) == 2, tracer.records
+    first, second = calls
+    assert "ladder_from" not in first, first
+    assert second["ladder_from"] == "fake:weak", second        # survives projection
+    assert second["ladder_trigger"] == "help", second
+    assert first["model"] == "weak-resolved", first            # rung 1's own report
+    assert second["model"] == "fake:strong", second            # NOT the stale rung-1 name
+    assert first["tokens_in"] == 10 and second["tokens_in"] == 10, calls  # deltas, not cumulative
+
+
+async def scenario_escalate_model_off_by_default() -> None:
+    """No escalate_model -> a help reply flows out untouched, single call; and
+    with escalate_model set but NO help, the strong model is never called."""
+    b1 = LadderBackend({"fake:weak": '{"help": "stuck"}'})
+    out = await Agent(b1, "go").invoke(
+        Envelope("task", {}, {"correlation_id": "c"}), NodeConfig(model="fake:weak"))
+    assert len(b1.calls) == 1 and out.payload["help"] == "stuck"
+
+    b2 = LadderBackend({"fake:weak": '{"ok": true}'})
+    out2 = await Agent(b2, "go", escalate_model="fake:strong").invoke(
+        Envelope("task", {}, {"correlation_id": "c"}), NodeConfig(model="fake:weak"))
+    assert len(b2.calls) == 1 and out2.payload["ok"] is True
+
+    # falsy help ("" / null) is NOT a trigger
+    b3 = LadderBackend({"fake:weak": '{"ok": true, "help": ""}'})
+    out3 = await Agent(b3, "go", escalate_model="fake:strong").invoke(
+        Envelope("task", {}, {"correlation_id": "c"}), NodeConfig(model="fake:weak"))
+    assert len(b3.calls) == 1, b3.calls
+
+
+async def scenario_escalate_model_strong_parse_fail_is_a_verdict() -> None:
+    """The strong rung's reply goes through the SAME parse+schema gate — a
+    not_json strong reply is the usual failed verdict (stage retry handles),
+    not a silent fallback to the weak reply."""
+    backend = LadderBackend({
+        "fake:weak": '{"help": "stuck"}',
+        "fake:strong": 'sorry, plain prose',
+    })
+    agent = Agent(backend, "go", escalate_model="fake:strong")
+    out = await agent.invoke(Envelope("task", {}, {"correlation_id": "c"}),
+                             NodeConfig(model="fake:weak"))
+    v = Verdict.from_envelope(out)
+    assert not v.ok and v.failures[0].code == "not_json", out.payload
+
+
+def scenario_escalate_model_requires_parse() -> None:
+    """Validation: escalate_model needs parse (the trigger is a PARSED key) —
+    parse:false + escalate_model is a config error, not a silent no-op."""
+    from yaah.validate import validate_pipeline
+    p = {"nodes": {"x": {"type": "agent", "template": "go", "model": "fake:w",
+                         "parse": False, "escalate_model": "fake:s"}},
+         "graph": {"start": "s", "stages": {"s": {"node": "x"}}}}
+    try:
+        validate_pipeline(p)
+        raise AssertionError("parse:false + escalate_model must be rejected")
+    except ValueError as e:
+        assert "escalate_model" in str(e) and "parse" in str(e), e
+    # non-string escalate_model rejected
+    p2 = {"nodes": {"x": {"type": "agent", "template": "go", "model": "fake:w",
+                          "escalate_model": ["fake:s"]}},
+          "graph": {"start": "s", "stages": {"s": {"node": "x"}}}}
+    try:
+        validate_pipeline(p2)
+        raise AssertionError("non-string escalate_model must be rejected")
+    except ValueError as e:
+        assert "escalate_model" in str(e), e
+    # the happy shape validates (parse defaults true)
+    p3 = {"nodes": {"x": {"type": "agent", "template": "go", "model": "fake:w",
+                          "escalate_model": "fake:s"}},
+          "graph": {"start": "s", "stages": {"s": {"node": "x"}}}}
+    validate_pipeline(p3)
+
+
 async def main() -> None:
     await scenario_agent_retry()
     await scenario_template_and_model_config()
@@ -251,6 +400,12 @@ async def main() -> None:
     await scenario_claude_per_agent_tools()
     await scenario_carry_does_not_collide_with_reserved_reply_kwarg()
     await scenario_backend_protocol_conformance()
+    await scenario_escalate_model_ladders_once_on_help()
+    await scenario_escalate_model_span_labels_reach_the_record()
+    await scenario_escalate_model_repeated_help_surfaces()
+    await scenario_escalate_model_off_by_default()
+    await scenario_escalate_model_strong_parse_fail_is_a_verdict()
+    scenario_escalate_model_requires_parse()
     print("ok")
 
 

@@ -477,7 +477,7 @@ class Harness:
 
     async def _run_attempts(
         self, stage: Stage, input: Envelope,
-        produce: Callable[[Stage, Envelope], Awaitable[object]],
+        produce: "Callable[[Stage, Envelope], Awaitable[Union[_Suspend, Tuple[Envelope, Optional[Verdict]]]]]",
     ) -> Union[_Pass, _Suspend]:
         """The shared per-stage loop, bounded by max_attempts: produce -> validate
         -> (pass | retry-with-feedback | escalate-to-human | fail). `produce`
@@ -594,7 +594,7 @@ class Harness:
         except Exception as e:
             return Envelope(Kind.ERROR, {"error": repr(e)}, dict(input.headers))
 
-    async def _produce_single(self, stage: Stage, input: Envelope) -> Union["_Suspend", tuple]:
+    async def _produce_single(self, stage: Stage, input: Envelope) -> "Union[_Suspend, Tuple[Envelope, Optional[Verdict]]]":
         """One attempt for a single-node stage: one request. An 'await' reply parks
         the stage, keeping what flowed INTO the gate so resume can merge the
         decision onto that artifact (early_review #18); an ERROR reply is a ready
@@ -625,7 +625,7 @@ class Harness:
             return _Suspend(str(out.payload.get("awaiting", "external")), parked)
         return out, None  # validate normally
 
-    async def _produce_fanout(self, stage: Stage, input: Envelope) -> Union["_Suspend", tuple]:
+    async def _produce_fanout(self, stage: Stage, input: Envelope) -> "Union[_Suspend, Tuple[Envelope, Optional[Verdict]]]":
         """One attempt for a fan-out stage: request every role in parallel, then
         merge into one envelope. return_exceptions so one role's failure surfaces
         as a ready fan-out-error verdict (handled as a StageFailed by the loop)
