@@ -49,6 +49,9 @@ Run & inspect:
   run <root>                    run the configured pipeline (the default)
   ab <experiment.json>          run an A/B campaign: variants x inputs x repetitions,
                                 one durable row per run (cost + outcomes; see docs)
+                                add --report [--json] for the comparison matrix
+                                add --rescore SCHEMA to re-score stored raw outputs
+                                against a changed contract (zero model calls)
   list <root> [--json]          show parked gates (the mailbox view; --json for a parseable shape)
   resume <root> ID [FILE]       deliver a decision (optionally from FILE) to a parked gate
   baton-schema <root> <id>      print the JSON Schema of decision.json for one parked baton
@@ -184,20 +187,33 @@ def _parse_manual(rest: list) -> dict:
 
 
 def _parse_ab(rest: list) -> dict:
-    """`ab <experiment.json> [--report [--json]]` — run an A/B campaign (one
-    durable row per run), or with --report reduce the collected rows + trace
-    into the comparison matrix (pure read; safe mid-campaign)."""
+    """`ab <experiment.json> [--report [--json]] [--rescore <schema.json>]` —
+    run an A/B campaign (one durable row per run); --report reduces collected
+    rows + trace into the comparison matrix; --rescore re-scores the stored
+    raw outputs against a (changed) contract — both pure reads, zero model
+    calls, safe mid-campaign."""
+    rescore: Any = None
+    rest = list(rest)
+    if "--rescore" in rest:
+        i = rest.index("--rescore")
+        if i + 1 >= len(rest) or rest[i + 1].startswith("-"):
+            _usage_exit("--rescore needs a schema file "
+                        "(yaah ab exp.json --rescore new-contract.json)")
+        rescore = rest[i + 1]
+        del rest[i:i + 2]
     args = [a for a in rest if not a.startswith("-")]
     flags = set(rest) - set(args)
     unknown = flags - {"--report", "--json"}
     if unknown:
         _usage_exit("ab: unknown flag(s) {}".format(", ".join(sorted(unknown))))
-    if "--json" in flags and "--report" not in flags:
-        _usage_exit("ab: --json applies to --report")
+    if "--json" in flags and not ("--report" in flags or rescore):
+        _usage_exit("ab: --json applies to --report / --rescore")
+    if "--report" in flags and rescore:
+        _usage_exit("ab: --report and --rescore are separate reads — pick one")
     if len(args) != 1:
         _usage_exit("ab needs exactly one experiment config "
-                    "(yaah ab my-experiment.json [--report [--json]])")
-    return {"action": "ab", "experiment": args[0],
+                    "(yaah ab my-experiment.json [--report|--rescore SCHEMA] [--json])")
+    return {"action": "ab", "experiment": args[0], "rescore": rescore,
             "report": "--report" in flags, "json": "--json" in flags}
 
 
@@ -472,6 +488,15 @@ def _dispatch_ab(spec: Dict[str, Any]) -> None:
     path = os.path.abspath(spec["experiment"])
     cfg = _read_json(path)
     base = os.path.dirname(path)
+    if spec.get("rescore"):
+        from .experiment import rescore_rows
+        schema = _read_json(spec["rescore"])
+        result = asyncio.run(rescore_rows(cfg, base, schema))
+        if spec.get("json"):
+            print(json.dumps(result, indent=2))
+            return
+        _render_rescore(result)
+        return
     if spec.get("report"):
         from .experiment import build_matrix
         matrix = asyncio.run(build_matrix(cfg, base))
@@ -489,6 +514,27 @@ def _dispatch_ab(spec: Dict[str, Any]) -> None:
         print("  {:<12} {}".format(name, line or "no runs"))
     print("rows + trace under the experiment store (trace: {})".format(summary["trace"]))
     print("compare:  yaah ab {} --report".format(spec["experiment"]))
+
+
+def _render_rescore(result: Dict[str, Any]) -> None:
+    """The rescore tier table on a terminal: per population — parse tiers
+    (strict/recovered/reject) and the conform gate against the candidate
+    contract, with the top schema errors (a count alone is not actionable)."""
+    print("experiment {!r} rescored against schema (required: {}) — {} cell(s)".format(
+        result["experiment"], ", ".join(result["schema_required"]) or "none",
+        len(result["cells"])))
+    for c in result["cells"]:
+        t = c["tiers"]
+        print("  {:<12} fp {}  N={} (no_raw={})".format(
+            c["variant"], c["fingerprint"][:12], c["n"], c["no_raw"]))
+        print("    parse: {} strict / {} recovered / {} reject".format(
+            t["strict"], t["recovered"], t["reject"]))
+        print("    conform: {} pass / {} fail".format(
+            c["conform"]["pass"], c["conform"]["fail"]))
+        for e in c["conform"]["top_errors"]:
+            print("      mismatch: {}".format(e))
+    for w in result["warnings"]:
+        print("  warning: " + w)
 
 
 def _render_matrix(matrix: Dict[str, Any]) -> None:

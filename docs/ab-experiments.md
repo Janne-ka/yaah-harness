@@ -88,6 +88,27 @@ are flagged INSUFFICIENT (convention: N=20/cell); and comparisons are
 run-level only — variants may differ in agent count and prompts, so per-stage
 cross-variant numbers would be meaningless and the report never emits them.
 
+## Rescore — iterate on the contract for free
+
+`yaah ab judge-experiment.json --rescore new-contract.json` re-scores every
+collected row's RAW output against a candidate schema — **zero model calls**,
+deterministic, safe mid-campaign. Per population you get the parse tiers
+(strict JSON / recovered by the engine's own `extract_json` — the same
+fence-tolerant + weak-executor recovery the runtime uses / reject) and the
+conform gate (`check_schema` pass/fail with the top mismatch errors). The
+measurement-gated contract change: tighten the schema only when the rescore
+shows no healthy row newly rejected. Rows without a raw output (suspended /
+error rows) are counted `no_raw`, never guessed.
+
+Two scoping facts: a multi-agent pipeline's final payload carries the LAST
+agent's `raw` (each agent overwrites it) — the rescore scores that one; and
+if your pipeline relocates the raw text under another key, the programmatic
+seam `rescore_rows(..., raw_key="your_key")` follows it (not exposed as a CLI
+flag yet). Tier shifts vs collection time measure the CONTRACT's effect on
+old outputs, not the model's quality — recovery is deliberately anchored on
+the CANDIDATE schema's required keys, exactly as the runtime would anchor it
+once that schema ships.
+
 ## Promotion
 
 When the matrix says B wins: point production at B's files, or merge B's

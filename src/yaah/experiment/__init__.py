@@ -9,7 +9,9 @@ species. One port (ExperimentStore) keeps the row substrate swappable.
 """
 from .fingerprint import config_fingerprint
 from .report import build_matrix
+from .rescore import rescore_rows
 from .runner import run_experiment
 from .experiment_store import ExperimentStore
 
-__all__ = ["ExperimentStore", "build_matrix", "config_fingerprint", "run_experiment"]
+__all__ = ["ExperimentStore", "build_matrix", "config_fingerprint",
+           "rescore_rows", "run_experiment"]
