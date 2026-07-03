@@ -353,6 +353,92 @@ async def scenario_error_reply_in_fanout_is_a_failed_role() -> None:
         assert e.output.payload["roles"] == ["role:upper"], "healthy roles must survive"
 
 
+class FailedVerdictLens:
+    """A fan-out member whose OUTPUT is a failed Verdict envelope — the shape an
+    agent produces when it exhausts its schema/parse attempts (schema_mismatch,
+    not_json). Distinct from Broken: the transport delivered a well-formed reply;
+    the MEMBER itself is reporting failure as data."""
+
+    async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
+        return Verdict.failed(Failure(
+            "schema_mismatch", "reply missing required key", "declare it")).to_envelope(input)
+
+
+class PassedVerdictLens:
+    """A fan-out member whose OUTPUT is a PASSED verdict — e.g. a check node
+    fanned out among lenses. Must keep merging as a normal result."""
+
+    async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
+        return Verdict.passed().to_envelope(input)
+
+
+async def scenario_failed_verdict_in_fanout_is_a_failed_role() -> None:
+    """Mailbox M8a: `_produce_single` already routes a node-RETURNED failed
+    verdict into the retry/escalate path (the H3 VERDICT variant); the fan-out
+    member classification must do the same. Before this fix a failed-verdict
+    member merged into `results` as a success — the client's dead lens
+    (schema_mismatch, no `raw`) read as a clean zero-findings pass."""
+    comms = InProcessComms()
+    comms.register("role:upper", Upper())
+    comms.register("role:deadlens", FailedVerdictLens())
+    h = Harness(comms, Graph.of(
+        Stage("fan", node="role:upper", fanout=["role:upper", "role:deadlens"])))
+    try:
+        await h.run(Envelope("task", {"text": "hi"}))
+        raise AssertionError("a failed-verdict fan-out member must fail the stage")
+    except StageFailed as e:
+        assert e.output is not None
+        assert e.output.payload["failed_roles"] == ["role:deadlens"], e.output.payload
+        assert e.output.payload["roles"] == ["role:upper"], "healthy roles must survive"
+        # the member's OWN failure code must travel into the stage failure —
+        # "role failed" without the why is the naming half of the M8a bug
+        assert "schema_mismatch" in str(e), str(e)
+
+
+async def scenario_min_success_passes_kofn_fanout_with_failed_roles_marked() -> None:
+    """Mailbox M9a: `min_success: k` — a fanout with enough healthy members
+    passes the merged payload through (failed_roles visible for a downstream
+    lens_failed concern) instead of throwing 6 healthy lenses away for 1 flaky
+    one. Below k the stage still fails exactly as before."""
+    comms = InProcessComms()
+    comms.register("role:upper", Upper())
+    comms.register("role:deadlens", FailedVerdictLens())
+    comms.register("role:broken", Broken())
+    h = Harness(comms, Graph.of(
+        Stage("fan", node="role:upper", min_success=1,
+              fanout=["role:upper", "role:deadlens", "role:broken"])))
+    out = await h.run(Envelope("task", {"text": "hi"}))
+    assert isinstance(out, Done), out
+    p = out.output.payload
+    assert p["roles"] == ["role:upper"], p
+    assert sorted(p["failed_roles"]) == ["role:broken", "role:deadlens"], p
+    assert len(p["results"]) == 1, p
+
+    # below k -> the all-or-nothing failure, unchanged
+    h2 = Harness(comms, Graph.of(
+        Stage("fan", node="role:upper", min_success=2,
+              fanout=["role:upper", "role:deadlens", "role:broken"])))
+    try:
+        await h2.run(Envelope("task", {"text": "hi"}))
+        raise AssertionError("min_success=2 with 1 healthy member must fail")
+    except StageFailed as e:
+        assert "schema_mismatch" in str(e), str(e)
+
+
+async def scenario_passed_verdict_in_fanout_merges_normally() -> None:
+    """Only a FAILED returned verdict diverts (same rule as _produce_single) —
+    a member returning Verdict.passed() stays a mergeable result."""
+    comms = InProcessComms()
+    comms.register("role:upper", Upper())
+    comms.register("role:check", PassedVerdictLens())
+    h = Harness(comms, Graph.of(
+        Stage("fan", node="role:upper", fanout=["role:upper", "role:check"])))
+    out = await h.run(Envelope("task", {"text": "hi"}))
+    assert isinstance(out, Done), out
+    assert out.output.payload["failed_roles"] == [], out.output.payload
+    assert sorted(out.output.payload["roles"]) == ["role:check", "role:upper"]
+
+
 async def scenario_validator_error_reply_hard_fails_with_detail() -> None:
     """H3 validator side: the VALIDATOR crashing remotely (its reply is
     Kind.ERROR) is a hard fail carrying the actual error — not an empty
@@ -438,6 +524,9 @@ async def main() -> None:
     await scenario_escalate_surfaces_own_soft_concerns()
     await scenario_error_reply_fails_validatorless_stage()
     await scenario_error_reply_in_fanout_is_a_failed_role()
+    await scenario_failed_verdict_in_fanout_is_a_failed_role()
+    await scenario_min_success_passes_kofn_fanout_with_failed_roles_marked()
+    await scenario_passed_verdict_in_fanout_merges_normally()
     await scenario_validator_error_reply_hard_fails_with_detail()
     await scenario_stage_span_records_shell_exit_code()
     print("ok")

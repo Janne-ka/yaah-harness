@@ -34,6 +34,18 @@ from .stage import Stage
 from .stage_failed import StageFailed
 
 
+class _WaitDetermined(Exception):
+    """The timed fork wait's outcome is already DETERMINED (an arm died, or the
+    join is provably unmeetable) — raised so the declared degrade happens now,
+    with the real reason on the on_timeout listener, instead of after minutes
+    of looks-hung TTL (M9b). Private to run_collect's timed path."""
+
+    def __init__(self, reason: str, detail: "Optional[str]") -> None:
+        self.reason = reason
+        self.detail = detail
+        super().__init__(reason)
+
+
 def _safe_set(fut: "asyncio.Future", value: object) -> None:
     """Idempotent future.set_result — drops the call if the future is already
     done (a race between two clear publishers). Scheduled via
@@ -138,14 +150,21 @@ class ForkCoordinator:
         timeout = wait.get("timeout")
         try:
             if timeout is not None:
-                cleared_env = await asyncio.wait_for(fut, timeout)
+                # M9b: the TIMED wait also watches the branches — a dead arm /
+                # provably-unmeetable join degrades NOW (raising _WaitDetermined
+                # into the same handling as the TTL) instead of sitting out the
+                # full TTL looking hung. The TTL keeps its pure LIVENESS role.
+                cleared_env = await asyncio.wait_for(
+                    self._timed_clear(fut, ctx), timeout)
             else:  # H2: unbounded wait watches the branches too — see _await_clear
                 cleared_env = await self._await_clear(fut, ctx, stage)
             await self._drain(ctx)  # branches/coordinator settle
             # reply_with off `input` keeps correlation_id (trace) + any OUTER clear_id
             cleared = input.reply_with(Kind.RESULT, dict(cleared_env.payload))
-        except asyncio.TimeoutError:
-            await self._publish_wait_timeout(stage, wait)
+        except (asyncio.TimeoutError, _WaitDetermined) as e:
+            reason = e.reason if isinstance(e, _WaitDetermined) else "wait_timeout"
+            detail = e.detail if isinstance(e, _WaitDetermined) else None
+            await self._publish_wait_timeout(stage, wait, reason=reason, detail=detail)
             for t in ctx.tasks:  # abandon outstanding branches
                 t.cancel()
             await asyncio.gather(*ctx.tasks, return_exceptions=True)  # retrieve, no warnings
@@ -153,6 +172,41 @@ class ForkCoordinator:
         finally:
             sub.cancel()
         return cleared
+
+    async def _watch_branches(self, fut: "asyncio.Future", ctx: _ForkCtx) -> tuple:
+        """The shared H2 watch loop: await the clear while watching the branch
+        tasks. Returns (cleared_env | None, first_branch_exc | None, doomed) —
+        cleared set means the fan-in (or an external party) published; otherwise
+        every branch has settled without a clear and the CALLER decides: the
+        unbounded wait fails loud, the timed wait degrades (M9b)."""
+        while not fut.done():
+            pending = [t for t in ctx.tasks if not t.done()]
+            if not pending:
+                break
+            self._release_unmeetable_joins(ctx)
+            await asyncio.wait([fut, *pending], return_when=asyncio.FIRST_COMPLETED)
+        if fut.done():
+            return fut.result(), None, False
+        exc = next((t.exception() for t in ctx.tasks
+                    if not t.cancelled() and t.exception() is not None), None)
+        doomed = any(j.get("doomed") for j in ctx.joins.values())
+        return None, exc, doomed
+
+    async def _timed_clear(self, fut: "asyncio.Future", ctx: _ForkCtx) -> Envelope:
+        """The timed wait's body (bounded by wait_for in run_collect). Watches
+        the branches; the moment the degrade outcome is DETERMINED — an arm
+        died, or the join is provably unmeetable — raises _WaitDetermined so
+        the caller degrades immediately with the real reason (M9b). A CLEAN
+        settle keeps waiting for a possible external clear (the sender-agnostic
+        no-fan-in pattern) until the TTL fires."""
+        env, exc, doomed = await self._watch_branches(fut, ctx)
+        if env is not None:
+            return env
+        if exc is not None:
+            raise _WaitDetermined("branch_failed", repr(exc))
+        if doomed:
+            raise _WaitDetermined("fanin_unmeetable", None)
+        return await fut  # clean settle: an external clear may still arrive
 
     async def _await_clear(self, fut: "asyncio.Future", ctx: _ForkCtx,
                            stage: Stage) -> Envelope:
@@ -166,18 +220,12 @@ class ForkCoordinator:
         (failed branch / unmeetable join) fails the fork. A CLEAN settle keeps
         waiting: the clear is sender-agnostic — an external party may still
         publish it (the no-fan-in pattern); bound that with wait.timeout."""
-        while not fut.done():
-            pending = [t for t in ctx.tasks if not t.done()]
-            if not pending:
-                break
-            self._release_unmeetable_joins(ctx)
-            await asyncio.wait([fut, *pending], return_when=asyncio.FIRST_COMPLETED)
-        if fut.done():
-            return fut.result()
-        for t in ctx.tasks:  # surface the FIRST branch failure as the cause
-            if not t.cancelled() and t.exception() is not None:
-                raise t.exception()
-        if any(j.get("doomed") for j in ctx.joins.values()):
+        env, exc, doomed = await self._watch_branches(fut, ctx)
+        if env is not None:
+            return env
+        if exc is not None:  # surface the FIRST branch failure as the cause
+            raise exc
+        if doomed:
             raise StageFailed(stage.name, Verdict.failed(Failure(
                 "fork_no_clear",
                 "fork {!r}: every branch settled but the fan-in policy was never met, "
@@ -399,12 +447,20 @@ class ForkCoordinator:
         })
         await self._comms.publish(topic, err)
 
-    async def _publish_wait_timeout(self, stage: Stage, wait: dict) -> None:
-        """Propagate a FORK's wait-for-clear timeout to a listener (a Comms topic).
-        No-op if no `on_timeout` is configured; the fork then proceeds with whatever
-        cleared so far."""
+    async def _publish_wait_timeout(self, stage: Stage, wait: dict, *,
+                                    reason: str = "wait_timeout",
+                                    detail: Optional[str] = None) -> None:
+        """Propagate a FORK's wait-degrade to a listener (a Comms topic). `reason`
+        says WHY the fork degraded — "wait_timeout" (the liveness TTL elapsed),
+        "branch_failed" (an arm died; `detail` carries its error), or
+        "fanin_unmeetable" (every arm settled, the join policy can't be met) —
+        so a listener can route dead-arm degrades differently from slow-arm ones
+        (M9b). No-op if no `on_timeout` is configured; the fork then proceeds
+        with whatever cleared so far."""
         topic = wait.get("on_timeout")
         if not topic:
             return
-        await self._comms.publish(topic, Envelope(Kind.ERROR, {
-            "fork": stage.name, "reason": "wait_timeout"}))
+        payload = {"fork": stage.name, "reason": reason}
+        if detail is not None:
+            payload["detail"] = detail
+        await self._comms.publish(topic, Envelope(Kind.ERROR, payload))

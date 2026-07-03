@@ -6,7 +6,7 @@ yaah.adapters.providers. One class per file; re-exported for convenience.
 Every provider implements ApiProvider (`stream()`) natively and DECLARES it
 in its class header; tool-capable providers also declare SupportsTurn.
 """
-from .agent import Agent
+from .agent import Agent, frame_untrusted
 from .api_provider import ApiProvider
 from .fake_provider import FakeProvider
 from .routing_provider import RoutingProvider
@@ -20,6 +20,7 @@ from .envelope_tool import make_envelope_get_tool
 __all__ = [
     "ApiProvider",
     "Agent",
+    "frame_untrusted",
     "FakeProvider",
     "ScriptedProvider",
     "ScriptedToolProvider",

@@ -99,6 +99,21 @@ async def scenario_permanent_fails_fast() -> None:
     print("PASS permanent fault fails fast (0 transient retries)")
 
 
+async def scenario_provider_spawn_hiccup_is_transient() -> None:
+    """Mailbox M6: a claude_cli immediate-exit ("pipe unavailable / exited
+    before pipe opened") is a host blip, not a logic bug — it must take the
+    backoff-retry budget instead of burning max_attempts back-to-back into a
+    spurious human park on an unattended run."""
+    comms = InProcessComms()
+    node = FlakyNode(fail_n=2, exc_text=(
+        "provider error: claude subprocess stdin/stdout pipe unavailable "
+        "(process likely exited before pipe opened)"))
+    comms.register("role:n", node)
+    await _run(_harness(comms, Stage("s", node="role:n", max_attempts=1, error_retries=2)))
+    assert node.calls == 3, node.calls
+    print("PASS provider spawn hiccup classifies transient (backoff budget)")
+
+
 async def scenario_inproc_exception_converges() -> None:
     # E1: a raising in-proc node becomes a StageFailed (the retryable verdict
     # path), never a bare RuntimeError/ValueError out of run().
@@ -120,6 +135,7 @@ async def main() -> None:
     await scenario_transient_then_succeed_on_hard_gate()
     await scenario_transient_over_budget_fails()
     await scenario_permanent_fails_fast()
+    await scenario_provider_spawn_hiccup_is_transient()
     await scenario_inproc_exception_converges()
     print("\nALL PASS")
 

@@ -307,7 +307,9 @@ async def scenario_fanin_parks_durably() -> None:
 
 async def scenario_fork_wait_timeout() -> None:
     # the fork waits for a fan-in that can never clear (expects a,b but only a is
-    # forked); the fork's own timeout fires, publishes to the listener, and proceeds.
+    # forked). Since M9b the timed wait watches the branches: the moment every
+    # branch has settled with the join provably unmeetable, the declared degrade
+    # happens — the listener hears the REAL reason, without sitting out the TTL.
     ran, errs = [], []
     comms = InProcessComms()
     comms.register("role:a", Emit("A", ran))
@@ -319,14 +321,15 @@ async def scenario_fork_wait_timeout() -> None:
 
     graph = Graph.of(
         Stage("spread", node="", fork=["a"], then="summary",
-              wait={"timeout": 0.05, "on_timeout": "fork.timeout"}),
+              wait={"timeout": 30.0, "on_timeout": "fork.timeout"}),  # long TTL: must not matter
         Stage("a", node="role:a", then="join"),
         Stage("join", node="", fanin={"expect": ["a", "b"], "wait": "all"}, then=None),
         Stage("summary", node="role:summary", then=None),
     )
-    out = await Harness(comms, graph).run(Envelope(Kind.TASK, {}))
+    out = await asyncio.wait_for(
+        Harness(comms, graph).run(Envelope(Kind.TASK, {})), timeout=5)
     assert isinstance(out, Done), out
-    assert len(errs) == 1 and errs[0].payload["reason"] == "wait_timeout", errs
+    assert len(errs) == 1 and errs[0].payload["reason"] == "fanin_unmeetable", errs
 
 
 class _BadNode:
@@ -376,6 +379,98 @@ async def scenario_branch_failure_fails_fork_instead_of_hanging() -> None:
     except StageFailed as e:
         assert e.stage == "bad", e.stage
         assert "branch output not ok" in str(e), str(e)
+
+
+async def scenario_dead_arm_under_timed_wait_degrades_immediately() -> None:
+    """Mailbox M9b: with `wait.timeout` set, a dead arm used to leave the fork
+    waiting out the FULL TTL (20 min of looks-hung in the incident) before
+    degrading. The timed wait now watches the branches: once every arm has
+    settled with the outcome determined (arm dead / join unmeetable), the
+    DECLARED degrade happens immediately, and the on_timeout listener learns
+    the real reason instead of a misleading 'wait_timeout'."""
+    import time
+    errs, seen = [], []
+    comms = InProcessComms()
+    comms.register("role:a", Emit("A", []))
+    comms.register("role:bad", _BadNode())
+    comms.register("role:check", _HardCheck())
+    comms.register("role:summary", Capture(seen))
+
+    async def on_to(env):
+        errs.append(env)
+    await comms.subscribe("fork.timeout", on_to)
+
+    graph = Graph.of(
+        Stage("spread", node="", fork=["a", "bad"], then="summary",
+              wait={"timeout": 30.0, "on_timeout": "fork.timeout"}),  # long TTL
+        Stage("a", node="role:a", then="join"),
+        Stage("bad", node="role:bad", validators=["role:check"], max_attempts=1, then="join"),
+        Stage("join", node="", fanin={"expect": ["a", "bad"], "wait": "all"}, then=None),
+        Stage("summary", node="role:summary", then=None),
+    )
+    t0 = time.monotonic()
+    out = await asyncio.wait_for(
+        Harness(comms, graph).run(Envelope(Kind.TASK, {"seed": 1})), timeout=5)
+    assert time.monotonic() - t0 < 5, "must not sit out the 30s TTL"
+    assert isinstance(out, Done), out
+    assert len(errs) == 1 and errs[0].payload["reason"] == "branch_failed", errs
+    assert "branch output not ok" in errs[0].payload.get("detail", ""), errs[0].payload
+    assert seen and seen[0].get("seed") == 1, seen  # degraded: pre-fork payload continued
+
+
+async def scenario_timed_wait_happy_path_clears_normally() -> None:
+    """The timed wait's HAPPY path (eval YELLOW on M9b): `wait.timeout` set AND
+    the join met — the route every production fork with a fanin + TTL takes,
+    rewritten by M9b from a bare wait_for(fut). The joined result must flow,
+    fast, with no degrade and no on_timeout publish."""
+    errs, seen = [], []
+    comms = InProcessComms()
+    comms.register("role:a", Emit("A", []))
+    comms.register("role:b", Emit("B", []))
+    comms.register("role:summary", Capture(seen))
+
+    async def on_to(env):
+        errs.append(env)
+    await comms.subscribe("fork.timeout", on_to)
+
+    graph = Graph.of(
+        Stage("spread", node="", fork=["a", "b"], then="summary",
+              wait={"timeout": 30.0, "on_timeout": "fork.timeout"}),
+        Stage("a", node="role:a", then="join"),
+        Stage("b", node="role:b", then="join"),
+        Stage("join", node="", fanin={"expect": ["a", "b"], "wait": "all"}, then=None),
+        Stage("summary", node="role:summary", then=None),
+    )
+    out = await asyncio.wait_for(
+        Harness(comms, graph).run(Envelope(Kind.TASK, {})), timeout=5)
+    assert isinstance(out, Done), out
+    assert errs == [], errs                                # no degrade published
+    assert len(seen) == 1, seen                            # flow resumed once, joined
+    assert sorted(f["id"] for f in seen[0]["findings"]) == ["A", "B"], seen[0]
+
+
+async def scenario_pure_liveness_ttl_still_fires() -> None:
+    """The TTL keeps its liveness role: a CLEAN settle with no fan-in (the
+    external-clear pattern) and no clearer waits out the full wait.timeout,
+    then degrades with the plain 'wait_timeout' reason."""
+    errs = []
+    comms = InProcessComms()
+    comms.register("role:a", Emit("A", []))
+    comms.register("role:summary", Capture([]))
+
+    async def on_to(env):
+        errs.append(env)
+    await comms.subscribe("fork.timeout", on_to)
+
+    graph = Graph.of(
+        Stage("spread", node="", fork=["a"], then="summary",
+              wait={"timeout": 0.2, "on_timeout": "fork.timeout"}),
+        Stage("a", node="role:a", then=None),   # branch ends; NO fan-in, no clearer
+        Stage("summary", node="role:summary", then=None),
+    )
+    out = await Harness(comms, graph).run(Envelope(Kind.TASK, {}))
+    assert isinstance(out, Done), out
+    assert len(errs) == 1 and errs[0].payload["reason"] == "wait_timeout", errs
 
 
 async def scenario_terminal_fork_branch_failure_surfaces() -> None:
@@ -440,6 +535,9 @@ async def main() -> None:
     await scenario_node_clears_gate()
     await scenario_fanin_parks_durably()
     await scenario_fork_wait_timeout()
+    await scenario_dead_arm_under_timed_wait_degrades_immediately()
+    await scenario_timed_wait_happy_path_clears_normally()
+    await scenario_pure_liveness_ttl_still_fires()
     await scenario_branch_failure_fails_fork_instead_of_hanging()
     await scenario_terminal_fork_branch_failure_surfaces()
     await scenario_branch_soft_concerns_surface()

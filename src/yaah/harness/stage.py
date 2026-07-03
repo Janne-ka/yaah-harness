@@ -30,6 +30,7 @@ class Stage:
     escalate: Optional[str] = None  # 'human' → suspend when attempts run out
     then: Optional[str] = None  # next stage name, or None to finish
     fanout: Optional[List[str]] = None  # role BARRIER: run these ROLES in parallel on this one stage; merge to {results, roles}. Distinct from `fork` (branch chains) — explicit keys since the 2026-06-11 split.
+    min_success: Optional[int] = None  # k-of-n fanout completion (M9a): with k set, the stage PASSES the merged payload when >= k members succeeded (failed_roles still names the dead ones, for a downstream degraded-mode concern) instead of all-or-nothing failing N-1 healthy members for 1 flaky one. None (default) = every member must succeed, unchanged.
     branch: Optional[Dict[str, Any]] = None  # conditional next: {on, routes:{val:stage}, default}
     fork: Optional[List[str]] = None  # FORK: spread the envelope to these successor STAGES, each runs independently
     fanin: Optional[Dict[str, Any]] = None  # JOIN: {expect, wait, timeout, on_timeout, reduce} — wait for branches, reduce, continue

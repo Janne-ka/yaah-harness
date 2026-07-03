@@ -171,6 +171,47 @@ async def scenario_untrusted_placeholder_is_fenced() -> None:
     assert "spec:S" in p, p                                   # trusted field stays plain
 
 
+async def scenario_public_frame_untrusted_matches_render() -> None:
+    """Mailbox M8b: `yaah.agents.frame_untrusted` is the PUBLIC way for an
+    eval/tool to reproduce the production framing. The contract is
+    byte-equivalence with the real render path — proven by rendering a
+    `{{!key}}` through a real Agent, pinning the minted token, and comparing."""
+    import re as _re
+    from yaah.agents import frame_untrusted
+
+    seen = {}
+
+    class RecordingBackend:
+        async def complete(self, prompt, *, model=None, **opts):
+            seen["prompt"] = prompt
+            return "ok"
+
+    agent = Agent(RecordingBackend(), "diff:\n{{!diff}}", parse=False)
+    value = "a diff\nwith lines"
+    await agent.invoke(Envelope("task", {"diff": value}, {"correlation_id": "c"}),
+                       NodeConfig())
+    p = seen["prompt"]
+    token = _re.search(r"<<<(U[0-9a-f]{16})\n", p).group(1)
+    assert frame_untrusted("diff", value, token=token) in p, p   # byte-identical block
+
+    # non-str values json.dumps'd, same as the render path
+    await agent.invoke(Envelope("task", {"diff": {"k": 1}}, {"correlation_id": "c"}),
+                       NodeConfig())
+    p2 = seen["prompt"]
+    token2 = _re.search(r"<<<(U[0-9a-f]{16})\n", p2).group(1)
+    assert frame_untrusted("diff", {"k": 1}, token=token2) in p2, p2
+
+    # a non-production token shape is rejected loud (it would not interact with
+    # the fence-mimic neutralizer the way a real render's token does)
+    try:
+        frame_untrusted("diff", "v", token="FORGED")
+        raise AssertionError("bad token shape must be rejected")
+    except ValueError as e:
+        assert "16 lowercase hex" in str(e), e
+    # omitted token: a fresh valid one is minted
+    assert _re.search(r"<<<U[0-9a-f]{16}\n", frame_untrusted("diff", "v"))
+
+
 async def scenario_bare_payload_fence_mimic_is_neutralized() -> None:
     """The instruction channel (a bare {{field}} resolved from the PAYLOAD)
     can't be fenced — it IS the agent's task — so fence-MIMICKING sequences in
@@ -204,6 +245,7 @@ async def main() -> None:
     await scenario_agent_retry()
     await scenario_template_and_model_config()
     await scenario_untrusted_placeholder_is_fenced()
+    await scenario_public_frame_untrusted_matches_render()
     await scenario_bare_payload_fence_mimic_is_neutralized()
     await scenario_routing()
     await scenario_claude_per_agent_tools()
