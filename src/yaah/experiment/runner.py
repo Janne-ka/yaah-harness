@@ -50,6 +50,7 @@ _MODEL_NODE_TYPES = ("agent", "agent_loop")
 # (eval catch R2). `note`/`_*` are the config-comment conventions.
 _EXPERIMENT_KEYS = frozenset({
     "id", "variants", "inputs", "repetitions", "price_map", "store", "note",
+    "metrics",   # report-side: {name: dotted payload path} — validated in _check
 })
 
 
@@ -88,6 +89,12 @@ def _check_experiment(cfg: Dict[str, Any]) -> None:
     store = cfg.get("store", {})
     if not isinstance(store, dict):
         errs.append("`store` must be an object (e.g. {\"dir\": \".ab\"})")
+    metrics = cfg.get("metrics", {})
+    if not (isinstance(metrics, dict)
+            and all(isinstance(k, str) and k and isinstance(v, str) and v
+                    for k, v in metrics.items())):
+        errs.append("`metrics` must map metric name -> dotted payload path "
+                    "(e.g. {\"score\": \"review.score\"})")
     if errs:
         raise ValueError("invalid experiment config:\n  - " + "\n  - ".join(errs))
 

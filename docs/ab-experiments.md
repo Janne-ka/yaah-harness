@@ -74,6 +74,20 @@ replaced with a cost-capturing file sink into the campaign's trace file
 correlation id. Suspended rows carry `baton_id` but no cost attribution for
 the post-park leg (v1 limit).
 
+## The comparison matrix
+
+`yaah ab judge-experiment.json --report` (add `--json` for machines) reduces
+the collected rows + trace into cells — one per **(variant, fingerprint)
+population**, because a mid-campaign edit splits a variant into two
+populations and mixing them is how a "winner" gets crowned on stale data.
+Each cell: N, outcome counts, cost (mean/min/max/stdev, with unpriced rows
+COUNTED, never silently $0), duration, and your declared `metrics` (dotted
+payload paths, numeric leaves). Statistical honesty is enforced, not advised:
+there is **no winner column** — the matrix presents, you decide; N<2 cells
+are flagged INSUFFICIENT (convention: N=20/cell); and comparisons are
+run-level only — variants may differ in agent count and prompts, so per-stage
+cross-variant numbers would be meaningless and the report never emits them.
+
 ## Promotion
 
 When the matrix says B wins: point production at B's files, or merge B's

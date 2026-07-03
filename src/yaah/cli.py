@@ -184,12 +184,21 @@ def _parse_manual(rest: list) -> dict:
 
 
 def _parse_ab(rest: list) -> dict:
-    """`ab <experiment.json>` — run an A/B campaign: every variant x input x
-    repetition, one durable row per run. The report verb reads the rows."""
-    if len(rest) != 1:
+    """`ab <experiment.json> [--report [--json]]` — run an A/B campaign (one
+    durable row per run), or with --report reduce the collected rows + trace
+    into the comparison matrix (pure read; safe mid-campaign)."""
+    args = [a for a in rest if not a.startswith("-")]
+    flags = set(rest) - set(args)
+    unknown = flags - {"--report", "--json"}
+    if unknown:
+        _usage_exit("ab: unknown flag(s) {}".format(", ".join(sorted(unknown))))
+    if "--json" in flags and "--report" not in flags:
+        _usage_exit("ab: --json applies to --report")
+    if len(args) != 1:
         _usage_exit("ab needs exactly one experiment config "
-                    "(yaah ab my-experiment.json)")
-    return {"action": "ab", "experiment": rest[0]}
+                    "(yaah ab my-experiment.json [--report [--json]])")
+    return {"action": "ab", "experiment": args[0],
+            "report": "--report" in flags, "json": "--json" in flags}
 
 
 def _parse_scaffold(rest: list) -> dict:
@@ -458,18 +467,62 @@ def _dispatch_mcp_serve(spec: Dict[str, Any]) -> None:
 
 
 def _dispatch_ab(spec: Dict[str, Any]) -> None:
-    """Run an A/B experiment campaign. Every run appends a durable row; the
-    summary names the row store + trace file the comparison report reads."""
-    from .experiment import run_experiment
+    """Run an A/B experiment campaign — or, with --report, reduce its collected
+    rows + trace into the comparison matrix (no runs)."""
     path = os.path.abspath(spec["experiment"])
     cfg = _read_json(path)
-    summary = asyncio.run(run_experiment(cfg, os.path.dirname(path)))
+    base = os.path.dirname(path)
+    if spec.get("report"):
+        from .experiment import build_matrix
+        matrix = asyncio.run(build_matrix(cfg, base))
+        if spec.get("json"):
+            print(json.dumps(matrix, indent=2))
+            return
+        _render_matrix(matrix)
+        return
+    from .experiment import run_experiment
+    summary = asyncio.run(run_experiment(cfg, base))
     print("experiment {!r}: {} rows appended".format(
         summary["experiment"], summary["rows"]))
     for name, counts in summary["by_variant"].items():
         line = ", ".join("{} {}".format(v, k) for k, v in counts.items() if v)
         print("  {:<12} {}".format(name, line or "no runs"))
     print("rows + trace under the experiment store (trace: {})".format(summary["trace"]))
+    print("compare:  yaah ab {} --report".format(spec["experiment"]))
+
+
+def _render_matrix(matrix: Dict[str, Any]) -> None:
+    """The comparison matrix on a terminal: one line per (variant, population)
+    cell — N, outcomes, cost, duration, declared metrics. NO winner column by
+    design: the matrix presents, the human decides; warnings carry the
+    statistical-honesty flags (N<2, mid-campaign population splits)."""
+    print("experiment {!r} — {} cell(s)".format(
+        matrix["experiment"], len(matrix["cells"])))
+    for c in matrix["cells"]:
+        cost = c["cost_usd"]
+        cost_s = ("${:.4f} mean (${:.4f}-${:.4f}, sd {:.4f}, {} priced/{} un)".format(
+            cost["mean"], cost["min"], cost["max"], cost["stdev"],
+            cost["n_priced"], cost["n_unpriced"]) if cost.get("n")
+            else "no cost data ({} unpriced)".format(cost["n_unpriced"]))
+        outcomes = ", ".join("{} {}".format(v, k) for k, v in sorted(c["outcomes"].items()))
+        print("  {:<12} fp {}  N={}{}".format(
+            c["variant"], c["fingerprint"][:12], c["n"],
+            "  [INSUFFICIENT N]" if c["insufficient_n"] else ""))
+        print("    outcomes: {}   cost: {}".format(outcomes, cost_s))
+        dur = c["duration_s"]
+        if dur.get("n"):
+            print("    duration: {:.2f}s mean ({:.2f}-{:.2f})".format(
+                dur["mean"], dur["min"], dur["max"]))
+        for m, s in sorted(c["metrics"].items()):
+            if s.get("n"):
+                print("    metric {}: {:.3f} mean ({:.3f}-{:.3f}, sd {:.3f}, "
+                      "n={}, missing={})".format(m, s["mean"], s["min"], s["max"],
+                                                 s["stdev"], s["n"], s["missing"]))
+            else:
+                print("    metric {}: no numeric values (missing={})".format(
+                    m, s.get("missing", 0)))
+    for w in matrix["warnings"]:
+        print("  warning: " + w)
 
 
 def _dispatch_scaffold(spec: Dict[str, Any]) -> None:
