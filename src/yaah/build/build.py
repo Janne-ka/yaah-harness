@@ -43,6 +43,8 @@ def build_graph(g: Dict[str, Any]) -> Graph:
             escalate=s.get("escalate"),
             then=s.get("then"),
             fanout=s.get("fanout"),  # role BARRIER: ask N workers, merge replies
+            min_success=(int(s["min_success"]) if s.get("min_success") is not None
+                         else None),  # k-of-n fanout completion (M9a)
             branch=s.get("branch"),
             fork=s.get("fork"),      # branch CHAINS: spread to N stages, fanin rejoins
             fanin=s.get("fanin"),

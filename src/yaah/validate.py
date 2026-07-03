@@ -367,9 +367,10 @@ def _is_fork(stage_config: Dict[str, Any], stage_names: set) -> bool:
 # and fails quietly at runtime (the silent-misconfig class, review 2026-06-11).
 # `note` is the config comment convention; any `_`-prefixed key is meta (`_about`).
 _STAGE_KEYS = frozenset({
-    "node", "id", "validators", "max_attempts", "feedback", "escalate", "then",
-    "fanout", "fork", "branch", "fanin", "wait", "clears", "concerns_from",
-    "concerns_into", "clearable", "on_error", "note",
+    "node", "id", "validators", "max_attempts", "error_retries", "feedback",
+    "escalate", "then", "fanout", "min_success", "fork", "branch", "fanin",
+    "wait", "clears", "concerns_from", "concerns_into", "clearable",
+    "on_error", "note",
 })
 
 # Every key build_graph reads off the graph object itself. Same silent-no-op
@@ -531,6 +532,18 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
                                  or not all(isinstance(k, str) and k for k in prov)):
             errs.append("node {!r}: 'provides' must be a list of non-empty payload-key "
                         "strings (the keys this node guarantees on the payload)".format(role))
+        # M7 ladder: escalate_model's trigger is a PARSED `help` key, so it needs
+        # the parse path — with parse:false it would silently never fire (the
+        # silent-misconfig class); reject loud instead.
+        em = n.get("escalate_model")
+        if em is not None:
+            if not (isinstance(em, str) and em):
+                errs.append("node {!r}: escalate_model must be a non-empty model "
+                            "string (e.g. \"claude:sonnet\")".format(role))
+            elif n.get("parse") is False:
+                errs.append("node {!r}: escalate_model needs parse (the `help` "
+                            "trigger is a parsed key) — remove `parse: false` or "
+                            "drop escalate_model".format(role))
     for k in g:
         if k not in _GRAPH_KEYS and not k.startswith("_"):
             errs.append("graph: unknown key {!r}{}; known: {}".format(
@@ -590,6 +603,16 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
         ci = s.get("concerns_into")
         if ci is not None and not (isinstance(ci, str) and ci):
             errs.append("stage {!r}: concerns_into must be a non-empty payload-key string".format(name))
+        ms = s.get("min_success")
+        if ms is not None:
+            fo = s.get("fanout")
+            if not isinstance(fo, list):
+                errs.append("stage {!r}: min_success only applies to a fanout stage "
+                            "(set `fanout: [roles...]`, or remove it)".format(name))
+            elif not (isinstance(ms, int) and not isinstance(ms, bool)
+                      and 1 <= ms <= len(fo)):
+                errs.append("stage {!r}: min_success must be an int between 1 and "
+                            "len(fanout)={} (got {!r})".format(name, len(fo), ms))
         if s.get("on_error"):  # falsy (absent/null/false) = default-or-opt-out, like the harness
             _check_on_error(name, s["on_error"], errs)
         for k in s:

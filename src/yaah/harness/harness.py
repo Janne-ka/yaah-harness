@@ -15,7 +15,7 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, List, Optional, Union
+from typing import Any, Awaitable, Callable, List, Optional, Tuple, Union
 
 from ..comms import Comms
 from ..core import Envelope, Failure, Kind, Verdict
@@ -72,6 +72,12 @@ _TRANSIENT_SIGNALS = (
     "timeout", "timed out", "temporarily unavailable", "service unavailable",
     "connection reset", "connection refused", "connection aborted",
     "no responders", "index.lock", "cannot lock ref", "unable to create",
+    # a provider subprocess that died before its pipes opened (claude_cli's
+    # immediate-exit shape) is a host blip — without this it classified
+    # PERMANENT and back-to-back-burned max_attempts into a spurious human
+    # park on unattended runs (mailbox M6). A bare nonzero exit stays
+    # permanent: it can be auth/config, and the default is fail-fast.
+    "exited before pipe opened",
 )
 
 
@@ -471,7 +477,7 @@ class Harness:
 
     async def _run_attempts(
         self, stage: Stage, input: Envelope,
-        produce: Callable[[Stage, Envelope], Awaitable[object]],
+        produce: "Callable[[Stage, Envelope], Awaitable[Union[_Suspend, Tuple[Envelope, Optional[Verdict]]]]]",
     ) -> Union[_Pass, _Suspend]:
         """The shared per-stage loop, bounded by max_attempts: produce -> validate
         -> (pass | retry-with-feedback | escalate-to-human | fail). `produce`
@@ -588,7 +594,7 @@ class Harness:
         except Exception as e:
             return Envelope(Kind.ERROR, {"error": repr(e)}, dict(input.headers))
 
-    async def _produce_single(self, stage: Stage, input: Envelope) -> Union["_Suspend", tuple]:
+    async def _produce_single(self, stage: Stage, input: Envelope) -> "Union[_Suspend, Tuple[Envelope, Optional[Verdict]]]":
         """One attempt for a single-node stage: one request. An 'await' reply parks
         the stage, keeping what flowed INTO the gate so resume can merge the
         decision onto that artifact (early_review #18); an ERROR reply is a ready
@@ -619,24 +625,36 @@ class Harness:
             return _Suspend(str(out.payload.get("awaiting", "external")), parked)
         return out, None  # validate normally
 
-    async def _produce_fanout(self, stage: Stage, input: Envelope) -> Union["_Suspend", tuple]:
+    async def _produce_fanout(self, stage: Stage, input: Envelope) -> "Union[_Suspend, Tuple[Envelope, Optional[Verdict]]]":
         """One attempt for a fan-out stage: request every role in parallel, then
         merge into one envelope. return_exceptions so one role's failure surfaces
         as a ready fan-out-error verdict (handled as a StageFailed by the loop)
         without discarding the others — a Kind.ERROR reply (a remote handler
-        raised, H3) counts as a failed role exactly like a local exception; any
-        role choosing to suspend parks the whole stage. Carries the original input fields forward so a post-fan-out branch
+        raised, H3) and a member-RETURNED failed verdict (the fan-out twin of
+        _produce_single's H3 VERDICT rule) both count as a failed role exactly
+        like a local exception; any role choosing to suspend parks the whole
+        stage. Carries the original input fields forward so a post-fan-out branch
         or downstream node can still read domain fields (early_review #17). Used by
         _run_attempts."""
         roles = stage.fanout or []
         results = await asyncio.gather(
             *(self.comms.request(r, input) for r in roles), return_exceptions=True)
-        outs, errors = [], []
+        outs: List[Tuple[str, Envelope]] = []
+        # a failed role's `res` is a local exception OR an envelope (ERROR /
+        # failed VERDICT) — _failed_role_detail renders each shape
+        errors: List[Tuple[str, object]] = []
         for role, res in zip(roles, results):
             if isinstance(res, BaseException):
                 errors.append((role, res))
             elif res.kind == Kind.ERROR:  # remote handler raised (H3) — a failed role,
                 await self._ingest_remote_trace(res)  # not a result to merge
+                errors.append((role, res))
+            elif res.kind == Kind.VERDICT and not Verdict.from_envelope(res).ok:
+                # A member that RETURNED a failed verdict (an agent exhausting
+                # its schema/parse attempts, a guard node's refusal) is a failed
+                # role too — merged as a result it reads as a clean pass
+                # downstream (a dead lens = zero findings, mailbox M8a).
+                await self._ingest_remote_trace(res)
                 errors.append((role, res))
             else:
                 await self._ingest_remote_trace(res)  # R6 per-branch trace merge
@@ -652,11 +670,30 @@ class Harness:
                               failed_roles=[role for role, _ in errors])
         merged = input.reply_with(Kind.RESULT, merged_payload)
         if errors:
+            # k-of-n completion (M9a): with `min_success: k` declared, enough
+            # healthy members = a PASS with `failed_roles` naming the dead ones
+            # (a downstream reducer emits its degraded-mode concern from that),
+            # instead of throwing N-1 healthy results away for 1 flaky member.
+            if stage.min_success is not None and len(outs) >= stage.min_success:
+                return merged, None  # validate normally; degrade is visible, not silent
             return merged, Verdict.failed(Failure(
                 "fanout_error",
-                "fan-out role(s) failed: {}".format([role for role, _ in errors]),
+                "fan-out role(s) failed: {}".format(
+                    ", ".join(self._failed_role_detail(role, res) for role, res in errors)),
                 "ensure every fan-out node is reachable and succeeds"))
         return merged, None  # validate normally
+
+    @staticmethod
+    def _failed_role_detail(role: str, res: object) -> str:
+        """One failed fan-out role, WITH its why — 'role failed' without the
+        member's own failure codes forces the operator into the trace to learn
+        what a dead lens actually died of (the naming half of M8a)."""
+        if isinstance(res, Envelope) and res.kind == Kind.VERDICT:
+            codes = ", ".join(f.code for f in Verdict.from_envelope(res).failures)
+            return "{} (failed verdict: {})".format(role, codes or "unspecified")
+        if isinstance(res, Envelope):  # Kind.ERROR carries the remote repr
+            return "{} ({})".format(role, res.payload.get("error", "error"))
+        return "{} ({!r})".format(role, res)  # a local exception
 
     # Clear-id matching + clear publication live on the ClearBus (clear_bus.py) —
     # shared by the agent-clear race here and the fork's wait-for-clear.

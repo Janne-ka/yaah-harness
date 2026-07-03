@@ -23,10 +23,12 @@ class PhaseContributor(TraceContributor):
         out: Dict[str, Any] = {"status": span.status, "duration_ms": span.duration_ms}
         # Progress-UX attrs the progress sink renders: the stage name, plus the
         # suspend context (who/what a park is waiting for, and where its rendered
-        # artifact is). These must reach the projected record, not just sit in
-        # span.attrs — else the inline `awaiting=`/`-> open` lines are dead in real
-        # runs (the sink only sees the record, never the raw span).
-        for k in ("stage", "awaiting", "artifact"):
+        # artifact is), plus the model-ladder escalation labels (M7 — which model
+        # a rung escalated FROM and why; without them a laddered run's second
+        # model_call is only inferable, never labeled). These must reach the
+        # projected record, not just sit in span.attrs — else the lines are dead
+        # in real runs (the sink only sees the record, never the raw span).
+        for k in ("stage", "awaiting", "artifact", "ladder_from", "ladder_trigger"):
             if k in span.attrs:
                 out[k] = span.attrs[k]
         return out

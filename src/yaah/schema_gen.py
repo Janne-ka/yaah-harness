@@ -192,6 +192,9 @@ def build_pipeline_schema() -> Dict[str, Any]:
     # Stage keys with a pinned schema (autocomplete for enum-valued knobs; the
     # matching hard check lives in validate.py — _check_on_error).
     typed_stage_keys: Dict[str, Any] = {
+        "max_attempts": {"type": "integer", "minimum": 1},
+        "error_retries": {"type": "integer", "minimum": 0},
+        "min_success": {"type": "integer", "minimum": 1},  # ≤ len(fanout): cross-field, validate.py
         "on_error": {"oneOf": [
             {"type": "null"},
             {"const": "clear"},

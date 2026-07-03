@@ -630,6 +630,48 @@ def test_validator_main_node_render_status_ok_inbound_fails() -> None:
         raise AssertionError("render of reset-away {{raw}} after a validator must fail loud")
 
 
+def test_stage_error_retries_is_a_known_key() -> None:
+    """Regression (found with mailbox M9): build_graph reads `error_retries`
+    (build.py) but the key was missing from _STAGE_KEYS — the documented
+    transient-budget knob was falsely REJECTED at validation."""
+    p = _valid_pipeline()
+    p["graph"]["stages"]["s1"]["error_retries"] = 5
+    validate_pipeline(p)
+
+
+def test_min_success_rules() -> None:
+    """M9a: `min_success` (k-of-n fanout completion) is fanout-only, an int,
+    and 1 <= k <= len(fanout) — anything else is a config error, not a knob
+    that silently never fires."""
+    def fan(**stage_extra):
+        return {"nodes": {"x": {"type": "transform", "target": "fn:m:f"}},
+                "graph": {"start": "s1", "stages": {
+                    "s1": {"node": "x", "fanout": ["x", "x2"], **stage_extra}}}}
+    # note: fanout entries are roles; use the one node twice via alias roles
+    ok = fan(min_success=1)
+    ok["nodes"]["x2"] = {"type": "transform", "target": "fn:m:f"}
+    validate_pipeline(ok)
+    for bad, expect in [
+        (fan(min_success=0), "min_success"),          # below 1
+        (fan(min_success=3), "min_success"),          # above len(fanout)
+        (fan(min_success="two"), "min_success"),      # not an int
+    ]:
+        bad["nodes"]["x2"] = {"type": "transform", "target": "fn:m:f"}
+        try:
+            validate_pipeline(bad)
+            raise AssertionError("bad min_success must be rejected: " + expect)
+        except ValueError as e:
+            assert expect in str(e), str(e)
+    # min_success without fanout is meaningless -> rejected
+    p = _valid_pipeline()
+    p["graph"]["stages"]["s1"]["min_success"] = 1
+    try:
+        validate_pipeline(p)
+        raise AssertionError("min_success without fanout must be rejected")
+    except ValueError as e:
+        assert "fanout" in str(e), str(e)
+
+
 def main() -> None:
     test_valid_root_passes()
     test_validator_main_node_render_status_ok_inbound_fails()
@@ -672,7 +714,9 @@ def main() -> None:
     test_budget_node_timeout_exceeds_transport_window()
     test_budget_inproc_has_no_reply_window()
     test_budget_fork_wait_smaller_than_branch_node_timeout()
-    print("test_validate: PASS (40 scenarios)")
+    test_stage_error_retries_is_a_known_key()
+    test_min_success_rules()
+    print("test_validate: PASS (42 scenarios)")
 
 
 if __name__ == "__main__":

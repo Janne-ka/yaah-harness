@@ -29,13 +29,24 @@
               "clears": {},
               "concerns_from": {},
               "concerns_into": {},
+              "error_retries": {
+                "minimum": 0,
+                "type": "integer"
+              },
               "escalate": {},
               "fanin": {},
               "fanout": {},
               "feedback": {},
               "fork": {},
               "id": {},
-              "max_attempts": {},
+              "max_attempts": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "min_success": {
+                "minimum": 1,
+                "type": "integer"
+              },
               "node": {},
               "note": {},
               "on_error": {

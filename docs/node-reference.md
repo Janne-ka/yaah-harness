@@ -56,6 +56,24 @@ not-quite-JSON on a parse failure — unquoted/bare values, enum members,
 stage so haiku output Just Works. Top level must be an object — a parse-mode
 agent rejects a non-object reply as `not_object` before the schema runs. Omit
 it for no contract — byte-identical to before),
+`escalate_model` (optional model string, parse-path only — the one-rung MODEL
+LADDER: when the parsed reply carries a truthy top-level `help` key (the
+blocked-agent convention: a model that CANNOT do its job replies
+`{"help": "<blocker>", ...}` instead of hallucinating), the agent re-calls the
+SAME rendered prompt once with this stronger model and returns THAT reply,
+whatever it is — a repeated `help` flows out to the normal concern/gate path so
+an infra blockage reaches the human instead of burning a third model. Trigger
+is `help` only; parse failures keep the stage's retry+feedback path. The
+escalation is visible as a second `model_call` span whose record carries
+`ladder_from`/`ladder_trigger` (via the default `phase` capture), each span
+reporting ITS OWN call's tokens. Three facts to know before wiring it on:
+a help reply must still PASS `output_schema` to trigger — declare `help` as an
+additive optional string, never required; COST multiplies with retries — each
+stage attempt may ladder once, so `max_attempts: 3` is up to 6 model calls
+worst-case; and with `tools` a MIXED-capability ladder degrades silently (the
+tool manifest is rendered for the primary model's capability — keep both rungs
+tool-capable or the agent tool-free). Requires the parse path —
+`parse: false` + `escalate_model` is rejected at validation),
 `tools` (model-initiated, needs a turn-capable backend), `allowed_tools` +
 `permission_mode` (claude-native), `mcp` (inline servers or `"source:key"`),
 `expose`/`filters`/`max_chars`/`broker` (R9–R12 envelope access), `attach`
