@@ -24,7 +24,9 @@ from yaah.adapters.filters import AroundKeywordFilter, CallTargetFilter, RedactF
 from yaah.adapters.mcp import FileMcpSource
 from yaah.adapters.prompts import FilePromptSource, HttpPromptSource, LangfusePromptSource
 from yaah.adapters.providers import ClaudeCliProvider, FakeToolProvider, LiteLLMProvider
+from yaah.adapters.experiment_stores import JsonlExperimentStore
 from yaah.adapters.stores import FileBackend
+from yaah.experiment import ExperimentStore
 from yaah.data import DataSink, DataSource, RoutingDataSink, RoutingDataSource
 from yaah.filters import Filter
 from yaah.mcp import McpSource, RoutingMcpSource, StaticMcpSource
@@ -64,6 +66,7 @@ PORTS = {
                   ClaudeCliProvider, LiteLLMProvider, RoutingProvider],
     SupportsTurn: [ScriptedToolProvider, FakeToolProvider, LiteLLMProvider, RoutingProvider],
     StoreBackend: [MemoryBackend, FileBackend],
+    ExperimentStore: [JsonlExperimentStore],
     Scannable: [MemoryBackend, FileBackend],
     CompareAndSet: [MemoryBackend, FileBackend],
     StoreBackedFacade: [EnvelopeStore, IdempotencyStore, BatonStore],
@@ -85,7 +88,7 @@ PORTS = {
 # (StoreBackedFacade is a concrete base, not a Protocol — excluded.)
 ENFORCED = [Node, ApiProvider, SupportsTurn, StoreBackend, Scannable, CompareAndSet,
             Comms, Subscription, Tracer, TraceSink, TraceContributor,
-            PromptSource, DataSource, DataSink, McpSource, Filter]
+            PromptSource, DataSource, DataSink, McpSource, Filter, ExperimentStore]
 
 # claude_cli deliberately has NO native turn() (it runs its own tool loop) —
 # the capability must read as ABSENT both nominally and structurally.

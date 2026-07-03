@@ -47,6 +47,8 @@ Author:
 
 Run & inspect:
   run <root>                    run the configured pipeline (the default)
+  ab <experiment.json>          run an A/B campaign: variants x inputs x repetitions,
+                                one durable row per run (cost + outcomes; see docs)
   list <root> [--json]          show parked gates (the mailbox view; --json for a parseable shape)
   resume <root> ID [FILE]       deliver a decision (optionally from FILE) to a parked gate
   baton-schema <root> <id>      print the JSON Schema of decision.json for one parked baton
@@ -181,6 +183,15 @@ def _parse_manual(rest: list) -> dict:
     return {"action": "manual"}
 
 
+def _parse_ab(rest: list) -> dict:
+    """`ab <experiment.json>` — run an A/B campaign: every variant x input x
+    repetition, one durable row per run. The report verb reads the rows."""
+    if len(rest) != 1:
+        _usage_exit("ab needs exactly one experiment config "
+                    "(yaah ab my-experiment.json)")
+    return {"action": "ab", "experiment": rest[0]}
+
+
 def _parse_scaffold(rest: list) -> dict:
     """`scaffold <archetype> <dir>` — pick the named archetype and write its
     template. `scaffold --list` prints the archetype catalog with one-liners."""
@@ -307,6 +318,7 @@ def _parse_baton_schema(rest: list) -> dict:
 # Registry of verb -> parser. The dict is the single source of truth for the
 # CLI surface — adding a verb is one entry here + the matching dispatcher.
 _VERB_PARSERS: Dict[str, Callable[[list], dict]] = {
+    "ab":            _parse_ab,
     "init":          _parse_init,
     "manual":        _parse_manual,
     "mcp-serve":     _parse_mcp_serve,
@@ -445,6 +457,21 @@ def _dispatch_mcp_serve(spec: Dict[str, Any]) -> None:
     asyncio.run(serve_process_stdio())
 
 
+def _dispatch_ab(spec: Dict[str, Any]) -> None:
+    """Run an A/B experiment campaign. Every run appends a durable row; the
+    summary names the row store + trace file the comparison report reads."""
+    from .experiment import run_experiment
+    path = os.path.abspath(spec["experiment"])
+    cfg = _read_json(path)
+    summary = asyncio.run(run_experiment(cfg, os.path.dirname(path)))
+    print("experiment {!r}: {} rows appended".format(
+        summary["experiment"], summary["rows"]))
+    for name, counts in summary["by_variant"].items():
+        line = ", ".join("{} {}".format(v, k) for k, v in counts.items() if v)
+        print("  {:<12} {}".format(name, line or "no runs"))
+    print("rows + trace under the experiment store (trace: {})".format(summary["trace"]))
+
+
 def _dispatch_scaffold(spec: Dict[str, Any]) -> None:
     """Write the named archetype's template into target_dir. `yaah init <dir>`
     enters here with archetype="linear" (back-compat)."""
@@ -462,6 +489,7 @@ def _dispatch_scaffold(spec: Dict[str, Any]) -> None:
 
 
 _SELF_CONTAINED_DISPATCH: Dict[str, Callable[[Dict[str, Any]], None]] = {
+    "ab":            _dispatch_ab,
     "lint-overlay":  _dispatch_lint_overlay,
     "doctor":        _dispatch_doctor,
     "completion":    _dispatch_completion,

@@ -69,7 +69,38 @@ def _call(coro):
     return result, buf.getvalue()
 
 
+def scenario_inline_pipeline_dict_runs() -> None:
+    """An INLINE pipeline dict is valid per validate_root/schema/manual — but
+    _assemble_harness crashed on it with a bare TypeError (_rel(base, dict)),
+    a fail-loud violation found by the A/B design eval. It must just run.
+    live_config + inline pipeline is meaningless (no file to re-read) and must
+    be rejected LOUD, not crash."""
+    root = {
+        "transport": {"type": "inproc"},
+        "providers": {"fake": {"type": "fake", "default": "done"}},
+        "default_provider": "fake",
+        "pipeline": {
+            "nodes": {"echo": {"type": "agent", "template": "hi",
+                               "model": "fake:x", "parse": False}},
+            "graph": {"start": "s", "stages": {"s": {"node": "echo"}}},
+        },
+        "input": {},
+        "run": True,
+    }
+    out, printed = _call(r.run_root(root, "."))
+    assert isinstance(out, Done), out
+    assert out.output.payload.get("raw") == "done", out.output.payload
+
+    bad = dict(root, live_config=True)
+    try:
+        _call(r.run_root(bad, "."))
+        raise AssertionError("live_config + inline pipeline must be rejected loud")
+    except ValueError as e:
+        assert "live_config" in str(e) and "inline" in str(e), e
+
+
 def main() -> None:
+    scenario_inline_pipeline_dict_runs()
     with tempfile.TemporaryDirectory() as tmp:
         with open(os.path.join(tmp, "pipeline.json"), "w") as f:
             json.dump(PIPELINE, f)
