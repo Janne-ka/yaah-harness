@@ -625,6 +625,89 @@ def custom_node_type_is_opaque_not_false_positive() -> None:
     assert not _has(cfg, "render-key-unprovided")
 
 
+# ── human seams are OPEN merges: resume MERGES the human's whole reply ───────
+# harness._merge_decision folds the human's ENTIRE decision payload onto the pending
+# payload — the human can add ARBITRARY keys. So downstream of a human seam (a
+# `human_gate` node, or a stage with `escalate: "human"`) the payload is NOT provably
+# closed, and a "provably absent" hard ERROR there would false-positive on a working
+# pipeline. The contract-gap WARNING must survive (declare the key to silence it).
+
+
+def gate_does_not_prove_absence_of_human_supplied_keys() -> None:
+    # parse:false agent (closed {raw}) -> gate -> render of a key ONLY the human's
+    # decision could supply. The old preserve("decision") gate contract carried the
+    # closed proof through the merge and validate_pipeline hard-rejected this
+    # WORKING pipeline with render-key-absent.
+    cfg = _chain(("a", {"type": "agent", "parse": False}),
+                 ("g", {"type": "human_gate"}), template="{{decision}} {{notes}}")
+    validate_pipeline(cfg)   # must NOT raise: the human can supply `notes` at the gate
+    # the contract gap is still SURFACED (complete survives the gate) as a warning...
+    w = [m for m in lint_pipeline(cfg) if "render-key-unprovided" in m]
+    assert w and "notes" in w[0], lint_pipeline(cfg)
+    # ...and declaring the key on the gate (inline `provides`) silences it.
+    cfg["nodes"]["g"]["provides"] = ["notes"]
+    assert not _has(cfg, "render-key-unprovided"), lint_pipeline(cfg)
+
+
+def gate_still_provides_decision_on_a_closed_path() -> None:
+    # the sound half stays sound: the gate still PROVIDES `decision` (and keeps
+    # inbound keys), so a render of engine-guaranteed keys is quiet — no warn, no error.
+    cfg = _chain(("a", {"type": "agent", "parse": False}),
+                 ("g", {"type": "human_gate"}), template="{{decision}} {{raw}}")
+    validate_pipeline(cfg)
+    assert not _has(cfg, "render-key-unprovided"), lint_pipeline(cfg)
+
+
+def gate_branch_on_human_supplied_key_not_hard_failed() -> None:
+    # branch.on reads the gate's OUTPUT — the merged payload. A human-supplied route
+    # key is not provably absent (no hard error), but the undeclared dependency warns.
+    cfg = {"nodes": {"a": {"type": "agent", "parse": False},
+                     "g": {"type": "human_gate"}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "a", "then": "s2"},
+               "s2": {"node": "g", "branch": {"on": "approved", "routes": {}}}}}}
+    validate_pipeline(cfg)   # must NOT raise branch-key-absent
+    assert _has(cfg, "branch-key-unprovided"), lint_pipeline(cfg)
+
+
+def provable_absence_before_the_gate_still_fails_loud() -> None:
+    # don't over-widen: the merge happens AT the gate. Upstream of it the closed
+    # proof stands — a render BEFORE the gate reading a human-only key fails loud.
+    cfg = {"nodes": {"a": {"type": "agent", "parse": False},
+                     "r": {"type": "render", "template_text": "{{notes}}"},
+                     "g": {"type": "human_gate"}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "a", "then": "s2"},
+               "s2": {"node": "r", "then": "s3"},
+               "s3": {"node": "g"}}}}
+    try:
+        validate_pipeline(cfg)
+    except ValueError as e:
+        assert "notes" in str(e) and "render-key-absent" in str(e), str(e)
+        return
+    raise AssertionError("a provable absence upstream of the gate must still fail loud")
+
+
+def escalate_human_stage_does_not_prove_absence_downstream() -> None:
+    # same seam, other door: `escalate: "human"` resumes through the SAME
+    # _merge_decision, so `closed` must not survive the stage — but ONLY when the
+    # stage actually declares the escalation (no over-widening of its sibling).
+    def cfg(escalate):
+        s1 = {"node": "a", "then": "s2"}
+        if escalate:
+            s1["escalate"] = "human"
+        return {"nodes": {"a": {"type": "agent", "parse": False},
+                          "r": {"type": "render", "template_text": "{{notes}}"}},
+                "graph": {"start": "s1", "stages": {"s1": s1, "s2": {"node": "r"}}}}
+    validate_pipeline(cfg(True))    # not provable: the human may supply `notes` on resume
+    assert _has(cfg(True), "render-key-unprovided"), lint_pipeline(cfg(True))
+    try:
+        validate_pipeline(cfg(False))
+        raise AssertionError("without escalate the absence IS provable — must fail loud")
+    except ValueError as e:
+        assert "render-key-absent" in str(e), str(e)
+
+
 # ── #5: a >=2-outcome gate whose decision nothing branches on (silently ignores rejection) ──
 
 def _gate_cfg(gate_node, *, branch_on_decision=False):
@@ -669,6 +752,194 @@ def quiet_gate_json_schema_single_outcome() -> None:
             "decision_schema": {"type": "object", "required": ["decision"],
                                 "properties": {"decision": {"enum": ["ack"]}}}}
     assert not _has(_gate_cfg(node), "gate-decision-ignored")
+
+
+# ── parallel-shape stages: fanout / fork / fanin model the ENGINE's merged payload ──
+# Runtime truth (harness._produce_fanout): a fanout stage's output is
+# `dict(input.payload)` updated with exactly `results`, `roles`, `failed_roles` —
+# inbound keys survive, role outputs stay NESTED under `results`. A role that
+# replies AWAIT (a human_gate) parks the whole stage with `last_output=None`, so
+# resume REPLACES the payload with the human's response — `closed` cannot survive
+# a fanout whose role may suspend. Fork/fanin hand forward a fan-in REDUCE.
+
+
+def fanout_engine_merged_keys_not_hard_failed() -> None:
+    # parse:false agent (closed {raw}) feeds a fanout of two agent roles; the render
+    # reads the engine-merged keys AND an inbound key. Runtime: present on EVERY
+    # merged pass — must be fully quiet (no error, no warning). Pre-fix the stage
+    # was modeled by its `node`'s contract alone → false-positive render-key-absent.
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False},
+        "l1": {"type": "agent"}, "l2": {"type": "agent"},
+        "r": {"type": "render",
+              "template_text": "{{raw}} {{results}} {{roles}} {{failed_roles}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "a", "fanout": ["l1", "l2"], "then": "s3"},
+            "s3": {"node": "r"}}}}
+    validate_pipeline(cfg)   # must NOT raise render-key-absent
+    assert not _has(cfg, "render-key-unprovided"), lint_pipeline(cfg)
+
+
+def fanout_branch_on_engine_key_not_hard_failed() -> None:
+    # branch.on reads the fanout stage's OUTPUT — the engine-merged payload, where
+    # `failed_roles` is always set (k-of-n degrade routing is exactly this pattern).
+    cfg = {"nodes": {"a": {"type": "agent", "parse": False},
+                     "l1": {"type": "agent"}, "l2": {"type": "agent"}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "a", "then": "s2"},
+               "s2": {"node": "a", "fanout": ["l1", "l2"], "min_success": 1,
+                      "branch": {"on": "failed_roles", "routes": {}}}}}}
+    validate_pipeline(cfg)   # must NOT raise branch-key-absent
+    assert not _has(cfg, "branch-key-unprovided"), lint_pipeline(cfg)
+
+
+def fanout_gate_role_human_key_not_hard_failed() -> None:
+    # a human_gate fanned out as a ROLE parks the stage (AWAIT); resume replaces the
+    # payload with the human's whole response — a key only the human supplies is NOT
+    # provably absent downstream. Pre-fix this working pipeline was hard-rejected.
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False},
+        "g": {"type": "human_gate"}, "l1": {"type": "agent"},
+        "r": {"type": "render", "template_text": "{{notes}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "a", "fanout": ["g", "l1"], "then": "s3"},
+            "s3": {"node": "r"}}}}
+    validate_pipeline(cfg)   # must NOT raise: the human can supply `notes` on resume
+    # the contract gap is still SURFACED as a warning (complete survives the merge)
+    assert _has(cfg, "render-key-unprovided"), lint_pipeline(cfg)
+
+
+def fanout_absent_key_still_fails_loud_when_no_role_can_suspend() -> None:
+    # soundness guard: all roles are built-ins that never AWAIT, so the merged set is
+    # runtime-exact — a key that is neither inbound nor engine-set stays a hard error.
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False},
+        "l1": {"type": "agent"}, "l2": {"type": "agent"},
+        "r": {"type": "render", "template_text": "{{verdict}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "a", "fanout": ["l1", "l2"], "then": "s3"},
+            "s3": {"node": "r"}}}}
+    try:
+        validate_pipeline(cfg)
+    except ValueError as e:
+        assert "verdict" in str(e) and "render-key-absent" in str(e), str(e)
+        return
+    raise AssertionError("a key absent from the exact merged set must still fail loud")
+
+
+def provable_absence_upstream_of_the_fanout_still_fails_loud() -> None:
+    # don't over-widen: the engine merge happens AT the fanout stage. A render
+    # BEFORE it reading `results` is still provably broken.
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False}, "l1": {"type": "agent"},
+        "r": {"type": "render", "template_text": "{{results}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "r", "then": "s3"},
+            "s3": {"node": "a", "fanout": ["l1"]}}}}
+    try:
+        validate_pipeline(cfg)
+    except ValueError as e:
+        assert "results" in str(e) and "render-key-absent" in str(e), str(e)
+        return
+    raise AssertionError("a provable absence upstream of the fanout must still fail loud")
+
+
+def non_fanout_stage_unaffected_engine_keys_still_absent() -> None:
+    # the widening is fanout-conditional: the same chain WITHOUT `fanout` never
+    # merges `results`, so reading it stays a provable absence.
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False},
+        "r": {"type": "render", "template_text": "{{results}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "a", "then": "s3"},
+            "s3": {"node": "r"}}}}
+    try:
+        validate_pipeline(cfg)
+    except ValueError as e:
+        assert "render-key-absent" in str(e), str(e)
+        return
+    raise AssertionError("a plain stage must not inherit the fanout widening")
+
+
+def fork_rejoin_reduce_output_not_provably_absent() -> None:
+    # a fork's `then` continuation carries the fan-in's REDUCE output (or the
+    # unchanged input on a wait degrade) — a key a branch produces and the reduce
+    # merges is NOT provably absent there. Pre-fix the fork stage passed `closed`
+    # straight through and hard-rejected this working pipeline.
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False},
+        "b": {"type": "agent",
+              "output_schema": {"properties": {"finding": {"type": "string"}}}},
+        "r": {"type": "render", "template_text": "{{finding}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s0"},
+            "s0": {"fork": ["sb"], "then": "sr"},
+            "sb": {"node": "b", "then": "sf"},
+            "sf": {"fanin": {"expect": ["sb"]}},
+            "sr": {"node": "r"}}}}
+    validate_pipeline(cfg)   # must NOT raise render-key-absent
+    # ...and no false WARNING either: the reduce provably delivers `finding` here, and
+    # a warning would fail `--strict` CI on a working pipeline (eval finding 2026-07,
+    # runtime-probed). Downstream of a join is unchecked, not wrongly flagged.
+    assert not _has(cfg, "render-key-unprovided"), lint_pipeline(cfg)
+
+
+def combined_fanin_fanout_stage_takes_the_widest_arm() -> None:
+    # validate accepts `fanin` COMBINED with `fanout`, and the two runtime walkers
+    # disagree on such a stage (`_drive` would run the fanout merge; the branch walker
+    # `_walk` runs the fan-in join and never sets `results`). The lattice must take
+    # the JOIN arm — the widest — so neither walker is unsoundly modeled: no hard
+    # error on either key, and no closed claim that `results` is present (eval
+    # finding 2026-07, runtime-probed).
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False}, "l1": {"type": "agent"},
+        "r": {"type": "render", "template_text": "{{results}} {{never_provided}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "a", "fanout": ["l1"], "fanin": {"expect": []},
+                   "then": "s3"},
+            "s3": {"node": "r"}}}}
+    validate_pipeline(cfg)   # neither key may hard-fail: the join lane is unknowable
+
+
+def fanin_reduce_union_not_provably_absent() -> None:
+    # the fan-in's default reduce UNIONS the arrived branch payloads; the lattice
+    # meet is their INTERSECTION — a key one closed branch provides is not provably
+    # absent after the join. Pre-fix the fanin stage passed the closed intersection
+    # through and hard-rejected this working pipeline.
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False},
+        "p1": {"type": "agent", "parse": False},
+        "p2": {"type": "agent", "parse": False, "carry": ["extra"]},
+        "r": {"type": "render", "template_text": "{{extra}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s0"},
+            "s0": {"fork": ["sb1", "sb2"], "then": "sr"},
+            "sb1": {"node": "p1", "then": "sf"},
+            "sb2": {"node": "p2", "then": "sf"},
+            "sf": {"fanin": {"expect": ["sb1", "sb2"]}, "then": "sr"},
+            "sr": {"node": "r"}}}}
+    validate_pipeline(cfg)   # must NOT raise render-key-absent
+
+
+def wrong_typed_parallel_shape_is_a_clean_error_not_a_crash() -> None:
+    # `fanout: 5` (or fork/validators as non-lists) used to escape the structural
+    # checks and crash validate_pipeline with a raw TypeError ('int' object is not
+    # iterable) — the author gets a traceback instead of a finding naming the stage.
+    for key in ("fanout", "fork", "validators"):
+        cfg = {"nodes": {"n": {"type": "transform", "call": "envelope"}},
+               "graph": {"start": "a", "stages": {"a": {"node": "n", key: 5}}}}
+        try:
+            validate_pipeline(cfg)
+        except ValueError as e:
+            assert "'a'" in str(e) and key in str(e), (key, e)
+        else:
+            raise AssertionError("{}: 5 accepted".format(key))
 
 
 def main() -> None:
@@ -717,6 +988,11 @@ def main() -> None:
     undeclared_envelope_transform_warns_and_taints()
     render_warnings_are_actionable()
     quiet_render_after_gate_provides_decision()
+    gate_does_not_prove_absence_of_human_supplied_keys()
+    gate_still_provides_decision_on_a_closed_path()
+    gate_branch_on_human_supplied_key_not_hard_failed()
+    provable_absence_before_the_gate_still_fails_loud()
+    escalate_human_stage_does_not_prove_absence_downstream()
     quiet_render_after_get_into()
     quiet_render_sticky_survives_multihop()
     loop_converges_and_keeps_key()
@@ -732,6 +1008,16 @@ def main() -> None:
     opaque_nodes_provide_their_real_keys()
     quiet_render_default_into_for_get_and_post()
     custom_node_type_is_opaque_not_false_positive()
+    fanout_engine_merged_keys_not_hard_failed()
+    fanout_branch_on_engine_key_not_hard_failed()
+    fanout_gate_role_human_key_not_hard_failed()
+    fanout_absent_key_still_fails_loud_when_no_role_can_suspend()
+    provable_absence_upstream_of_the_fanout_still_fails_loud()
+    non_fanout_stage_unaffected_engine_keys_still_absent()
+    fork_rejoin_reduce_output_not_provably_absent()
+    combined_fanin_fanout_stage_takes_the_widest_arm()
+    fanin_reduce_union_not_provably_absent()
+    wrong_typed_parallel_shape_is_a_clean_error_not_a_crash()
     print("ok")
 
 

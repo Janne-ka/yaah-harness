@@ -559,6 +559,14 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
         errs.append("graph.start {!r} is not a stage".format(start))
     stage_names = set(stages)
     for name, s in stages.items():
+        # a non-list here used to escape into the loops below as a raw TypeError
+        bad_shape = [k for k in ("fanout", "fork", "validators")
+                     if k in s and not isinstance(s[k], list)]
+        if bad_shape:
+            errs.append("stage {!r}: {} must be a list of names, got {}".format(
+                name, "/".join(repr(k) for k in bad_shape),
+                "/".join(type(s[k]).__name__ for k in bad_shape)))
+            s = {k: v for k, v in s.items() if k not in bad_shape}
         fo = s.get("fanout") or []
         fk = s.get("fork") or []
         is_fork = bool(fk)
@@ -624,11 +632,14 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
         _check_constraints(cons, start, stages, errs)
     # The data-flow contract (ADR-0005 + ADR-0006 §D5): fail loud at LOAD on a consumer that
     # reads a key provably ABSENT on a closed path. One analysis, shared with lint_pipeline —
-    # validate takes the ERRORS (here), the lint takes the WARNINGS.
-    from .dataflow import analyze_dataflow
-    df_errors, _ = analyze_dataflow(config.get("nodes") or {}, stages,
-                                    g.get("sticky") or [], g.get("start"), base_path)
-    errs.extend(df_errors)
+    # validate takes the ERRORS (here), the lint takes the WARNINGS. Only on a structurally
+    # sound graph: the analysis assumes valid shapes (a `fanout: 5` would crash it), and the
+    # structural findings above already fail the config loud.
+    if not errs:
+        from .dataflow import analyze_dataflow
+        df_errors, _ = analyze_dataflow(config.get("nodes") or {}, stages,
+                                        g.get("sticky") or [], g.get("start"), base_path)
+        errs.extend(df_errors)
     if errs:
         raise ValueError("invalid pipeline:\n  - " + "\n  - ".join(errs))
 

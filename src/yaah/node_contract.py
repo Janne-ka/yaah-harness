@@ -163,7 +163,15 @@ def render_contract(cfg: Dict[str, Any]) -> Contract:
 
 
 def human_gate_contract(cfg: Dict[str, Any]) -> Contract:
-    return preserve("decision")
+    # A gate resumes by MERGING the human's ENTIRE decision payload onto the pending
+    # payload (harness._merge_decision) — the human can add ARBITRARY keys. So the gate
+    # keeps inbound keys and guarantees `decision`, but its output is an OPEN merge:
+    # `closed` must NOT survive it, or a key only the human supplies would be "provably
+    # absent" downstream — a false-positive hard ERROR on a working pipeline. Same
+    # Contract shape as preserve_declared, for the merge-seam reason rather than the
+    # author-declared one. (A miss downstream of a gate is thus at most a WARNING;
+    # inline `provides:` on the gate node declares human-supplied keys to silence it.)
+    return preserve_declared({"decision"})
 
 
 def get_contract(cfg: Dict[str, Any]) -> Contract:
@@ -216,6 +224,24 @@ BUILTIN_CONTRACTS: Dict[str, Callable[[Dict[str, Any]], Contract]] = {
     "expect_field": validator_contract,
     "shell_check": validator_contract,
 }
+
+
+# Node TYPES that can reply Kind.AWAIT and park their stage awaiting an external
+# decision. Node knowledge as DATA (ADR-0006), beside the contract table it
+# qualifies: the dataflow lattice reads it to decide whether a fanout stage has a
+# suspend/resume lane (resume REPLACES the merged payload with the human's
+# response, so `closed` cannot survive such a stage). Among the built-ins only
+# the gate awaits (build/human_gate.py is the one Kind.AWAIT emitter).
+SUSPENDING_TYPES = frozenset({"human_gate"})
+
+
+def may_suspend(ntype: Any) -> bool:
+    """Could a node of this TYPE reply Kind.AWAIT at runtime? An unknown (custom /
+    undeclared / malformed) type is a "may" — widen when in doubt; the non-gate
+    built-ins are provably request/reply-only. Never raises."""
+    if not isinstance(ntype, str):
+        return True
+    return ntype in SUSPENDING_TYPES or ntype not in BUILTIN_CONTRACTS
 
 
 def builtin_contract_for(ntype: Any, cfg: Dict[str, Any]) -> Optional[Contract]:

@@ -29,10 +29,24 @@ Conservatism (what keeps a LEGITIMATE experiment from being rejected) — each
 mechanism below adds keys at runtime that the lattice can't see, so each is
 WIDENED before analysis (widening only ever weakens claims: a skip or a
 warning, never a false abort):
-- fork/fanout/fanin stages hand forward a merged/reduced payload → opaque;
+- fork/fanout/fanin stages hand forward a merged/reduced payload → opaque.
+  The ENGINE lattice now models these shapes at the STAGE level itself (fanout's
+  engine-merged `results`/`roles`/`failed_roles`, non-closed when a role can
+  suspend; fork/fanin joins drop `complete` AND `closed` — dataflow._transfer)
+  and IGNORES such a stage's `node`, so this swap is inert for them today —
+  kept, like the human-seam swaps below, so this layer never silently depends
+  on engine internals staying widened;
 - human seams (a `human_gate` node; a stage with `escalate: "human"`) resume
   by MERGING the human's reply onto the payload (harness._merge_decision) →
-  `closed` dropped past them, inbound keys kept;
+  `closed` dropped past them, inbound keys kept. The ENGINE lattice now models
+  both seams as non-closed itself (node_contract.human_gate_contract;
+  dataflow._transfer's escalate widening), so for preventing ABORTS these
+  swaps are redundant belt-and-suspenders — kept so this layer never silently
+  depends on engine internals staying widened. Known imprecision of the
+  escalate swap, METRIC lane only: replacing the node keeps inbound keys the
+  runtime may drop AND loses the node's own declared provides, so it can hide
+  or add a `metric-unproven` WARNING — never a false abort (aborts need
+  `closed`, which every swap drops);
 - `concerns` (folded onto the Done payload) and every `concerns_into` key
   (engine-set on a stage's input) join the entry seed and sticky for (a), and
   are exempt from metric absence proofs in (b) (still unproven → warn).
@@ -94,9 +108,12 @@ def _widen_unmodeled_stages(nodes: Dict[str, Any],
     """Swap the node of every stage whose runtime output the lattice models too
     tightly for an ENTRY-SEEDED analysis (see module docstring: fork/fanout/fanin
     → opaque; human seams → preserve that drops `closed`, keeping the gate's
-    `decision`). The load-time lint tolerates the tight model because its entry
-    is unknowable; a closed seed would otherwise carry proofs THROUGH these
-    stages and reject working pipelines. Widening only ever weakens claims."""
+    `decision`). Every swap is now redundant for ABORTS — the engine models the
+    human seams as non-closed and the fork/fanout/fanin shapes at the stage level
+    (where it ignores the stage's node, making that swap a no-op) — but all stay
+    so this layer never silently depends on engine internals remaining widened.
+    The escalate swap trades warning precision on the metric lane (see module
+    docstring); no swap can cause a false abort, which is the bar here."""
     out_stages: Dict[str, Any] = {}
     shims: Dict[str, Dict[str, Any]] = {}
     for name, s in stages.items():

@@ -33,7 +33,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .node_contract import Flow, apply, meet, resolve_contract
+from .node_contract import Flow, apply, may_suspend, meet, resolve_contract
 from .templating import PLACEHOLDER as _PLACEHOLDER   # the {{mustache}} a render fills — one copy
 
 # A provides value on an edge is None (the fixpoint identity — "not yet reached") or a
@@ -51,22 +51,103 @@ def _undeclared_envelope_transform(node: Dict[str, Any]) -> bool:
             and not isinstance(node.get("provides"), list))
 
 
-def _transfer(node: Optional[Dict[str, Any]], pin: Provides, sticky: Set[str],
-              tainted: List[str], stage_name: str) -> Flow:
-    """How this stage's node rewrites the incoming flow. A routing stage (no node) passes the
+# The ENGINE-set keys of a fanout stage's merged payload (harness._produce_fanout):
+# the merge is `dict(input.payload)` updated with exactly `results=`, `roles=`,
+# `failed_roles=` — inbound keys survive, these three are always added, and role
+# outputs stay NESTED under `results` (never top-level). A k-of-n pass
+# (`min_success`) hands forward the same shape.
+_FANOUT_MERGE_KEYS = frozenset({"results", "roles", "failed_roles"})
+
+
+def _fanout_role_may_suspend(role: Any, nodes: Dict[str, Any]) -> bool:
+    """Whether a fanout ROLE could reply AWAIT and park its stage. If one does, the
+    harness parks with NO artifact (`_Suspend(last_output=None)`), so resume's
+    `_merge_decision` hands the human's response ALONE to the next stage — the merged
+    payload never happens on that lane. A role that isn't a declared node (or isn't
+    a string) widens to True; never raises."""
+    cfg = nodes.get(role) if isinstance(role, str) else None
+    return may_suspend(cfg.get("type") if isinstance(cfg, dict) else None)
+
+
+def _transfer(stage: Any, node: Optional[Dict[str, Any]], pin: Provides, sticky: Set[str],
+              tainted: List[str], stage_name: str,
+              nodes: Optional[Dict[str, Any]] = None) -> Flow:
+    """How this stage rewrites the incoming flow. A routing stage (no node) passes the
     payload through; every real node's effect comes from its resolved contract — the module
     has no per-type key table. An undeclared envelope-transform resolves to `opaque` (nothing
-    checkable downstream) AND records a taint so its consumers get a companion nudge."""
+    checkable downstream) AND records a taint so its consumers get a companion nudge.
+
+    A PARALLEL-SHAPE stage (`fork` / `fanout` / `fanin`) is modeled by what the ENGINE
+    hands forward, NOT its `node` (the runtime never runs a fanout/fork stage's node —
+    harness._run_stage / _drive; `nodes` is only read here, to resolve fanout roles).
+    Validate rejects only fanout+fork; a `fanin` COMBINED with either still loads, and
+    the two runtime walkers disagree on such a stage (`_drive` runs `fork` first, the
+    branch walker `_walk` runs `fanin` first) — so the order below IS load-bearing:
+    the JOIN shapes come first because their transfer is the widest (no flag
+    survives), which stays sound whichever walker hits the stage.
+      - fork / fanin: what flows onward is a fan-in REDUCE output (a fork's rejoin
+        `then` carries the clear; a fanin's continuation carries the reduce directly)
+        — or, for a fork, an exact input copy on the branch-head lane / a wait
+        degrade. The default reduce UNIONS the arrivals (a superset of the lattice's
+        intersection-`known`, so keeping `known` is sound) and an app `reduce` target
+        is arbitrary, so NEITHER `complete` NOR `closed` survives: downstream of a
+        join is unchecked rather than wrongly flagged (keeping `complete` here
+        manufactured `render-key-unprovided` warnings — `--strict` failures — on keys
+        the reduce provably delivers; runtime-probed 2026-07).
+      - fanout: the merged payload is inbound + exactly `results`/`roles`/`failed_roles`
+        (role outputs stay nested under `results`), so `known` grows by the engine keys
+        and `complete` survives. `closed` survives ONLY if no role can reply AWAIT
+        (node_contract.may_suspend): a suspended fanout resumes with the human's
+        response ALONE (the merge lane never ran), so the set isn't runtime-exact.
+
+    One STAGE-level widening on top of the node's contract: `escalate: "human"` resumes
+    through the same open merge as a human_gate (harness._merge_decision folds the human's
+    whole reply onto the failed artifact — arbitrary keys), so `closed` cannot survive the
+    stage: on the escalation lane a key only the human supplies is NOT provably absent.
+    `known`/`complete` are kept from the node's own contract — OPTIMISTIC on the
+    escalation lane (the merge base is the FAILED artifact, e.g. an error payload, which
+    may lack happy-path keys), an accepted blind spot: it can only mute warnings, never
+    manufacture a hard error (errors need `closed`, which is dropped here). The fanout
+    suspend lane and the join lanes keep `known` under the same accepted mute-only
+    optimism.
+
+    STILL NOT MODELED (each can only mute findings, never manufacture a hard error):
+    a fanned-out gate role's own `provides` (human-supplied keys there warn until the
+    author declares them somewhere on the path); which keys a specific fan-in reduce
+    yields; the feedback-retry keys (`feedback`/`priorAttempt`) the harness folds onto
+    a retried stage's INPUT (a lattice-wide pre-existing blind spot, not fanout's);
+    and — harness-side, runtime-probed 2026-07 — `sticky` is NOT re-folded inside fork
+    BRANCH walks (ForkCoordinator._walk never calls _fold_sticky, contradicting
+    Graph.sticky's "after every passing stage"), so the lattice's sticky-everywhere
+    assumption over-claims on in-branch closed lanes until that harness gap is fixed."""
     if pin is None:
         pin = Flow()   # unreachable-safe; reachable stages get a concrete pin
     sticky_fs = frozenset(sticky)
-    if node is None:
-        # a pure routing stage (fork/fanin with no node) passes the payload through
-        return Flow(pin.known | sticky_fs, pin.complete, pin.closed)
-    contract = resolve_contract(node.get("type"), node)
-    if contract.mode == "opaque" and _undeclared_envelope_transform(node):
-        tainted.append(stage_name)
-    return apply(contract, pin, sticky_fs)
+    stage_d = stage if isinstance(stage, dict) else {}
+    fanout = stage_d.get("fanout")
+    fanin = stage_d.get("fanin")
+    if stage_d.get("fork") or (isinstance(fanin, dict) and fanin):
+        # a JOIN shape (fork rejoin / fan-in continuation): reduce output flows on —
+        # checked FIRST so an accepted fanin+fanout combo widens instead of keeping
+        # the fanout arm's flags on a stage the branch walker treats as a fanin
+        flow = Flow(pin.known | sticky_fs, False, False)
+    elif fanout:
+        roles = fanout if isinstance(fanout, list) else []   # malformed → no proof
+        role_suspends = (not roles or any(
+            _fanout_role_may_suspend(r, nodes or {}) for r in roles))
+        flow = Flow(pin.known | _FANOUT_MERGE_KEYS | sticky_fs, pin.complete,
+                    pin.closed and not role_suspends)
+    elif node is None:
+        # a pure routing stage (no node) passes the payload through
+        flow = Flow(pin.known | sticky_fs, pin.complete, pin.closed)
+    else:
+        contract = resolve_contract(node.get("type"), node)
+        if contract.mode == "opaque" and _undeclared_envelope_transform(node):
+            tainted.append(stage_name)
+        flow = apply(contract, pin, sticky_fs)
+    if stage_d.get("escalate") == "human":
+        flow = flow._replace(closed=False)
+    return flow
 
 
 def _edges(stages: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -124,8 +205,9 @@ def compute_provides(nodes: Dict[str, Any], stages: Dict[str, Any], sticky: Set[
             # Only REACHABLE predecessors contribute — one still at TOP hasn't been reached
             # from `start`, so it never runs and must not taint the merge (a real path that
             # provides the key would otherwise be intersected away → false warning).
-            incoming = [_transfer(nodes.get(stages[p].get("node")), pin[p], sticky,
-                                  tainted, p) for p in preds[s] if pin[p] is not None]
+            incoming = [_transfer(stages[p], nodes.get(stages[p].get("node")), pin[p],
+                                  sticky, tainted, p, nodes)
+                        for p in preds[s] if pin[p] is not None]
             if not incoming:
                 continue  # no reachable predecessors: keep the seed (start) or TOP (unreached)
             merged: Flow = incoming[0]
@@ -159,7 +241,7 @@ def stage_outflows(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list: A
     for s_name, s in stages.items():
         p = pin.get(s_name)
         out[s_name] = None if p is None else _transfer(
-            nodes.get(s.get("node")), p, sticky, [], s_name)
+            s, nodes.get(s.get("node")), p, sticky, [], s_name, nodes)
     return out
 
 
@@ -296,7 +378,7 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
         # branch.on reads the payload AFTER this stage's node runs (the node's OUTPUT).
         on = (s.get("branch") or {}).get("on")
         if isinstance(on, str) and on:
-            flow = _transfer(node, pin_here, sticky, [], s_name)
+            flow = _transfer(s, node, pin_here, sticky, [], s_name, nodes)
             if flow.closed:
                 if on not in flow.known:
                     errors.append(branch_msg(s_name, on, flow.known, hard=True))

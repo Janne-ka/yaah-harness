@@ -96,7 +96,11 @@ def render_provides_output_and_path() -> None:
     assert render_contract({}) == preserve("output", "path")
 
 def human_gate_provides_decision() -> None:
-    assert human_gate_contract({}) == preserve("decision")
+    # NOT closed: resume MERGES the human's whole decision payload onto the pending
+    # payload (harness._merge_decision) — arbitrary keys can appear, so the gate's
+    # output is an open merge; a closed gate contract hard-failed working pipelines
+    # on keys only the human supplies (see tests/test_lint_pipeline.py human-seam tests).
+    assert human_gate_contract({}) == preserve_declared({"decision"})
 
 def get_default_into_is_data_not_result() -> None:
     # eval fix: get's builder default is "data", not "result".
