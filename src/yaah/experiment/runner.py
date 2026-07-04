@@ -94,6 +94,28 @@ def _check_experiment(cfg: Dict[str, Any]) -> None:
     store = cfg.get("store", {})
     if not isinstance(store, dict):
         errs.append("`store` must be an object (e.g. {\"dir\": \".ab\"})")
+    else:
+        # STORE_TYPES/STORE_KEYS live in store_factory — the construction site —
+        # so validation here can never drift from what the factory accepts.
+        from .store_factory import STORE_KEYS, STORE_TYPES
+        stype = store.get("type", "jsonl")
+        if stype not in STORE_TYPES:
+            errs.append(
+                "`store.type` {!r} is unknown — known: {}".format(
+                    stype, ", ".join(repr(t) for t in sorted(STORE_TYPES))))
+        else:
+            unknown_store = [k for k in store if k not in STORE_KEYS[stype]]
+            if unknown_store:
+                errs.append(
+                    "unknown key(s) in `store` for type {!r}: {} — "
+                    "known: {}".format(
+                        stype,
+                        ", ".join(repr(k) for k in unknown_store),
+                        ", ".join(repr(k) for k in sorted(STORE_KEYS[stype]))))
+            if stype == "postgres" and not store.get("dsn"):
+                errs.append(
+                    '`store.dsn` is required for type "postgres" — '
+                    'add {"dsn": "postgresql://user:pass@host/db"}')
     metrics = cfg.get("metrics", {})
     if not (isinstance(metrics, dict)
             and all(isinstance(k, str) and k and isinstance(v, str) and v
@@ -195,10 +217,9 @@ async def run_experiment(cfg: Dict[str, Any], base: str, *,
     _check_experiment(cfg)
     exp_id = cfg["id"]
     price_map = cfg["price_map"]
+    # store.dir is always the campaign directory regardless of row-store type —
+    # the trace file (cost sink) always lands on the local filesystem.
     store_dir = _rel(base, (cfg.get("store") or {}).get("dir", ".ab"))
-    if store is None:
-        from ..adapters.experiment_stores import JsonlExperimentStore
-        store = JsonlExperimentStore(store_dir)
     trace_path = os.path.join(store_dir, "{}.trace.jsonl".format(exp_id))
 
     # PRE-FLIGHT: every variant loads, validates, prices — and every fixture
@@ -218,43 +239,47 @@ async def run_experiment(cfg: Dict[str, Any], base: str, *,
 
     by_variant: Dict[str, Dict[str, int]] = {}
     total = 0
-    for name, (root, vbase, fingerprint) in variants.items():
-        counts = by_variant.setdefault(
-            name, {"done": 0, "suspended": 0, "failed": 0, "error": 0})
-        for i, inp in enumerate(cfg["inputs"]):
-            if isinstance(inp, str):
-                input_id, input_val = inp, _rel(base, inp)  # fixture: experiment-relative
-            else:
-                input_id, input_val = "inline-{}".format(i), inp
-            for rep in range(cfg.get("repetitions", 1)):
-                effective = dict(root)
-                effective["input"] = input_val
-                effective["run"] = True   # a campaign run is always a one-shot run
-                # the experiment owns observability: force cost capture into
-                # the campaign's trace file (report joins by corr)
-                effective["trace"] = {
-                    "mode": "tracer", "capture": ["phase", "cost"],
-                    "sinks": [{"type": "file", "path": trace_path}],
-                }
-                t0 = time.time()
-                try:
-                    out = await run_root(effective, vbase)
-                    fields = _outcome_row(out)
-                except StageFailed as e:
-                    failed_env = e.output
-                    fields = {"outcome": "failed",
-                              "corr": (failed_env.correlation_id
-                                       if failed_env is not None else None),
-                              "baton_id": None, "output": None,
-                              "failure": [f.code for f in e.verdict.failures] or [str(e)]}
-                except Exception as e:  # a campaign survives one bad run; the row says why
-                    fields = {"outcome": "error", "corr": None, "baton_id": None,
-                              "output": None, "error": repr(e)}
-                row = {"experiment_id": exp_id, "variant": name,
-                       "fingerprint": fingerprint, "input_id": input_id,
-                       "rep": rep, "t_start": t0, "t_end": time.time(), **fields}
-                await store.append_row(exp_id, row)
-                counts[fields["outcome"]] = counts.get(fields["outcome"], 0) + 1
-                total += 1
+    # store built AFTER pre-flight: a config that aborts above never opens a
+    # DB connection; opened_store closes on exit only what it built.
+    from .store_factory import opened_store
+    async with opened_store(cfg, base, store) as st:
+        for name, (root, vbase, fingerprint) in variants.items():
+            counts = by_variant.setdefault(
+                name, {"done": 0, "suspended": 0, "failed": 0, "error": 0})
+            for i, inp in enumerate(cfg["inputs"]):
+                if isinstance(inp, str):
+                    input_id, input_val = inp, _rel(base, inp)  # fixture: experiment-relative
+                else:
+                    input_id, input_val = "inline-{}".format(i), inp
+                for rep in range(cfg.get("repetitions", 1)):
+                    effective = dict(root)
+                    effective["input"] = input_val
+                    effective["run"] = True   # a campaign run is always a one-shot run
+                    # the experiment owns observability: force cost capture into
+                    # the campaign's trace file (report joins by corr)
+                    effective["trace"] = {
+                        "mode": "tracer", "capture": ["phase", "cost"],
+                        "sinks": [{"type": "file", "path": trace_path}],
+                    }
+                    t0 = time.time()
+                    try:
+                        out = await run_root(effective, vbase)
+                        fields = _outcome_row(out)
+                    except StageFailed as e:
+                        failed_env = e.output
+                        fields = {"outcome": "failed",
+                                  "corr": (failed_env.correlation_id
+                                           if failed_env is not None else None),
+                                  "baton_id": None, "output": None,
+                                  "failure": [f.code for f in e.verdict.failures] or [str(e)]}
+                    except Exception as e:  # a campaign survives one bad run; the row says why
+                        fields = {"outcome": "error", "corr": None, "baton_id": None,
+                                  "output": None, "error": repr(e)}
+                    row = {"experiment_id": exp_id, "variant": name,
+                           "fingerprint": fingerprint, "input_id": input_id,
+                           "rep": rep, "t_start": t0, "t_end": time.time(), **fields}
+                    await st.append_row(exp_id, row)
+                    counts[fields["outcome"]] = counts.get(fields["outcome"], 0) + 1
+                    total += 1
     return {"experiment": exp_id, "rows": total, "trace": trace_path,
             "by_variant": by_variant}

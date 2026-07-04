@@ -64,11 +64,12 @@ async def build_matrix(cfg: Dict[str, Any], base: str, *,
     _check_experiment(cfg)   # same loud shape check as the run verb (eval Y2:
     # a malformed config gave raw KeyError/AttributeError tracebacks here)
     exp_id = cfg["id"]
+    # store.dir is always the campaign directory regardless of row-store type —
+    # the trace file (cost sink) always lands on the local filesystem.
     store_dir = _rel(base, (cfg.get("store") or {}).get("dir", ".ab"))
-    if store is None:
-        from ..adapters.experiment_stores import JsonlExperimentStore
-        store = JsonlExperimentStore(store_dir)
-    rows = await store.rows(exp_id)
+    from .store_factory import opened_store
+    async with opened_store(cfg, base, store) as st:
+        rows = await st.rows(exp_id)
 
     trace_path = os.path.join(store_dir, "{}.trace.jsonl".format(exp_id))
     per_run: Dict[str, Dict[str, Any]] = {}

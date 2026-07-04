@@ -41,13 +41,25 @@ The experiment names the variants and the campaign matrix:
 }
 ```
 
+The `store` block selects the row substrate:
+
+| `store.type` | Required keys | Effect |
+|---|---|---|
+| `"jsonl"` (default) | `dir` (optional, default `".ab"`) | One `.rows.jsonl` file per experiment under `store.dir` — zero-dep, inspectable, CI-friendly. |
+| `"postgres"` | `dsn` (required), `table` (optional) | INSERT-only rows table in Postgres (`pip install "psycopg[binary]"`); `store.dir` still sets the trace-file directory. |
+
+Example for production campaigns:
+```json
+"store": { "type": "postgres", "dsn": "postgresql://user:pass@host/db", "dir": ".ab" }
+```
+
 `price_map` uses the SAME rate-card shape as `yaah trace` (`{model:
 {input, output}}` in $ per 1k tokens) — one dialect everywhere, so the same
 map prices both the campaign report and ad-hoc trace inspection.
 
 `yaah ab judge-experiment.json` runs variants × inputs × repetitions and
-appends one row per run to the experiment store (JSONL per experiment under
-`store.dir`; a database adapter is the planned production substrate).
+appends one row per run to the experiment store (JSONL by default; set
+`store.type: "postgres"` with a DSN for production campaigns).
 
 Fingerprint honesty: the row fingerprint hashes the effective configs plus
 file-sourced prompt/template BYTES. It does NOT hash remote prompt contents

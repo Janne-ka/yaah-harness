@@ -110,7 +110,7 @@ class PostgresBackend(StoreBackend, Scannable, CompareAndSet):
         """The (lazily opened) connection, with the table ensured once."""
         if self._connection is None:
             try:
-                import psycopg  # lazy: only needed if this backend is used
+                import psycopg  # type: ignore[import-not-found]  # lazy optional dep; only needed if this backend is used
             except ImportError as e:
                 raise ImportError(
                     'state type "postgres" needs the optional psycopg package: '
