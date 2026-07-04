@@ -18,7 +18,7 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Iterable, Optional
 
 from ..core import Envelope
 from ..trace import Span
@@ -42,6 +42,23 @@ class SpanEmitter:
             "stage", corr=input.correlation_id, parent=input.id,
             t0=now, t1=now, status=status, attrs={"stage": stage_name, **attrs}))
 
+    async def resumed(self, stage_name: str, input: Envelope, *,
+                      awaiting: Optional[str],
+                      decision_keys: Iterable[str]) -> None:
+        """Emit a point-in-time `stage` span recording an EXTERNAL (human) RESUME
+        decision. Without it the human-override event had NO trace record at all:
+        resume() routes PAST the gate without re-executing it, so the run's trace
+        ended at status:suspended and the baton — the only other witness — is
+        deleted on completion (the "override is logged" audit gap). Status is
+        plain "ok" (no new taxonomy in aggregate; a resume is not an error and
+        must not count as one). Attrs carry the decision's payload KEYS only,
+        sorted — payload VALUES may be sensitive (a human's free-text ruling)
+        and must never reach the trace."""
+        attrs: dict = {"resumed": True, "decision_keys": sorted(decision_keys)}
+        if awaiting is not None:  # always set on a suspended baton; guard anyway
+            attrs["awaiting"] = awaiting
+        await self.note(stage_name, input, status="ok", attrs=attrs)
+
     async def stage(self, stage_name: str, input: Envelope, t0: float,
                     *, status: str, concerns: Optional[list] = None,
                     output: Optional[Envelope] = None, route: Any = None,
@@ -55,7 +72,7 @@ class SpanEmitter:
         contract (BUG-662): a subprocess's exit code must be observable in the
         trace even on the pass path (a shell node with `|| true`-style
         tolerance can pass while the command failed)."""
-        attrs = {"stage": stage_name}
+        attrs: Dict[str, Any] = {"stage": stage_name}
         if concerns:
             attrs["concerns"] = len(concerns)
         if output is not None and isinstance(output.payload.get("exit_code"), int):

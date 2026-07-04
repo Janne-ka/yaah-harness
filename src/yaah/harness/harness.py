@@ -252,6 +252,16 @@ class Harness:
         stage = self.graph.stages[baton.stage]
         resume_input = self._merge_decision(baton.pending, response)
         baton.pending = None
+        # LOG THE OVERRIDE: without this record the human decision left no trace
+        # at all — resume routes PAST the gate (no stage re-execution, so no
+        # stage span) and the baton is deleted on completion, so the run's trace
+        # ended at status:suspended. Emitted BEFORE the run continues, so the
+        # decision is on record even if the continuation fails. Keys only, never
+        # values (the RESPONSE payload may be sensitive); corr rides the merged
+        # input, which keeps the parked run's correlation_id.
+        await self._spans.resumed(stage.name, resume_input,
+                                  awaiting=baton.awaiting,
+                                  decision_keys=response.payload.keys())
         baton.stage = self._next_stage(stage, resume_input)
         return await self._settle(baton, resume_input)
 
@@ -429,6 +439,18 @@ class Harness:
             if isinstance(result, _Suspend):
                 baton.status = "suspended"
                 baton.parked_at = self._wall()  # wall-clock: TTL must survive a restart (H1)
+                # Pin THIS RUN's correlation id onto the parked artifact before it
+                # is persisted. The artifact's own chain can have diverged from the
+                # run corr (a feedback-retry envelope copies headers WITHOUT a
+                # correlation_id, so its chain restarts on a fresh id) — and resume,
+                # possibly in another process, recovers the run corr ONLY from these
+                # headers. Without the pin the resume trace record (the logged
+                # human-override event) would land under a corr no other record of
+                # the run shares — an orphaned audit line. `input` here is the
+                # stage-entry envelope, the same one the suspended stage span was
+                # emitted with, so this is exactly the corr the trace groups by.
+                if result.last_output is not None:
+                    result.last_output.headers["correlation_id"] = input.correlation_id
                 baton.pending = result.last_output  # the artifact, for resume to keep
                 baton.awaiting = result.awaiting   # the open question, for the mailbox view
                 # surface concerns at the gate: those from prior passed stages PLUS

@@ -25,10 +25,14 @@ class PhaseContributor(TraceContributor):
         # suspend context (who/what a park is waiting for, and where its rendered
         # artifact is), plus the model-ladder escalation labels (M7 — which model
         # a rung escalated FROM and why; without them a laddered run's second
-        # model_call is only inferable, never labeled). These must reach the
-        # projected record, not just sit in span.attrs — else the lines are dead
-        # in real runs (the sink only sees the record, never the raw span).
-        for k in ("stage", "awaiting", "artifact", "ladder_from", "ladder_trigger"):
+        # model_call is only inferable, never labeled), plus the human-resume
+        # record (resumed/decision_keys — the "override is logged" audit line;
+        # decision_keys are payload KEYS only, values never enter the span). These
+        # must reach the projected record, not just sit in span.attrs — else the
+        # lines are dead in real runs (the sink only sees the record, never the
+        # raw span).
+        for k in ("stage", "awaiting", "artifact", "ladder_from", "ladder_trigger",
+                  "resumed", "decision_keys"):
             if k in span.attrs:
                 out[k] = span.attrs[k]
         return out
