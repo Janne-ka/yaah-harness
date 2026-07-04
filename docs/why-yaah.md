@@ -64,9 +64,9 @@ is paired and apples-to-apples.
 
 ![ab-fork: one input forks to arm A and arm B, fan-in reduces](img/why-ab-fork.svg)
 
-And the variant *itself* is config. A different model, a different prompt, a
-skipped stage is an `_extends` overlay — change behaviour without touching code or
-redeploying:
+And the variant *itself* is config. **Topology** — a skipped stage, a new branch,
+a different fan-in — is an `_extends` overlay, changeable without a code edit or
+redeploy. Model and prompt overrides follow the same pattern:
 
 ```jsonc
 // spec-judge.json — a SPECIALIZATION of judge-gate.json
@@ -250,7 +250,7 @@ Honest comparison — every tool here is good; the question is fit.
 | Capability | YAAH | LangGraph | Temporal | PromptFlow |
 |---|---|---|---|---|
 | Where the graph is **defined** | **config (JSON + `_extends`)** | Python (`StateGraph`) | Python/Go code | YAML + Python tools |
-| Change shape **without redeploy** | **yes — overlay/edit config** | no — code change | no — code change | partial (flow YAML) |
+| Change **topology** without redeploy | **yes — overlay/edit config** | topology: code change; prompt/model: paid Assistants | no — code change | partial (flow YAML) |
 | A/B / variants | **fork + overlay, first-class** | code branches | code | **dataset variants + UI** |
 | Verifier routes the envelope (incl. **backward**) | **branch on a payload key** | conditional edges (Python fns) | signals/code | limited |
 | Durable human gates | **suspend/resume, cross-process** | interrupts + checkpointer | signals (heavy) | n/a |
@@ -262,20 +262,29 @@ Honest comparison — every tool here is good; the question is fit.
 **Where YAAH clearly wins**
 
 - **Config-time topology.** The graph, its branches, forks, and loops are data.
-  A/B, model swaps, skip-conditions, per-tenant shape are `_extends` overlays —
-  reviewable as a config diff, changeable without a deploy. In LangGraph/Temporal
-  the topology is code; a variant is a code change.
+  A/B, skip-conditions, per-tenant shape are `_extends` overlays — reviewable as a
+  config diff, changeable without a deploy. In LangGraph the graph structure is
+  code; topology changes require a code change. (Prompt/model-only swaps without
+  redeploy are also available via their paid Assistants feature.)
 - **The verifier-routes-the-envelope pattern as a reusable, bounded template.**
   LangGraph has conditional edges, but the routing lives in Python functions and
   the loop bound is hand-rolled per graph. Here the judge-gate is one `_extends`
   template with the bound built in, specialized by overlay.
-- **Durable human gates by default, with clean stage boundaries.** Suspend/resume
-  is cross-process out of the box, and YAAH deliberately has **no mid-node
-  interrupt** — a gate is always a stage boundary, which keeps runs replayable and
-  reasoning isolated. (LangGraph's mid-node interrupt is more flexible but breaks
-  the clean boundary.)
+- **Cleaner gate semantics.** LangGraph's `interrupt()` + durable checkpointers
+  are mature; durable HITL is table stakes, not a differentiator. YAAH's residual
+  is semantic: a gate is always a **stage boundary** — no node re-executes on
+  resume — and the decision form is a declared **JSON schema**, making the operator
+  contract identical whether a human or an AI delivers the decision.
 - **Domain-free engine + minimal footprint.** No framework lock-in; the same
   `Tool` spec drives both function-calling and prompt-manifest backends.
+
+Worth knowing for constrained environments: the zero-dependency core runs without
+any external service, cloud endpoint, or mandatory API key. Every third-party
+binding (NATS, LiteLLM, Langfuse, psycopg) is an opt-in adapter never imported unless
+declared; the base install is ~16k lines with no required network access. If your
+environment is air-gapped or subject to strict supply-chain review, the footprint
+is small and auditable. Evaluate this property against your actual constraints —
+it is not a benchmark claim.
 
 **Where the others win — use them (or compose)**
 
