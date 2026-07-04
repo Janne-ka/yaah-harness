@@ -1,5 +1,9 @@
 # A/B experiments — measure config variants, promote the winner
 
+**Runnable example:** [`examples/hello-yaah/experiment.json`](../examples/hello-yaah/README.md)
+— two summarizer variants, offline on fakes: campaign → matrix → rescore in
+three commands.
+
 The product loop `yaah ab` serves: you need to balance **cost vs performance**
 (model choice, prompts, retry knobs, topology) with data, not opinion. Run
 variants — on real providers when the campaign says so — while the engine

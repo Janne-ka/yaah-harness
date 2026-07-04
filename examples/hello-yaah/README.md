@@ -65,3 +65,20 @@ Two touches worth noticing in `starter.json`:
   [`examples/arch-drift/HOW-IT-FITS-TOGETHER.md`](../arch-drift/HOW-IT-FITS-TOGETHER.md)
 - **Build your own** → [`docs/tutorial.md`](../../docs/tutorial.md) +
   [`docs/archetypes.md`](../../docs/archetypes.md)
+
+## Bonus: your first A/B campaign
+
+This directory doubles as the `yaah ab` example — same pipeline, two
+summarizer models, compared as data:
+
+```
+yaah ab experiment.json             # 2 variants x 3 reps -> durable rows in .ab/
+yaah ab experiment.json --report    # the comparison matrix (no winner column — you decide)
+yaah ab experiment.json --rescore contract-scored.json   # would a tightened
+                                    # output contract reject old outputs? zero model calls
+```
+
+The B variant is a two-file `_extends` overlay (`starter-b.local.json` +
+`starter-b.json`) — the same mechanism you'd use to promote it: point
+production at B's files when the matrix says so. Full story:
+[`docs/ab-experiments.md`](../../docs/ab-experiments.md).
