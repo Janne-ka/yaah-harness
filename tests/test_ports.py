@@ -25,7 +25,7 @@ from yaah.adapters.mcp import FileMcpSource
 from yaah.adapters.prompts import FilePromptSource, HttpPromptSource, LangfusePromptSource
 from yaah.adapters.providers import ClaudeCliProvider, FakeToolProvider, LiteLLMProvider
 from yaah.adapters.experiment_stores import JsonlExperimentStore
-from yaah.adapters.stores import FileBackend
+from yaah.adapters.stores import FileBackend, PostgresBackend
 from yaah.experiment import ExperimentStore
 from yaah.data import DataSink, DataSource, RoutingDataSink, RoutingDataSource
 from yaah.filters import Filter
@@ -65,10 +65,10 @@ PORTS = {
     ApiProvider: [FakeProvider, ScriptedProvider, ScriptedToolProvider, FakeToolProvider,
                   ClaudeCliProvider, LiteLLMProvider, RoutingProvider],
     SupportsTurn: [ScriptedToolProvider, FakeToolProvider, LiteLLMProvider, RoutingProvider],
-    StoreBackend: [MemoryBackend, FileBackend],
+    StoreBackend: [MemoryBackend, FileBackend, PostgresBackend],
     ExperimentStore: [JsonlExperimentStore],
-    Scannable: [MemoryBackend, FileBackend],
-    CompareAndSet: [MemoryBackend, FileBackend],
+    Scannable: [MemoryBackend, FileBackend, PostgresBackend],
+    CompareAndSet: [MemoryBackend, FileBackend, PostgresBackend],
     StoreBackedFacade: [EnvelopeStore, IdempotencyStore, BatonStore],
     Comms: [InProcessComms, LocalBus, NatsComms],
     Subscription: [InMemorySubscription, _NatsSubscription],

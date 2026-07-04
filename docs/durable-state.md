@@ -58,7 +58,9 @@ We do not pick a database. We define a **base store contract**; every concrete
 store (memory, file, blob/object, sqlite, mongo, redis, nats_kv, …) is an
 **extender** of it, selected by config from a registry — exactly like
 `ApiProvider`, `DataSource`/`DataSink`, and `PrefixRouter` already work. None is
-privileged; none is baked in beyond the in-memory default.
+privileged. (Status 2026-07: three extenders ship — `memory` the default,
+`file` single-host durable, `postgres` shared-database durable with an
+optional psycopg dependency; further ones register through the plugins seam.)
 
 Backends differ in what they can do (a blob/object store can't compare-and-set or
 prefix-scan; a KV store can), so the contract is **capability-tiered** rather than
@@ -233,7 +235,7 @@ The decision *source* is plumbing; the decision *contract* is fixed.
 Root config gains one block (absent → in-memory, today's behavior):
 
 ```jsonc
-"state": { "type": "memory" }            // default; a durable extender (file / nats_kv / …) is dropped in per-deployment
+"state": { "type": "memory" }            // default; durable: {"type":"file","dir":...} or {"type":"postgres","dsn":...}
 ```
 
 - `runtime` builds one store from `state` (via the backend registry), then derives `BatonStore` +
@@ -287,8 +289,9 @@ arrives only when a deployment actually needs to survive a restart.
 - **L1 vs L2 now.** L1 (gate durability) is cheap and covers the stated need;
   full crash-resume (L2) is a bigger commitment with a write per stage. Recommend
   L1 first, L2 only on a measured need.
-- **Which durable extender first — DEFERRED, not a current concern.** The base +
-  `memory` ship now; a concrete extender (file / nats_kv / other) is written when a
-  deployment needs durability, against the unchanged base.
+- **Which durable extender first — RESOLVED by need (status 2026-07):** `file`
+  shipped first (cross-process gates), `postgres` followed (shared-database
+  durability for multi-host + experiment campaigns) — both written against the
+  unchanged base, as designed.
 - **Idempotency key ownership.** App-set per side effect vs harness-derived
   (`correlation_id` + role + attempt-independent). Start app-set; it's explicit.

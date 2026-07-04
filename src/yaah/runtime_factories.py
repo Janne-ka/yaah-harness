@@ -34,7 +34,7 @@ from .adapters.providers.fake_tool_provider import FakeToolProvider
 from .adapters.data import FileDataSource, FileSink, GitDiffSource
 from .adapters.mcp import FileMcpSource
 from .adapters.prompts import FilePromptSource, HttpPromptSource, LangfusePromptSource
-from .adapters.stores import FileBackend
+from .adapters.stores import FileBackend, PostgresBackend
 from .adapters.trace import (
     ConsoleTraceSink,
     FileTraceSink,
@@ -307,6 +307,12 @@ _STATE_TYPES = {
     "memory": (lambda spec, base: MemoryBackend(), frozenset()),
     "file": (lambda spec, base: FileBackend(_rel(base, spec.get("dir", "state"))),
              frozenset({"dir"})),
+    # Shared-database durable state (multi-host). psycopg is imported lazily
+    # INSIDE the backend's first operation, so this entry keeps the zero-dep
+    # core intact; a missing/empty dsn fails loud in the constructor.
+    "postgres": (lambda spec, base: PostgresBackend(
+                     spec.get("dsn", ""), table=spec.get("table", "yaah_state")),
+                 frozenset({"dsn", "table"})),
 }
 
 

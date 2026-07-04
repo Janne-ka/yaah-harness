@@ -197,6 +197,11 @@ PYTHONPATH=src python3 tests/test_harness.py   # a single test
 A test sets up its scenario, asserts, exits 0/non-zero. Add a `tests/test_*.py` for
 any new behavior. Don't commit unless explicitly asked.
 
+Optional-dependency integration paths self-skip so the suite stays zero-dep:
+`tests/test_nats_integration.py` needs nats-py + a broker (`NATS_URL`);
+`tests/test_postgres_backend.py` runs its real-database path only when
+`YAAH_TEST_POSTGRES_DSN` is set.
+
 ## Pre-submission self-review
 
 Before opening a PR, review the working-tree diff against YAAH's three values
