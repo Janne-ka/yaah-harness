@@ -17,7 +17,8 @@ from __future__ import annotations
 import inspect
 import json
 import os
-from typing import Any, Dict, Optional
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Dict, Optional
 
 # Engine ports + zero-config references (next to the kernel) ...
 from .agents import FakeProvider, RoutingProvider, ScriptedProvider
@@ -326,6 +327,37 @@ def _build_store(spec: Any, base: str) -> Any:
     if entry is None:
         raise ValueError("unknown state store type {!r}; have {}".format(t, sorted(_STATE_TYPES)))
     return entry[0](spec, base)
+
+
+@asynccontextmanager
+async def opened_store(spec: Any, base: str,
+                       backend: Any = None) -> AsyncIterator[Any]:
+    """The state-store backend for one runtime action, RELEASED on exit iff WE built it.
+
+    Mirrors `experiment.store_factory.opened_store`: a caller-injected `backend`
+    is caller-owned — yielded untouched, never closed (tests and embedding apps
+    manage its lifetime). When `backend` is None we build one from the root
+    `state:` spec and close it on exit (normal, suspend, or error).
+
+    `close()` is NOT on the StoreBackend port — MemoryBackend/FileBackend hold no
+    long-lived resource (a dict; a per-op file open+close), so forcing a no-op
+    stub on them would contradict the capability-tier stance (an extender
+    implements only what it CAN — see docs/durable-state.md §4). It is an
+    OPTIONAL adapter capability probed with getattr; PostgresBackend has it
+    (an owned DB connection), and without this seam that connection leaked once
+    per run_root/list/resume (the lifecycle gap). Closing releases the
+    CONNECTION only — durable rows persist, so a parked baton stays resumable by
+    a fresh backend instance (cross-process resume, docs/durable-state.md §5)."""
+    if backend is not None:
+        yield backend
+        return
+    built = _build_store(spec, base)
+    try:
+        yield built
+    finally:
+        close = getattr(built, "close", None)
+        if close is not None:
+            await close()
 
 
 def _build_tls(spec: Any) -> Any:

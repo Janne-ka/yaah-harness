@@ -120,12 +120,17 @@ async def _tool_run(args: Dict[str, Any]) -> Dict[str, Any]:
     serve-only root would block the protocol loop for the process lifetime).
     The run itself is seeded identically (runtime._seed_task)."""
     from ...runtime import _assemble_harness, _seed_task
+    from ...runtime_factories import opened_store
     root, base = _load_root(args["root_path"])
     validate_root(root)
-    harness = await _assemble_harness(root, base)
-    task, run_kw = _seed_task(root, base)
-    out = await harness.run(task, **run_kw)
-    return _outcome_json(out)
+    # Build the state backend under opened_store so its connection is released
+    # when the run returns (same ownership rule as the runtime action verbs) —
+    # otherwise a postgres-backed MCP `run` leaks one connection per call.
+    async with opened_store(root.get("state"), base) as store:
+        harness = await _assemble_harness(root, base, store=store)
+        task, run_kw = _seed_task(root, base)
+        out = await harness.run(task, **run_kw)
+        return _outcome_json(out)
 
 
 _ROOT_PATH_PROP = {"type": "string",

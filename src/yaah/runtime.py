@@ -65,11 +65,11 @@ from .runtime_factories import (  # noqa: F401  (_read_json re-exported)
     _build_data_source,
     _build_mcp_source,
     _build_prompt_source,
-    _build_store,
     _build_tracer,
     _build_transport,
     _read_json,
     _rel,
+    opened_store,
 )
 
 
@@ -103,12 +103,19 @@ def _resolve_serve(serve: Any, pipeline: Dict[str, Any]) -> Optional[set]:
     return set(serve)
 
 
-async def _assemble_harness(root: Dict[str, Any], base: str) -> Any:
+async def _assemble_harness(root: Dict[str, Any], base: str, *, store: Any) -> Any:
     """Spin up the orchestrator-side Harness from the root config — transport,
     backend, prompt/data/mcp layers, the durable state store, and the nodes (served
     over a bus, or registered in-process). Shared by run_root and resume_gate so a
     run and a later cross-process resume use the SAME wiring over the SAME store.
-    The store is what makes a parked gate resumable from another process."""
+    The store is what makes a parked gate resumable from another process.
+
+    `store` is the state-store backend to wire in — REQUIRED, and deliberately
+    so: every caller builds it under `runtime_factories.opened_store` (which
+    closes what it built when the action finishes) and injects it here. A
+    store=None fallback that built one inline was removed — it was an unmanaged
+    path with the exact shape of the connection leak this seam fixed
+    (adversarial-eval finding). New callers wrap in `opened_store` too."""
     backend = _build_provider(root, base)
     prompts = _build_prompt_source(root, base)
     data = _build_data_source(root, base)
@@ -143,9 +150,9 @@ async def _assemble_harness(root: Dict[str, Any], base: str) -> Any:
         live_path = _rel(base, pipeline_ref)
     roles = _resolve_serve(root.get("serve", "all"), pipeline)
 
-    # One state store backs the resume-cursor (BatonStore) and execute-once
-    # (IdempotencyStore); default in-memory = today's behavior.
-    store = _build_store(root.get("state"), base)
+    # One injected state store backs the resume-cursor (BatonStore) and
+    # execute-once (IdempotencyStore); its lifecycle belongs to the caller's
+    # `opened_store` block (see the docstring).
     baton_store = BatonStore(store)
     idem_store = IdempotencyStore(store)
     env_store = EnvelopeStore(store)  # gate parking (fan-in arrivals) over the same StoreBackend
@@ -199,21 +206,25 @@ async def run_root(root: Dict[str, Any], base: str) -> "Optional[Outcome]":
     embedding app, tests — consume the Outcome directly; the serve paths still
     print their operational banners ("served:", "serving; awaiting requests")."""
     load_plugins(root.get("plugins"), base)   # no-op when the CLI already did
-    harness = await _assemble_harness(root, base)
+    # Build the state backend under opened_store so its connection is RELEASED
+    # when this action finishes (normal, suspend, or error) — the serve-only path
+    # holds it open for the process's life (the `await` never returns normally).
+    async with opened_store(root.get("state"), base) as store:
+        harness = await _assemble_harness(root, base, store=store)
 
-    if not root.get("run", "input" in root):
-        # serve-only worker: stay alive so the served subscriptions keep handling
-        # requests for the process's lifetime (it's a remote node, not a one-shot).
-        print("serving; awaiting requests", flush=True)
-        await asyncio.Event().wait()
-        return None
+        if not root.get("run", "input" in root):
+            # serve-only worker: stay alive so the served subscriptions keep handling
+            # requests for the process's lifetime (it's a remote node, not a one-shot).
+            print("serving; awaiting requests", flush=True)
+            await asyncio.Event().wait()
+            return None
 
-    task, run_kw = _seed_task(root, base)
-    decider = _build_decider(root)
-    if decider is not None:  # drive gates to completion (resume at each Suspended)
-        return await drive(harness, task, decider, **run_kw)
-    # default: run once; a gated pipeline stops (Suspended) at the first gate
-    return await harness.run(task, **run_kw)
+        task, run_kw = _seed_task(root, base)
+        decider = _build_decider(root)
+        if decider is not None:  # drive gates to completion (resume at each Suspended)
+            return await drive(harness, task, decider, **run_kw)
+        # default: run once; a gated pipeline stops (Suspended) at the first gate
+        return await harness.run(task, **run_kw)
 
 
 def _baton_json(b: "Baton") -> Dict[str, Any]:
@@ -241,8 +252,8 @@ async def list_gates(root: Dict[str, Any], base: str) -> "List[Baton]":
     entrypoint (the CLI renders prose or `--json`; the MCP `list_gates` tool
     returns the same batons as JSON — per-baton shape in `_baton_json`)."""
     load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
-    bstore = BatonStore(_build_store(root.get("state"), base))
-    return await bstore.list_suspended()
+    async with opened_store(root.get("state"), base) as store:  # release the built backend
+        return await BatonStore(store).list_suspended()
 
 
 async def resume_gate(root: Dict[str, Any], base: str, baton_id: str,
@@ -254,8 +265,9 @@ async def resume_gate(root: Dict[str, Any], base: str, baton_id: str,
     callers: the originally-detached engine exited at the park; the CALLING
     process runs the engine until the next gate or completion."""
     load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
-    harness = await _assemble_harness(root, base)
-    return await harness.resume(baton_id, Envelope(Kind.RESUME, decision))
+    async with opened_store(root.get("state"), base) as store:  # release the built backend
+        harness = await _assemble_harness(root, base, store=store)
+        return await harness.resume(baton_id, Envelope(Kind.RESUME, decision))
 
 
 class ActionError(ValueError):
@@ -277,21 +289,21 @@ async def baton_schema(root: Dict[str, Any], base: str, baton_id: str) -> Dict[s
     those to `error: ...` + exit 1, the MCP tool to isError:true."""
     load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
     from .harness.decision_forms import lookup
-    bstore = BatonStore(_build_store(root.get("state"), base))
-    baton = await bstore.load(baton_id)
-    if baton is None:
-        raise ActionError("no baton with id {!r}".format(baton_id))
-    if baton.pending is None:
-        raise ActionError("baton {!r} has no parked envelope (not a human gate?)".format(baton_id))
-    form = baton.pending.payload.get("form")
-    if form is None:
-        raise ActionError(
-            "baton {!r} parked without a declared form — add `form: \"...\"` "
-            "to the human_gate node to surface its decision shape".format(baton_id))
-    out = lookup(form, inline_schema=baton.pending.payload.get("decision_schema"))
-    out["baton_id"] = baton_id
-    out["awaiting"] = baton.awaiting
-    return out
+    async with opened_store(root.get("state"), base) as store:  # release the built backend
+        baton = await BatonStore(store).load(baton_id)
+        if baton is None:
+            raise ActionError("no baton with id {!r}".format(baton_id))
+        if baton.pending is None:
+            raise ActionError("baton {!r} has no parked envelope (not a human gate?)".format(baton_id))
+        form = baton.pending.payload.get("form")
+        if form is None:
+            raise ActionError(
+                "baton {!r} parked without a declared form — add `form: \"...\"` "
+                "to the human_gate node to surface its decision shape".format(baton_id))
+        out = lookup(form, inline_schema=baton.pending.payload.get("decision_schema"))
+        out["baton_id"] = baton_id
+        out["awaiting"] = baton.awaiting
+        return out
 
 
 async def clear_state(root: Dict[str, Any], base: str) -> Any:
@@ -301,8 +313,9 @@ async def clear_state(root: Dict[str, Any], base: str) -> Any:
     the runs use. Returns the clear result (what was released/dropped).
     `--clear` entrypoint."""
     load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
-    harness = await _assemble_harness(root, base)
-    return await harness.clear()
+    async with opened_store(root.get("state"), base) as store:  # release the built backend
+        harness = await _assemble_harness(root, base, store=store)
+        return await harness.clear()
 
 
 # R15: root-config validation (unknown-key, shape, enum did-you-mean, cross-field)

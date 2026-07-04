@@ -86,6 +86,21 @@ extender supplies it and **fails fast** otherwise ("baton store needs a Scannabl
 store; backend 'blob' only provides core") instead of breaking mid-run. Values are
 bytes; facades JSON-encode.
 
+**Lifecycle — `close()` is an optional capability, not a tier.** An extender that
+holds a long-lived resource (postgres: a DB connection) exposes `async def
+close()`; memory and file hold none (a dict; a per-op file open+close) and define
+none. The runtime builds one backend per action from the `state:` block and
+RELEASES it on exit — `runtime.run_root`/`list_gates`/`resume_gate`/`clear_state`/
+`baton_schema` build under `runtime_factories.opened_store`, which `getattr`-probes
+`close` and awaits it (normal, suspend, or error exit). An INJECTED backend is
+caller-owned and left open — the same ownership-aware stance as
+`experiment.store_factory.opened_store`. `close()` is deliberately off the port:
+adding it to the core tier would force every extender (including future blob
+stores) to stub a no-op, contradicting "an extender implements only what it can."
+Crucially, `close()` releases the CONNECTION, never the durable state — a parked
+baton persists (§5), so a fresh backend instance in another process (or a later
+resume in this one) still finds and drives it.
+
 **Possible extenders (add on need — this is a menu, not a decision):**
 
 | Extender | Family | Tiers | When it earns its place |
