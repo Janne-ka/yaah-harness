@@ -114,12 +114,15 @@ def _transfer(stage: Any, node: Optional[Dict[str, Any]], pin: Provides, sticky:
     STILL NOT MODELED (each can only mute findings, never manufacture a hard error):
     a fanned-out gate role's own `provides` (human-supplied keys there warn until the
     author declares them somewhere on the path); which keys a specific fan-in reduce
-    yields; the feedback-retry keys (`feedback`/`priorAttempt`) the harness folds onto
-    a retried stage's INPUT (a lattice-wide pre-existing blind spot, not fanout's);
-    and — harness-side, runtime-probed 2026-07 — `sticky` is NOT re-folded inside fork
-    BRANCH walks (ForkCoordinator._walk never calls _fold_sticky, contradicting
-    Graph.sticky's "after every passing stage"), so the lattice's sticky-everywhere
-    assumption over-claims on in-branch closed lanes until that harness gap is fixed."""
+    yields; and the feedback-retry keys (`feedback`/`priorAttempt`) the harness folds
+    onto a retried stage's INPUT (a lattice-wide pre-existing blind spot, not fanout's).
+
+    The lattice applies `sticky` on EVERY transfer (`sticky_fs` below), which the
+    harness now honours everywhere it walks: `_drive` folds sticky after each linear
+    stage + each fork join, and — since the 2026-07 fix, runtime-probed — so does
+    ForkCoordinator._walk BETWEEN branch stages (it calls the same _fold_sticky helper).
+    Before that fix the harness skipped the in-branch fold, so this sticky-everywhere
+    assumption over-claimed on in-branch closed lanes; it is now sound there too."""
     if pin is None:
         pin = Flow()   # unreachable-safe; reachable stages get a concrete pin
     sticky_fs = frozenset(sticky)
