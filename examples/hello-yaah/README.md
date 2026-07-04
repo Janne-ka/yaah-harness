@@ -80,5 +80,8 @@ yaah ab experiment.json --rescore contract-scored.json   # would a tightened
 
 The B variant is a two-file `_extends` overlay (`starter-b.local.json` +
 `starter-b.json`) — the same mechanism you'd use to promote it: point
-production at B's files when the matrix says so. Full story:
+production at B's files when the matrix says so. Expect two
+`[ab: metric-unproven]` warnings on stderr: the `score` metric is real but
+undeclared in the agents' `output_schema` — declaring it there silences them
+(and is the right move in production). Full story:
 [`docs/ab-experiments.md`](../../docs/ab-experiments.md).

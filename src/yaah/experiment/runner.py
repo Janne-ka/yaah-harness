@@ -15,7 +15,11 @@ The reliability stance (each point test-pinned):
   validate_config, `live_config` rejection (per-invocation mutable re-reads
   would make the fingerprint a lie), explicit `model` on every model-calling
   node + full price_map coverage (a silent $0.00 in the matrix is the failure
-  mode that kills trust in the data).
+  mode that kills trust in the data), and the experiment-level CONTRACT checks
+  (contracts.py): an input that provably breaks a variant's render, or a
+  metric path provably never produced, aborts; an input that only forces a
+  branch to its default, and a declared-but-unproven metric, warn on stderr
+  (the ADR-0005/0006 two-severity split).
 - EVERY run lands a row — done, suspended (parked at a gate), failed (the
   verdict codes travel), errored — and the campaign continues; failures are
   data. Rows carry the variant's config FINGERPRINT (root + pipeline + prompt
@@ -50,7 +54,8 @@ _MODEL_NODE_TYPES = ("agent", "agent_loop")
 # (eval catch R2). `note`/`_*` are the config-comment conventions.
 _EXPERIMENT_KEYS = frozenset({
     "id", "variants", "inputs", "repetitions", "price_map", "store", "note",
-    "metrics",   # report-side: {name: dotted payload path} — validated in _check
+    "metrics",   # {name: dotted payload path} — read by the report AND by the
+                 # pre-flight plausibility check (contracts.py); validated in _check
 })
 
 
@@ -92,9 +97,11 @@ def _check_experiment(cfg: Dict[str, Any]) -> None:
     metrics = cfg.get("metrics", {})
     if not (isinstance(metrics, dict)
             and all(isinstance(k, str) and k and isinstance(v, str) and v
+                    and all(v.split("."))   # no empty segment: ".score"/"a..b" are typos
                     for k, v in metrics.items())):
-        errs.append("`metrics` must map metric name -> dotted payload path "
-                    "(e.g. {\"score\": \"review.score\"})")
+        errs.append("`metrics` must map metric name -> dotted payload path with "
+                    "non-empty segments (e.g. {\"score\": \"review.score\"}; "
+                    "\".score\" or \"a..b\" is a typo)")
     if errs:
         raise ValueError("invalid experiment config:\n  - " + "\n  - ".join(errs))
 
@@ -120,9 +127,14 @@ def _model_refs(pipeline: Dict[str, Any]) -> List[str]:
 
 
 def _preflight_variant(name: str, path: str, exp_base: str,
-                       price_map: Dict[str, Any]) -> Tuple[Dict[str, Any], str, str]:
+                       price_map: Dict[str, Any], entries: List[Any],
+                       metrics: Dict[str, str]) -> Tuple[Dict[str, Any], str, str]:
     """Load + validate one variant; returns (effective_root, variant_base,
-    fingerprint). Raises ValueError naming the variant on any problem."""
+    fingerprint). Raises ValueError naming the variant on any problem.
+    `entries` are the experiment inputs' (id, key-set) pairs and `metrics` the
+    declared metric paths — the experiment-level contract checks (contracts.py)
+    run here because inputs are SHARED across variants by design (the run loop
+    overrides each variant's `input` with them)."""
     from ..runtime_factories import _read_json, _rel
     from ..validate import validate_config
     root_path = _rel(exp_base, path)
@@ -152,6 +164,9 @@ def _preflight_variant(name: str, path: str, exp_base: str,
             "axis would silently read $0.00; add them ({{\"input\": $, "
             "\"output\": $}} per 1k tokens; an explicit 0 rate for free/fake "
             "models)".format(name, ", ".join(missing)))
+    from .contracts import check_variant_contracts
+    for warning in check_variant_contracts(name, pipeline, base, entries, metrics):
+        print(warning, file=sys.stderr)
     return root, base, config_fingerprint(root, base)
 
 
@@ -194,9 +209,12 @@ async def run_experiment(cfg: Dict[str, Any], base: str, *,
     if missing_inputs:
         raise ValueError("input fixture(s) not found: {}".format(
             ", ".join(repr(p) for p in missing_inputs)))
+    from .contracts import entry_key_sets
+    entries = entry_key_sets(cfg["inputs"], base)
     variants: Dict[str, Tuple[Dict[str, Any], str, str]] = {}
     for name, path in cfg["variants"].items():
-        variants[name] = _preflight_variant(name, path, base, price_map)
+        variants[name] = _preflight_variant(name, path, base, price_map,
+                                            entries, cfg.get("metrics") or {})
 
     by_variant: Dict[str, Dict[str, int]] = {}
     total = 0

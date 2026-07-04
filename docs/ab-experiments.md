@@ -72,6 +72,16 @@ every model-calling node needs an explicit `model`, and every model (including
 `escalate_model` rungs) must be in `price_map` — a matrix that silently reads
 $0.00 is worse than no matrix.
 
+Pre-flight also runs the experiment-level CONTRACT checks, with the engine's
+two-severity honesty split: a knowable input that PROVABLY can't drive a
+variant (a render key certain to be absent) or a metric path provably never
+produced ABORTS, naming variant + key — money never burns on garbage; a
+declared-but-unproven metric prints `[ab: metric-unproven]` to stderr and an
+input that provably forces a branch to its default prints
+`[ab: branch-default-only]` — both warnings, not failures (declare the metric
+key in the producing agent's `output_schema` to silence the former). The
+hello-yaah example deliberately shows two such warnings.
+
 Cost capture is FORCED during a campaign: the variant's own `trace` config is
 replaced with a cost-capturing file sink into the campaign's trace file
 (`<store.dir>/<id>.trace.jsonl`); the report joins rows to cost by

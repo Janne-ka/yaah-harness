@@ -97,15 +97,21 @@ def _edges(stages: Dict[str, Any]) -> Dict[str, List[str]]:
 
 
 def compute_provides(nodes: Dict[str, Any], stages: Dict[str, Any], sticky: Set[str],
-                     start: Optional[str], tainted: List[str]) -> "Tuple[Dict[str, Provides], Dict[str, List[str]]]":
+                     start: Optional[str], tainted: List[str],
+                     entry: Optional[Flow] = None) -> "Tuple[Dict[str, Provides], Dict[str, List[str]]]":
     """Forward dataflow to a least fixpoint: provides_in(stage) = meet over predecessors
     of provides_out(pred). Monotone (sets only shrink from TOP), so it converges; loops
     (retry/`then` cycles) are handled by the fixpoint, not a special case. Unreached
     stages stay TOP. Returns ({stage: provides_in}, predecessor-map) — the caller reuses
-    the predecessor map rather than recomputing it."""
+    the predecessor map rather than recomputing it.
+
+    `entry` seeds the start stage with what the ENTRY PAYLOAD is known to provide.
+    Default None = Flow() — the unknowable input of the load-time lint. A caller that
+    KNOWS the entry keys (e.g. the `yaah ab` pre-flight, which holds the experiment's
+    concrete inputs) passes a closed Flow to make entry-key mismatches provable."""
     pin: Dict[str, Provides] = {s: None for s in stages}
     if start in stages:
-        pin[start] = Flow()   # the entry payload is the unknowable INPUT (incomplete)
+        pin[start] = entry if entry is not None else Flow()
     preds = _edges(stages)
     # Iterate to convergence. The meet is monotone (preserve-transfers only grow `known`
     # as TOP collapses; reset-transfers are constant), so it descends from TOP to a least
@@ -126,9 +132,9 @@ def compute_provides(nodes: Dict[str, Any], stages: Dict[str, Any], sticky: Set[
             for nxt in incoming[1:]:
                 merged = meet(merged, nxt)          # all incoming are concrete Flows
             if s == start:
-                entry = pin.get(s)                  # == pin[start]; s is the narrowed str
-                if entry is not None:
-                    merged = meet(merged, entry)    # entry payload always joins the start
+                at_start = pin.get(s)               # == pin[start], which DESCENDS from the
+                if at_start is not None:            # `entry` seed (don't shadow the param);
+                    merged = meet(merged, at_start)  # the entry payload always joins the start
             if merged != pin[s]:
                 pin[s] = merged
                 changed = True
@@ -138,6 +144,43 @@ def compute_provides(nodes: Dict[str, Any], stages: Dict[str, Any], sticky: Set[
     seen: Set[str] = set()
     tainted[:] = [t for t in tainted if not (t in seen or seen.add(t))]
     return pin, preds
+
+
+def stage_outflows(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list: Any,
+                   start: Optional[str], *,
+                   entry: Optional[Flow] = None) -> "Dict[str, Provides]":
+    """Provides-OUT per stage: the Flow LEAVING each reachable stage (None = unreachable).
+    The read surface for callers reasoning about what a stage HANDS FORWARD — e.g. the
+    `yaah ab` pre-flight checking terminal payloads against declared metric paths — so
+    they consume the same lattice `analyze_dataflow` walks instead of re-deriving it."""
+    sticky = set(k for k in sticky_list if isinstance(k, str)) if isinstance(sticky_list, list) else set()
+    pin, _ = compute_provides(nodes, stages, sticky, start, [], entry=entry)
+    out: Dict[str, Provides] = {}
+    for s_name, s in stages.items():
+        p = pin.get(s_name)
+        out[s_name] = None if p is None else _transfer(
+            nodes.get(s.get("node")), p, sticky, [], s_name)
+    return out
+
+
+def terminal_stages(stages: Dict[str, Any]) -> List[str]:
+    """Stages where a run can END — the harness walk stops when no next stage resolves
+    (mirror of harness._next_stage returning None): no branch and no `then`; or a branch
+    whose effective default (its `default`, else the stage's `then`) is null, or any
+    explicit null route. Graph math only, exposed so callers reasoning about the FINAL
+    payload (e.g. metric plausibility in `yaah ab`) don't re-derive routing."""
+    out: List[str] = []
+    for name, s in stages.items():
+        if not isinstance(s, dict):
+            continue
+        b = s.get("branch")
+        if not b:
+            if not s.get("then"):
+                out.append(name)
+        elif (b.get("default", s.get("then")) is None
+              or any(v is None for v in (b.get("routes") or {}).values())):
+            out.append(name)
+    return out
 
 
 def _render_template_text(rnode: Dict[str, Any], base_path: Optional[str]) -> Optional[str]:
@@ -163,7 +206,8 @@ def _render_template_text(rnode: Dict[str, Any], base_path: Optional[str]) -> Op
 
 
 def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list: Any,
-                     start: Optional[str], base_path: Optional[str]) -> "Tuple[List[str], List[str]]":
+                     start: Optional[str], base_path: Optional[str], *,
+                     entry: Optional[Flow] = None) -> "Tuple[List[str], List[str]]":
     """The requires↔provides graph analysis (ADR-0005 slice B + ADR-0006 §D5). ONE pass, two
     severities, split by how exact the provided set is where a consumer reads it:
 
@@ -176,12 +220,15 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
         keys → one consolidated WARNING naming the transform(s) to fix.
 
     Returns (errors, warnings). Never raises. `validate_pipeline` consumes the errors,
-    `lint_pipeline` the warnings (it runs on an already-valid config, so it sees only warnings)."""
+    `lint_pipeline` the warnings (it runs on an already-valid config, so it sees only
+    warnings). `entry` (see compute_provides) lets a caller that KNOWS the entry payload's
+    keys seed the start stage — entry-key mismatches then surface as errors/warnings under
+    the same two-severity rules."""
     errors: List[str] = []
     warnings: List[str] = []
     sticky = set(k for k in sticky_list if isinstance(k, str)) if isinstance(sticky_list, list) else set()
     tainted: List[str] = []
-    pin, preds = compute_provides(nodes, stages, sticky, start, tainted)
+    pin, preds = compute_provides(nodes, stages, sticky, start, tainted, entry=entry)
     tainted_set = set(tainted)
 
     def tainted_ancestors(stage: str) -> List[str]:
