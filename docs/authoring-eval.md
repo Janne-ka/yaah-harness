@@ -140,11 +140,35 @@ The summary line reports validity rate and mean rounds-to-valid across tasks.
 
 ## Results
 
-Real-model numbers are deliberately not baked into this page — they belong to
-a dated JSONL artifact produced by the command above, so a stale table can't
-masquerade as current. The scripted mode's expected outcome IS fixed and
-test-enforced (`tests/test_authoring_eval.py`): 6/6 valid, `retry-validator`
-taking exactly one repair round, everything else landing cold.
+Real-model numbers are deliberately not baked into this page as a living
+table — they belong to a dated JSONL artifact produced by the command above,
+so a stale table can't masquerade as current. Dated snapshots (below) are the
+one exception: the date in the heading says exactly how old they are. The
+scripted mode's expected outcome IS fixed and test-enforced
+(`tests/test_authoring_eval.py`): 6/6 valid, `retry-validator` taking exactly
+one repair round, everything else landing cold.
+
+### First real-model results (2026-07-05)
+
+One run per model through the `claude_cli` adapter (Claude Code CLI 2.1.199),
+default budget (4 rounds). N=6 internal datapoints per model — a smoke test,
+not a ranking.
+
+| model | first-shot valid | valid after repairs | never valid | mean rounds | reply chars (total) |
+|---|---|---|---|---|---|
+| `claude-haiku-4-5-20251001` | 6/6 | — | 0 | 1.00 | 10 621 |
+| `claude-sonnet-4-6` | 6/6 | — | 0 | 1.00 | 12 510 |
+
+Both models landed every task on the cold draft, with zero lint warnings on
+any accepted config — so these runs say the manual suffices for these six
+tasks, and say *nothing* about the repair loop's steering power, which never
+fired with a real model. A ceiling this flat is a finding about the task set
+as much as the models: the descriptions use the manual's own vocabulary (see
+Known limits), so the next iteration should be colder-worded tasks, not more
+models. Prompt cost was ~8.7k chars per task (the manual dominates); sonnet's
+replies ran ~18% longer than haiku's for no validity gain. The JSONL rows
+don't preserve reply text, so semantic fidelity (valid ≠ good) stays
+unchecked, as designed.
 
 ## Known limits (read before quoting numbers)
 
