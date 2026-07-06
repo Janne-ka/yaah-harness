@@ -187,8 +187,10 @@ their own.
 
 ## `human_gate` — park for a decision
 
-`ask` (template, `{{key}}` filled from the payload — what the mailbox shows),
-`awaiting` (tag, default `"human"`), `form` (optional — names a generic
+`ask` (template, `{{key}}` filled from the payload — what the mailbox shows;
+rendered via the plain templater, so the value is inserted **unframed** — the
+`{{!key}}` fencing of the `agent` node does NOT apply here, see the lint note
+below), `awaiting` (tag, default `"human"`), `form` (optional — names a generic
 decision shape; one of `approve` / `approve_or_revise` / `free_text` /
 `json_schema`), `decision_schema` (required iff `form: "json_schema"`; inline
 JSON Schema for the one-off escape hatch — forbidden with the built-in forms).
@@ -216,6 +218,40 @@ repo-bound nodes point `cwd_from` at `workdir`. Output (`remove`):
 `template_text` or `template_file` (base_dir-relative ok), `out` (output path).
 For the heavier factory documents the app uses `transform` +
 `call: "envelope"` into a Python renderer instead (`render_report.py` etc.).
+Like `human_gate`, `render` fills `{{key}}` with the plain templater — the value
+is inserted **unframed**, and `{{!key}}` is a literal (no fencing). See the lint
+note below.
+
+## Lint: `untrusted-unfenced` — agent-authored text at an unframed consumer
+
+An **advisory** lint (`yaah validate`; fails only under `--strict`), explicitly
+**NOT an injection-safety proof**. Only the `agent` node fences (`{{!key}}`);
+`human_gate` `ask` and `render` templates render via the plain templater, which
+never frames a value and treats `{{!key}}` as a literal. So agent-authored text
+(a model's `summary`, `question`, `decision`, or its raw output) interpolated
+`{{key}}`-unfenced into a gate question or a rendered document reaches the
+consumer — a human, an **AI operator** driving the gate, or a downstream
+document — as-is.
+
+The rule flags a `human_gate`/`render` site that reads `{{key}}` where an `agent`
+stage on some path to it **authors** `key` (its `output_schema` keys, an inline
+`provides`, or `raw`). Provenance is graph reachability, so it sees through an
+opaque parse-`transform` (the common `agent → parse → gate` shape). It is
+deliberately **quiet** where provenance is unknowable — a key only an undeclared
+envelope-`transform` could have invented, an engine key (`exit_code`), a
+`human_gate`'s own human-typed `decision`, or an entry/`carry` key — because the
+honest move is to flag agent-authored text, not to guess. A `{{!key}}` marker is
+quiet.
+
+Remediation is **not** `{{!key}}` at the consumer (a no-op literal there):
+sanitize the value in an upstream `transform`, or confirm the consumer cannot act
+on injected instructions. Known blind spot: a `transform` that RENAMES agent text
+(e.g. folds a judge's `reason` into `refix_reason`) breaks the provenance chain,
+so a renamed key is not attributed — declare intent with an inline `provides` on
+the producing agent, or fence at the agent-prompt boundary. Because renames can
+dominate a real config's exposed surface, any run of the rule that produces hits
+also emits one consolidated caveat: the findings are a **floor, not a clean
+bill**.
 
 ## `agent_loop` — bounded, model-driven tool-use loop
 

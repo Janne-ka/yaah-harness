@@ -942,6 +942,249 @@ def wrong_typed_parallel_shape_is_a_clean_error_not_a_crash() -> None:
             raise AssertionError("{}: 5 accepted".format(key))
 
 
+# ── [lint: untrusted-unfenced] — agent-authored text rendered UNFENCED at a consumer ──
+# M12-2 (mailbox): s_factory fences agent output in AGENT prompts (`{{!spec}}`), but the same
+# text renders UNFRAMED in human_gate `ask` strings and render templates (which use the plain
+# templater — no `!` fencing). This ADVISORY heuristic flags a consumer that interpolates
+# `{{key}}` where an agent stage on a path to it AUTHORS `key`. Honest framing is LOCKED: it is
+# NOT an injection-safety proof, and it does NOT tell the author to write `{{!key}}` at a
+# render/gate site (that is a literal no-op there — empirically verified).
+
+_UT = "untrusted-unfenced"
+
+
+def _ut(cfg, base_path=None):
+    return [m for m in lint_pipeline(cfg, base_path) if _UT in m]
+
+
+def _gate_ask_cfg(ask, *, schema=None, parse=True, agent_type="agent",
+                  producer_extra=None):
+    """agent (producer) -> human_gate whose `ask` string is `ask`."""
+    prod = {"type": agent_type}
+    if parse is not None:
+        prod["parse"] = parse
+    if schema is not None:
+        prod["output_schema"] = schema
+    if producer_extra:
+        prod.update(producer_extra)
+    return {"nodes": {"p": prod, "g": {"type": "human_gate", "ask": ask}},
+            "graph": {"start": "s1", "stages": {"s1": {"node": "p", "then": "s2"},
+                                                "s2": {"node": "g"}}}}
+
+
+def _render_after_agent_cfg(template, *, schema=None, parse=True):
+    prod = {"type": "agent"}
+    if parse is not None:
+        prod["parse"] = parse
+    if schema is not None:
+        prod["output_schema"] = schema
+    return {"nodes": {"p": prod, "r": {"type": "render", "template_text": template}},
+            "graph": {"start": "s1", "stages": {"s1": {"node": "p", "then": "s2"},
+                                                "s2": {"node": "r"}}}}
+
+
+def warns_untrusted_agent_key_in_gate_ask() -> None:
+    # grill authors `question`; the gate ask interpolates it unfenced -> warn, naming the key
+    cfg = _gate_ask_cfg("Answer: {{question}}", schema={"required": ["question"]})
+    w = _ut(cfg)
+    assert w and "question" in w[0], w
+    assert "'s1'" in w[0], w[0]          # names the producing agent STAGE
+    assert "human_gate" in w[0], w[0]    # names the consumer node type
+
+
+def warns_untrusted_agent_key_in_render() -> None:
+    cfg = _render_after_agent_cfg("Report: {{summary}}", schema={"required": ["summary"]})
+    w = _ut(cfg)
+    assert w and "summary" in w[0], w
+    assert "render" in w[0], w[0]
+
+
+def warns_untrusted_agent_raw_is_authored() -> None:
+    # a parse:false agent authors the whole model text as `raw`; a gate showing {{raw}} is untrusted
+    cfg = _gate_ask_cfg("Model said: {{raw}}", parse=False)
+    assert _ut(cfg), lint_pipeline(cfg)
+
+
+def quiet_untrusted_fenced_key() -> None:
+    # `{{!question}}` = author marked the value untrusted -> this rule stays quiet on it
+    cfg = _gate_ask_cfg("Answer: {{!question}}", schema={"required": ["question"]})
+    assert not _ut(cfg), lint_pipeline(cfg)
+
+
+def quiet_untrusted_no_placeholders() -> None:
+    cfg = _gate_ask_cfg("Approve to proceed.", schema={"required": ["question"]})
+    assert not _ut(cfg)
+
+
+def quiet_untrusted_non_agent_transform_key() -> None:
+    # an args-transform NESTS its output under `into: data` (config-derived, not agent text) ->
+    # a render of {{data}} has no agent author -> quiet.
+    cfg = {"nodes": {
+        "a": {"type": "agent", "output_schema": {"required": ["v"]}},
+        "t": {"type": "transform", "target": "fn:m:f", "into": "data"},
+        "r": {"type": "render", "template_text": "{{data}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "t", "then": "s3"},
+            "s3": {"node": "r"}}}}
+    assert not _ut(cfg), lint_pipeline(cfg)
+
+
+def quiet_untrusted_entry_or_carried_key() -> None:
+    # `request` rides the payload from the entry input (carried), no agent authors it -> quiet,
+    # even though it flows through an agent stage.
+    cfg = _render_after_agent_cfg("{{request}}",
+                                  schema={"required": ["v"]})
+    cfg["nodes"]["p"]["carry"] = ["request"]
+    assert not _ut(cfg), lint_pipeline(cfg)
+
+
+def quiet_untrusted_gate_decision_is_human_typed() -> None:
+    # the human_gate produces `decision` (human-typed, trusted-ish); a downstream render of
+    # {{decision}} where NO agent authored `decision` -> quiet.
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False},
+        "g": {"type": "human_gate"},
+        "r": {"type": "render", "template_text": "{{decision}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "g", "then": "s3"},
+            "s3": {"node": "r"}}}}
+    assert not _ut(cfg), lint_pipeline(cfg)
+
+
+def warns_untrusted_judge_decision_at_gate() -> None:
+    # but a `decision` AUTHORED by a judge AGENT (parse:true, schema) and shown unfenced at a
+    # gate IS flagged — same key name, agent provenance (the review-pipeline gate pattern).
+    cfg = _gate_ask_cfg("Judge said {{decision}} — proceed?",
+                        schema={"properties": {"decision": {"enum": ["ship", "block"]}}})
+    assert _ut(cfg), lint_pipeline(cfg)
+
+
+def quiet_untrusted_engine_key_from_shell() -> None:
+    # `exit_code` is an engine key a shell node emits (not agent text) -> quiet.
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False},
+        "sh": {"type": "shell"},
+        "r": {"type": "render", "template_text": "{{exit_code}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "sh", "then": "s3"},
+            "s3": {"node": "r"}}}}
+    assert not _ut(cfg), lint_pipeline(cfg)
+
+
+def quiet_untrusted_past_opaque_unknown_provenance() -> None:
+    # a key that only an OPAQUE (undeclared) envelope-transform could have put on the payload,
+    # NOT authored by any agent, has UNKNOWN provenance -> quiet (no guessing). The agent here
+    # authors only `raw`; `derived` is invented by the opaque transform.
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False},
+        "t": {"type": "transform", "target": "fn:m:f", "call": "envelope"},
+        "g": {"type": "human_gate", "ask": "See {{derived}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "t", "then": "s3"},
+            "s3": {"node": "g"}}}}
+    assert not _ut(cfg), lint_pipeline(cfg)
+
+
+def warns_untrusted_through_opaque_transform_when_agent_authors_it() -> None:
+    # the CLIENT's real shape: agent AUTHORS `question` (schema), an opaque parse transform
+    # folds it, the gate shows it. The agent is a reaching ancestor -> flag (the lattice loses
+    # the key through the opaque transform, but provenance is by graph reachability, not flow).
+    cfg = {"nodes": {
+        "a": {"type": "agent", "output_schema": {"required": ["question"]}},
+        "t": {"type": "transform", "target": "fn:m:f", "call": "envelope"},
+        "g": {"type": "human_gate", "ask": "Q: {{question}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "t", "then": "s3"},
+            "s3": {"node": "g"}}}}
+    assert _ut(cfg), lint_pipeline(cfg)
+
+
+def quiet_untrusted_agent_does_not_reach_consumer() -> None:
+    # an agent that authors `spec` but sits on a FORWARD-ONLY branch that never reaches the gate
+    # must not taint it (reachability, not "any agent anywhere").
+    cfg = {"nodes": {
+        "entry": {"type": "transform", "target": "fn:m:f", "provides": ["seed"], "call": "envelope"},
+        "off": {"type": "agent", "output_schema": {"required": ["spec"]}},
+        "g": {"type": "human_gate", "ask": "See {{spec}}"}},
+        "graph": {"start": "s1", "stages": {
+            # s1 branches: to the gate OR to the off-path agent; the agent has no route to the gate
+            "s1": {"node": "entry", "branch": {"on": "seed", "routes": {"x": "soff"}, "default": "sg"}},
+            "soff": {"node": "off", "then": None},
+            "sg": {"node": "g"}}}}
+    assert not _ut(cfg), lint_pipeline(cfg)
+
+
+def untrusted_message_makes_no_soundness_claim() -> None:
+    # honest framing LOCKED: the message must NOT claim proof/soundness/safety, and MUST carry
+    # the heuristic caveat. (Falsifies any future edit that over-sells the rule.)
+    cfg = _gate_ask_cfg("Q: {{question}}", schema={"required": ["question"]})
+    m = _ut(cfg)[0].lower()
+    assert "heuristic" in m, m
+    assert "not an injection-safety proof" in m, m
+    for overclaim in ("guarantee", "proven", "safe from", "prevents injection", "secure"):
+        assert overclaim not in m, (overclaim, m)
+
+
+def untrusted_render_gate_message_does_not_prescribe_broken_fence() -> None:
+    # render/gate can't fence: the fix wording must NOT tell the author to just write {{!key}}
+    # there (it renders literally). It must point at sanitize-upstream / confirm-consumer.
+    cfg = _gate_ask_cfg("Q: {{question}}", schema={"required": ["question"]})
+    m = _ut(cfg)[0]
+    assert "sanitize" in m.lower(), m
+    # it explains the site can't fence rather than prescribing {{!question}} as the fix
+    assert "does NOT honor" in m or "does not honor" in m, m
+
+
+def untrusted_lint_never_raises_on_malformed() -> None:
+    for cfg in (
+        {"nodes": {"g": {"type": "human_gate", "ask": None}}, "graph": {"stages": {}}},
+        {"nodes": {"a": {"type": "agent", "output_schema": ["bad"]},
+                   "g": {"type": "human_gate", "ask": "{{x}}"}},
+         "graph": {"start": "s1", "stages": {"s1": {"node": "a", "then": "s2"},
+                                             "s2": {"node": "g"}}}},
+        {"nodes": {"g": {"type": "human_gate", "ask": "{{x}}"}}, "graph": {}},
+    ):
+        lint_pipeline(cfg)   # must not raise
+
+
+def untrusted_hits_carry_one_floor_caveat() -> None:
+    # eval finding (2026-06-30): renamed-key false negatives DOMINATE on the real client config,
+    # so lint output must not read as exhaustive. With hits: exactly ONE consolidated caveat,
+    # naming the count and the provides fix. Without hits: NO caveat (never a fresh --strict
+    # failure on an otherwise-quiet pipeline).
+    cfg = _gate_ask_cfg("Q: {{question}} and {{spec}}",
+                        schema={"required": ["question", "spec"]})
+    w = _ut(cfg)
+    caveats = [m for m in w if "FLOOR" in m]
+    assert len(caveats) == 1, w
+    assert "2 untrusted-unfenced finding(s)" in caveats[0], caveats[0]
+    assert "provides" in caveats[0], caveats[0]
+    quiet = _gate_ask_cfg("Approve to proceed.", schema={"required": ["question"]})
+    assert not _ut(quiet), lint_pipeline(quiet)
+
+
+def untrusted_strict_fails_with_exit_2() -> None:
+    # the rule rides the existing warning->strict convention: `yaah validate --strict` exits 2.
+    pipeline = _gate_ask_cfg("Q: {{question}}", schema={"required": ["question"]})
+    old_err, old_out = sys.stderr, sys.stdout
+    sys.stderr, sys.stdout = io.StringIO(), io.StringIO()
+    code = 0
+    try:
+        _dispatch_validate({"root": "t", "strict": True}, {"pipeline": pipeline}, ".")
+    except SystemExit as e:
+        code = 0 if e.code is None else int(e.code)
+    finally:
+        err = sys.stderr.getvalue()
+        sys.stderr, sys.stdout = old_err, old_out
+    assert code == 2, code
+    assert _UT in err, err
+
+
 def main() -> None:
     warns_on_required_only_schema()
     quiet_on_typed_properties()
@@ -1018,6 +1261,24 @@ def main() -> None:
     combined_fanin_fanout_stage_takes_the_widest_arm()
     fanin_reduce_union_not_provably_absent()
     wrong_typed_parallel_shape_is_a_clean_error_not_a_crash()
+    warns_untrusted_agent_key_in_gate_ask()
+    warns_untrusted_agent_key_in_render()
+    warns_untrusted_agent_raw_is_authored()
+    quiet_untrusted_fenced_key()
+    quiet_untrusted_no_placeholders()
+    quiet_untrusted_non_agent_transform_key()
+    quiet_untrusted_entry_or_carried_key()
+    quiet_untrusted_gate_decision_is_human_typed()
+    warns_untrusted_judge_decision_at_gate()
+    quiet_untrusted_engine_key_from_shell()
+    quiet_untrusted_past_opaque_unknown_provenance()
+    warns_untrusted_through_opaque_transform_when_agent_authors_it()
+    quiet_untrusted_agent_does_not_reach_consumer()
+    untrusted_message_makes_no_soundness_claim()
+    untrusted_render_gate_message_does_not_prescribe_broken_fence()
+    untrusted_lint_never_raises_on_malformed()
+    untrusted_hits_carry_one_floor_caveat()
+    untrusted_strict_fails_with_exit_2()
     print("ok")
 
 

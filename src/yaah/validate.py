@@ -699,6 +699,7 @@ def lint_pipeline(config: Dict[str, Any], base_path: Optional[str] = None,
     sticky = g.get("sticky") or []
     _lint_weak_output_schema(nodes, warnings)
     _lint_gate_ignores_rejection(nodes, stages, warnings)
+    _lint_untrusted_unfenced(nodes, stages, base_path, warnings)
     # ADR-0005 slice B: the broad requires↔provides graph analysis (absorbs the 1a
     # single-hop render/branch checks as the 1-length-path case). Lives in its own module
     # (the dataflow lattice + fixpoint are independently testable); imported lazily to keep
@@ -796,6 +797,157 @@ def _lint_gate_ignores_rejection(nodes: Dict[str, Any], stages: Dict[str, Any],
                 "\"routes\": {{...}}}}` on this gate (or confirm a transform consumes the "
                 "decision). [lint: gate-decision-ignored]".format(
                     name, node.get("form"), outcomes))
+
+
+# Fence-aware placeholder for the untrusted-unfenced lint (M12). The `\w+` KEY group matches
+# `templating.PLACEHOLDER` exactly (the token render/human_gate actually fill); the optional
+# leading `!` mirrors the AGENT node's fence syntax (`agents/agent.py::_PLACEHOLDER`, `{{!key}}`
+# = mark the value untrusted). NOTE the honest asymmetry this lint is built on: only the AGENT
+# node honors `!`; render and human_gate render via `templating.fill`, which leaves `{{!key}}`
+# as a LITERAL and never frames a bare `{{key}}` value. So at those sites `!` is read here only
+# as the author's untrusted-INTENT marker (→ quiet), not as a working runtime defense.
+_UNTRUSTED_PLACEHOLDER = re.compile(r"{{\s*(!?)\s*(\w+)\s*}}")
+
+
+def _agent_authored_keys(node: Dict[str, Any]) -> "frozenset":
+    """The payload keys an AGENT node AUTHORS from its model output — the untrusted set. This is
+    NARROWER than its data-flow contract: `carry`/`carry_cwd` keys are FORWARDED unchanged (they
+    keep their upstream provenance, so they aren't attributed to this agent), and only these
+    authored keys are. `raw` is always authored (the raw model text). With `parse` and an
+    `output_schema`, the declared/required keys are the model's parsed fields; an inline
+    `provides` on the agent counts too. A parse:true agent with NO schema authors keys we can't
+    ENUMERATE, so only `raw` is named (its other parsed keys stay unattributed → the lint is
+    quiet on them rather than guess). Never raises on a malformed schema."""
+    authored = {"raw"}
+    if node.get("parse") is False:
+        return frozenset(authored)
+    schema = node.get("output_schema")
+    if isinstance(schema, dict):
+        props = schema.get("properties")
+        if isinstance(props, dict):
+            authored.update(k for k in props if isinstance(k, str))
+        req = schema.get("required")
+        if isinstance(req, list):
+            authored.update(k for k in req if isinstance(k, str))
+    prov = node.get("provides")
+    if isinstance(prov, list):
+        authored.update(k for k in prov if isinstance(k, str))
+    return frozenset(authored)
+
+
+def _ancestors(preds: Dict[str, List[str]], target: str) -> set:
+    """Every stage reverse-reachable from `target` via the predecessor map (dataflow._edges,
+    which includes fanin edges) — i.e. every stage that CAN run before `target` on some path."""
+    seen: set = set()
+    todo = list(preds.get(target, ()))
+    while todo:
+        p = todo.pop()
+        if p not in seen:
+            seen.add(p)
+            todo.extend(preds.get(p, ()))
+    return seen
+
+
+def _consumer_template(node: Dict[str, Any], base_path: Optional[str]) -> Optional[str]:
+    """The template text a CONSUMER node interpolates payload keys into, or None if this node
+    type isn't an unframed consumer (or its template can't be read statically). The two unframed
+    consumers: `human_gate`'s inline `ask` string, and `render`'s `template_text`/`template_file`
+    (read relative to base_path, reusing the render lint's file resolver)."""
+    ntype = node.get("type")
+    if ntype == "human_gate":
+        ask = node.get("ask")
+        return ask if isinstance(ask, str) else None
+    if ntype == "render":
+        from .dataflow import _render_template_text
+        return _render_template_text(node, base_path)
+    return None
+
+
+def _untrusted_msg(consumer: str, ntype: Any, key: str, producers: List[str]) -> str:
+    ph = "{{" + key + "}}"
+    fenced = "{{!" + key + "}}"
+    prod = ", ".join(repr(p) for p in producers)
+    return (
+        "stage {c!r}: the {t} interpolates {ph} UNFENCED, but {k!r} is agent-authored "
+        "(produced by {prod}). A {t} renders via the plain templater — it does NOT frame or "
+        "escape the value and does NOT honor {fenced} fencing (only an agent prompt does), so "
+        "the raw model text reaches the consumer (a human, an AI operator driving the gate, or "
+        "a rendered document) as-is. HEURISTIC, not an injection-safety proof: sanitize the "
+        "value in an upstream transform, or confirm the consumer cannot act on injected "
+        "instructions. [lint: untrusted-unfenced]".format(
+            c=consumer, t=ntype, ph=ph, k=key, prod=prod, fenced=fenced))
+
+
+def _lint_untrusted_unfenced(nodes: Dict[str, Any], stages: Dict[str, Any],
+                             base_path: Optional[str], warnings: List[str]) -> None:
+    """Rule `untrusted-unfenced` (mailbox M12). An ADVISORY heuristic — explicitly NOT an
+    injection-safety proof. It flags a consumer site (`human_gate` ask / `render` template) that
+    interpolates `{{key}}` UNFENCED where an AGENT stage on some path to it AUTHORS `key`. Agent
+    output is untrusted text; those two consumer types render it UNFRAMED (see
+    `_UNTRUSTED_PLACEHOLDER`), so a crafted value reaches a human / AI operator / document as-is.
+
+    Provenance is graph reachability, NOT the data-flow lattice: an agent ancestor that authors
+    the key taints the consumer EVEN THROUGH an opaque parse-transform (the client's real shape:
+    agent → parse envelope-transform → gate). Deliberately QUIET when the key's provenance is
+    unknowable — a key only an opaque transform could have invented, an engine key (shell
+    `exit_code`), a human_gate's own `decision`, or an entry/carried key — because the honest
+    move is to flag agent-AUTHORED text, not to guess. A `{{!key}}` (author's untrusted marker)
+    is quiet. One warning per (consumer, key). Never raises.
+
+    Two honesty notes (adversarial eval 2026-06-30, judged against the real client config):
+      - the findings are a FLOOR, not a clean bill: agent text RENAMED by a transform (a parse
+        fn folding one agent key into a new name) loses its attribution and is NOT flagged — on
+        the audited real config that was the MAJORITY of the exposed gate surface. So when any
+        hit fires, ONE consolidated caveat warning says so; a reader of lint output alone must
+        not conclude the flagged set is complete. (Adding the renamed key to the producing
+        agent's `provides` restores attribution.)
+      - an enum-constrained schema key (a decision limited to two values) is STILL flagged: it
+        is agent-authored, and treating the schema constraint as a sanitizer would be exactly
+        the guessing this rule refuses. Intentional; pinned by the judge-decision test."""
+    from .dataflow import _edges
+    preds = _edges(stages)
+    authored_by: Dict[str, "frozenset"] = {}
+    for s_name, s in stages.items():
+        ref = s.get("node") if isinstance(s, dict) else None
+        node = nodes.get(ref) if isinstance(ref, str) else None
+        if isinstance(node, dict) and node.get("type") == "agent":
+            authored_by[s_name] = _agent_authored_keys(node)
+    if not authored_by:
+        return
+    hit_count = 0
+    for c_name, s in stages.items():
+        ref = s.get("node") if isinstance(s, dict) else None
+        node = nodes.get(ref) if isinstance(ref, str) else None
+        if not isinstance(node, dict):
+            continue
+        text = _consumer_template(node, base_path)
+        if not text:
+            continue
+        producers_of: Dict[str, List[str]] = {}
+        for anc in _ancestors(preds, c_name):
+            for key in authored_by.get(anc, ()):
+                producers_of.setdefault(key, []).append(anc)
+        if not producers_of:
+            continue
+        seen: set = set()
+        for m in _UNTRUSTED_PLACEHOLDER.finditer(text):
+            fenced, key = m.group(1), m.group(2)
+            if fenced or key in seen:
+                continue
+            producers = producers_of.get(key)
+            if producers:
+                seen.add(key)
+                hit_count += 1
+                warnings.append(_untrusted_msg(c_name, node.get("type"), key, sorted(set(producers))))
+    if hit_count:
+        # The floor-not-clean-bill caveat (see the docstring). Emitted only WITH hits, so it
+        # never adds a fresh --strict failure to an otherwise-quiet pipeline — but anyone
+        # triaging the hits sees, in the same output, that fixing them is not the whole surface.
+        warnings.append(
+            "the {} untrusted-unfenced finding(s) above are a FLOOR, not a clean bill: agent "
+            "text RENAMED by a transform (a parse fn folding an agent key into a new name) "
+            "loses its attribution and is NOT flagged. To widen coverage, add such renamed "
+            "keys to the producing agent's `provides`. [lint: untrusted-unfenced]".format(hit_count))
 
 
 def validate_budgets(root: Dict[str, Any], pipeline: Dict[str, Any]) -> None:
