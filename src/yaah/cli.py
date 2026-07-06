@@ -803,6 +803,16 @@ def _dispatch_run(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None
     out = asyncio.run(run_root(root, base))
     if out is not None:   # None = the serve-only path (which normally never returns)
         _render_outcome(out)
+        # Decisions-driven mode drives gates to completion, but can reach a gate
+        # it has no answer for; drive() then leaves the run PARKED rather than
+        # crash. Point the operator at the exact resume command so the walk-away
+        # is actionable. Exit stays the normal suspended-run code (0) — same as a
+        # plain `yaah run` that stops at its first gate.
+        from .harness import Suspended
+        if isinstance(out, Suspended) and root.get("decisions"):
+            print("parked at {}, no decision configured; resume with "
+                  "`yaah resume {} {}`".format(out.awaiting, spec["root"], out.baton_id),
+                  file=sys.stderr)
 
 
 _ROOT_DISPATCH: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], str], None]] = {

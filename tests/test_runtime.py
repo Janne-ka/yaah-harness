@@ -79,25 +79,65 @@ def scenario_decider() -> None:
     # nothing configured -> None (run-once default, no auto-drive)
     assert r._build_decider({}) is None
 
-    decide = r._build_decider({"decisions": {"data-audit": {"approved": True}}})
-    assert decide is not None
-
     class S:  # stand-in Suspended
         def __init__(self, awaiting):
             self.awaiting = awaiting
             self.concerns = []
 
-    # matched whole, after-':' and before-':'
-    for tag in ("data-audit", "human:data-audit"):
+    # --- authored convenience gate: loose match kept (whole / after-':' / before-':')
+    decide = r._build_decider({"decisions": {"data-audit": {"approved": True}}})
+    assert decide is not None
+    for tag in ("data-audit", "review:data-audit", "data-audit:v2"):
         env = asyncio.run(decide(S(tag)))
-        assert env.kind == Kind.RESUME and env.payload == {"approved": True}, (tag, env)
+        assert env is not None and env.kind == Kind.RESUME and env.payload == {"approved": True}, (tag, env)
 
-    # no match, not interactive -> clear RuntimeError (not a silent stop)
+    # --- FAULT park (escalate lane, 'human:<stage>'): EXACT decisions key only (M13).
+    # A parked FAILURE 'human:merge' must NOT suffix-match decisions['merge'] and
+    # silently auto-approve the fault — the masked-failure class the client hit.
+    masked = r._build_decider({"decisions": {"merge": {"approved": True}}})
+    assert asyncio.run(masked(S("human:merge"))) is None, \
+        "human:merge must NOT loose-match decisions['merge'] (masked failure)"
+    # ...nor prefix-match decisions['human']
+    pref = r._build_decider({"decisions": {"human": {"approved": True}}})
+    assert asyncio.run(pref(S("human:merge"))) is None, \
+        "human:merge must NOT prefix-match decisions['human']"
+    # an EXACT 'human:merge' key DOES resume the fault park (opt in explicitly)
+    exact = r._build_decider({"decisions": {"human:merge": {"approved": True}}})
+    env = asyncio.run(exact(S("human:merge")))
+    assert env is not None and env.kind == Kind.RESUME and env.payload == {"approved": True}, env
+
+    # --- no match, not interactive -> None (walk away PARKED, not a RuntimeError)
+    assert asyncio.run(decide(S("spec-review"))) is None, \
+        "an unmatched gate must leave the run parked (None), never crash the driver"
+
+
+def scenario_cli_walkaway_message() -> None:
+    """Decisions-driven `yaah run` that walks away at an unanswered gate: the CLI
+    prints ONE actionable resume line and exits with the normal suspended-run
+    code (0 — no SystemExit), never a traceback."""
+    from yaah import cli
+    from yaah.harness import Suspended
+
+    parked = Suspended(baton_id="b-9", awaiting="human:merge")
+
+    async def fake_run_root(root, base):
+        return parked
+
+    orig = r.run_root
+    r.run_root = fake_run_root
     try:
-        asyncio.run(decide(S("spec-review")))
-        raise AssertionError("expected RuntimeError for an unmatched gate")
-    except RuntimeError as e:
-        assert "no matching decision" in str(e), e
+        err = io.StringIO()
+        out = io.StringIO()
+        spec = {"root": "orchestrator.json"}
+        root = {"decisions": {"merge": {"approved": True}}}
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            cli._dispatch_run(spec, root, "/base")   # must NOT raise SystemExit
+        msg = err.getvalue()
+        assert "parked at human:merge, no decision configured" in msg, msg
+        assert "yaah resume orchestrator.json b-9" in msg, msg
+        assert "GATE" in out.getvalue(), out.getvalue()  # the outcome banner still prints
+    finally:
+        r.run_root = orig
 
 
 def scenario_trace_file_sink() -> None:
@@ -467,6 +507,7 @@ def main() -> None:
     scenario_resolve_serve()
     scenario_validate_root()
     scenario_decider()
+    scenario_cli_walkaway_message()
     scenario_trace_file_sink()
     scenario_trace_off()
     scenario_trace_config_errors()

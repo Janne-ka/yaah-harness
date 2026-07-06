@@ -62,6 +62,18 @@ type-specific fields the new type doesn't accept.
 Unknown top-level keys, bad shapes, and bad enums are caught by `validate_root`
 with a suggestion. Any `_`-prefixed key (`_about`, `_fake`) is a comment.
 
+**`decisions` matching (auto-drive).** Each key answers a gate by its `awaiting`
+tag. An **authored** convenience gate matches loosely — the whole tag, then the
+parts either side of `:` — so `{"data-audit": ...}` answers a gate whose
+`awaiting` is `data-audit`, `review:data-audit`, or `data-audit:v2`. A **fault**
+park (the escalate lane, when a stage exhausts its attempts) is tagged
+`human:<stage>` and matches an **exact key only**: `{"human:merge": ...}` answers
+it, but `{"merge": ...}` does **not** — auto-approving a parked *failure* has to
+be opt-in and explicit, never a suffix-match accident. A gate with no matching
+decision (and no `interactive` fallback) leaves the run **parked** as a resumable
+baton — the driver prints the `yaah resume` command and exits with the normal
+suspended-run code, it does not crash.
+
 ## Transport
 
 ```json
