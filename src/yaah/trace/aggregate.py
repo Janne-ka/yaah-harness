@@ -18,6 +18,7 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 import json
+import math
 from typing import Any, Dict, Iterable, List, Optional
 
 
@@ -44,6 +45,23 @@ def record_cost_usd(r: Dict[str, Any],
     return cost_usd(key, r.get("tokens_in", 0), r.get("tokens_out", 0), price_map)
 
 
+def priced_key(r: Dict[str, Any],
+               price_map: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The price-map key that would price this record, or None if the map has no
+    entry for it. Same ref-preferred resolution as record_cost_usd, exposed so a
+    renderer can tell "priced $0.00" (a real zero-token call) apart from
+    "unpriced" (cost unknown) and never print a silent $0.00 for the latter."""
+    if not price_map:
+        return None
+    ref = r.get("model_ref")
+    if ref in price_map:
+        return ref
+    model = r.get("model")
+    if model in price_map:
+        return model
+    return None
+
+
 def percentile(values: List[float], q: float) -> float:
     """Linear-interpolated percentile (q in 0..100), stdlib-only so there's no
     numpy dependency. Empty -> 0.0."""
@@ -56,6 +74,85 @@ def percentile(values: List[float], q: float) -> float:
     lo = int(pos)
     hi = min(lo + 1, len(s) - 1)
     return s[lo] * (1 - (pos - lo)) + s[hi] * (pos - lo)
+
+
+def nearest_rank_percentile(values: List[float], q: float) -> float:
+    """Nearest-rank percentile (q in 0..100), stdlib-only. Unlike `percentile`
+    (linear-interpolated, used for stage latency), this returns an ACTUALLY
+    OBSERVED value: sort ascending, take the value at rank ceil(q/100 * N)
+    (1-indexed, clamped to [1, N]). Chosen for the --counts report so a reported
+    p50/p95 is a real call duration the operator can go find in the trace, never
+    a synthetic number between two calls. Empty -> 0.0; q<=0 -> the minimum.
+
+    The rank product is rounded (9 dp) before ceil: binary floats make e.g.
+    0.07 * 100 == 7.000000000000001, and a bare ceil would bump that to rank 8
+    — an off-by-one for any (q, N) whose product carries such an artifact
+    (never hit by the 50/95 the report uses, but wrong for a reused general q)."""
+    if not values:
+        return 0.0
+    s = sorted(values)
+    if q <= 0:
+        return s[0]
+    rank = math.ceil(round(q / 100.0 * len(s), 9))
+    rank = max(1, min(rank, len(s)))
+    return s[rank - 1]
+
+
+def count_by_stage_model(records: Iterable[Dict[str, Any]],
+                         *, price_map: Optional[Dict[str, Any]] = None
+                         ) -> List[Dict[str, Any]]:
+    """Invocation-count report (M12): group model_call records by
+    (stage, model_ref, ladder-rung) and reduce each group to the columns the
+    client reads — calls, tokens_in/out, cost, p50/p95 duration.
+
+    Ladder rungs stay DISTINGUISHABLE: a record carrying `ladder_from` (the M7
+    escalation second rung) forms a SEPARATE row from the rung-1 calls, even on
+    the same (stage, model_ref) — never merged. `model_ref` (the config
+    "provider:model" ref) is preferred for row identity, falling back to the
+    resolved `model` name for older records.
+
+    Duration percentiles are computed over model_call `duration_ms` (recorded per
+    call by PhaseContributor); a record missing it contributes nothing rather
+    than a fabricated 0. Cost uses the record_cost_usd seam; `priced` flags
+    whether the model was in the price-map so the renderer can show an honest '-'
+    for unpriced instead of a silent $0.00. Zero-token calls are KEPT (forensic
+    signal). PURE. Rows are sorted stage asc, rung-1 before ladder, model asc."""
+    groups: Dict[Any, Dict[str, Any]] = {}
+    order: List[Any] = []
+    for r in records:
+        if r.get("name") != "model_call":
+            continue
+        stage = r.get("stage") or "?"
+        model_ref = r.get("model_ref") or r.get("model") or "?"
+        is_ladder = "ladder_from" in r
+        key = (stage, model_ref, is_ladder)
+        g = groups.get(key)
+        if g is None:
+            g = {"stage": stage, "model_ref": model_ref, "ladder": is_ladder,
+                 "ladder_from": r.get("ladder_from"),
+                 "calls": 0, "tokens_in": 0, "tokens_out": 0,
+                 "cost_usd": 0.0, "priced": False, "_durations": []}
+            groups[key] = g
+            order.append(key)
+        g["calls"] += 1
+        g["tokens_in"] += r.get("tokens_in", 0)
+        g["tokens_out"] += r.get("tokens_out", 0)
+        g["cost_usd"] += record_cost_usd(r, price_map)
+        if priced_key(r, price_map) is not None:
+            g["priced"] = True
+        if "duration_ms" in r:
+            g["_durations"].append(r.get("duration_ms", 0.0))
+
+    rows: List[Dict[str, Any]] = []
+    for key in order:
+        g = groups[key]
+        durs = g.pop("_durations")
+        g["p50_ms"] = nearest_rank_percentile(durs, 50)
+        g["p95_ms"] = nearest_rank_percentile(durs, 95)
+        g["n_durations"] = len(durs)
+        rows.append(g)
+    rows.sort(key=lambda g: (g["stage"], g["ladder"], g["model_ref"]))
+    return rows
 
 
 def aggregate(records: Iterable[Dict[str, Any]],

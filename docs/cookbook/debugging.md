@@ -103,6 +103,36 @@ stage's verdict was a retry vs. a final), a stage took longer than expected
 `--pretty` for stage timing), or to confirm a cost story before a real-model
 batch.
 
+## 5b — `yaah trace --counts` for the invocation-count report
+
+```bash
+yaah trace state/trace.jsonl --counts                    # table, tokens only
+yaah trace state/trace.jsonl --counts prices.json        # table with $ cost
+yaah trace state/trace.jsonl --counts prices.json --json # machine shape (list of rows)
+```
+
+Groups every `model_call` record by **(stage, model, ladder rung)** and reports
+the columns you'd otherwise hand-roll from `jq`: `stage · model · calls ·
+tokens_in · tokens_out · cost · p50 · p95`. This is the "how many calls, to
+which model, from which stage, and how long" view — a cross-run cousin of
+`--cost` (which is per-model only, no stage or duration breakdown).
+
+- **Ladder rungs stay separate.** A model_call that carries `ladder_from` (the
+  M7 escalation second rung) is a distinct row marked `(ladder)`, never merged
+  into the rung-1 calls — even when it resolved to the same model.
+- **`p50`/`p95` are nearest-rank** over each group's per-call `duration_ms` (an
+  actually-observed call latency, not an interpolated number). A call missing a
+  duration contributes nothing rather than a fabricated `0`.
+- **Cost is honest.** A priced model shows a `$` amount (including an explicit
+  `$0.0000` for a real zero-token call); an unpriced model shows `-` (cost
+  unknown) — never a silent `$0.00`. Same "cost is opt-in" rule as `--cost`.
+- **Zero-token rows are kept** — they're a forensic signal (a call that ran but
+  produced nothing), not noise.
+
+Use when: you want the per-stage/per-model call breakdown for a cost or latency
+story, or to confirm a laddered stage escalated as expected (the `(ladder)` row
+appears with its own token/latency profile).
+
 ## 6 — Reading raw envelopes when the trace isn't enough
 
 When the trace doesn't surface the thing you need (the prompt that was
@@ -130,9 +160,10 @@ state store + the agent's stage-attached input payload are how to see
 
 ## Composing trace flags
 
-The trace view flags (`--pretty`, `--errors-only`, `--cost`) are mutually
-exclusive — each produces a different shape. `--last N` and `--corr <id>`
-are FILTERS and compose with any view:
+The trace view flags (`--pretty`, `--errors-only`, `--cost`, `--counts`) are
+mutually exclusive — each produces a different shape. `--json` (machine output
+for `--counts`), `--last N`, and `--corr <id>` are MODIFIERS/FILTERS and compose
+with any view:
 
 ```bash
 # Just the errors from the last 10 runs

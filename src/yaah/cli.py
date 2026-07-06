@@ -63,6 +63,7 @@ Debug:
                                 add --pretty for a per-run tree (stages, calls, errors)
                                 add --errors-only for the CI-shaped check (exits non-zero on errors)
                                 add --cost for a compact human cost rollup (with PRICES for $)
+                                add --counts for the per-(stage, model, ladder rung) invocation report (--json for machine output)
                                 add --last N to filter to the most recent N runs
                                 add --corr ID to zoom in on one specific run
 
@@ -302,11 +303,13 @@ def _parse_trace(rest: list) -> dict:
             _usage_exit("--corr needs a correlation id")
         corr = rest_clean[i + 1]
         del rest_clean[i:i + 2]
-    flags = {"--debug", "--pretty", "--errors-only", "--cost"}  # bare flags
+    flags = {"--debug", "--pretty", "--errors-only", "--cost", "--counts",
+             "--json"}  # bare flags
     files = [a for a in rest_clean if a not in flags]
     if not files:
         _usage_exit("trace needs a trace.jsonl path")
-    view_flags = [f for f in ("--pretty", "--errors-only", "--cost") if f in rest_clean]
+    view_flags = [f for f in ("--pretty", "--errors-only", "--cost", "--counts")
+                  if f in rest_clean]
     if len(view_flags) > 1:
         _usage_exit("{} are mutually exclusive".format(" and ".join(view_flags)))
     return {"action": "trace", "trace_path": files[0],
@@ -314,6 +317,8 @@ def _parse_trace(rest: list) -> dict:
             "pretty": "--pretty" in rest_clean,
             "errors_only": "--errors-only" in rest_clean,
             "cost": "--cost" in rest_clean,
+            "counts": "--counts" in rest_clean,
+            "json": "--json" in rest_clean,
             "last_n": last_n,
             "corr": corr,
             "debug": "--debug" in rest_clean}
@@ -451,6 +456,17 @@ def _dispatch_trace(spec: Dict[str, Any]) -> None:
     if spec.get("pretty"):
         from .trace.pretty import pretty
         print(pretty(records, price_map=price_map), end="")
+        return
+    if spec.get("counts"):
+        # Invocation-count report (M12): the client's per-(stage, model, ladder
+        # rung) table. --json composes to the machine shape (list of row dicts).
+        if spec.get("json"):
+            from .trace.aggregate import count_by_stage_model
+            print(json.dumps(count_by_stage_model(records, price_map=price_map),
+                             indent=2))
+            return
+        from .trace.pretty import counts_table
+        print(counts_table(records, price_map=price_map), end="")
         return
     print(json.dumps(aggregate(records, price_map=price_map), indent=2))
 
