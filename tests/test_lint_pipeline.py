@@ -560,9 +560,12 @@ def placeholder_regex_is_single_source() -> None:
     # silent-misroute class reopens. Since ADR-0006 slice B5 there is ONE copy in `templating`;
     # guard that the lint and the runtime both use that exact object (not a re-introduced copy).
     from yaah.templating import PLACEHOLDER, fill
-    from yaah.dataflow import _PLACEHOLDER as lint_re
+    from yaah.node_contract import render_consumes
     from yaah.nodes.render_node import _fill as render_fill
-    assert lint_re is PLACEHOLDER, "the lint must use the shared templating.PLACEHOLDER"
+    # the lint's render-consume extraction (now node-owned, ADR-0006 symmetry) uses the SAME
+    # shared regex the runtime fills with — proven behaviourally: same keys out.
+    tpl = "{{a}} and {{ b }} but not {c}"
+    assert render_consumes({"template_text": tpl}, None) == frozenset(PLACEHOLDER.findall(tpl))
     assert render_fill is fill, "the render node must use the shared templating.fill"
 
 
@@ -889,22 +892,24 @@ def fork_rejoin_reduce_output_not_provably_absent() -> None:
     assert not _has(cfg, "render-key-unprovided"), lint_pipeline(cfg)
 
 
-def combined_fanin_fanout_stage_takes_the_widest_arm() -> None:
-    # validate accepts `fanin` COMBINED with `fanout`, and the two runtime walkers
-    # disagree on such a stage (`_drive` would run the fanout merge; the branch walker
-    # `_walk` runs the fan-in join and never sets `results`). The lattice must take
-    # the JOIN arm — the widest — so neither walker is unsoundly modeled: no hard
-    # error on either key, and no closed claim that `results` is present (eval
-    # finding 2026-07, runtime-probed).
-    cfg = {"nodes": {
-        "a": {"type": "agent", "parse": False}, "l1": {"type": "agent"},
-        "r": {"type": "render", "template_text": "{{results}} {{never_provided}}"}},
-        "graph": {"start": "s1", "stages": {
-            "s1": {"node": "a", "then": "s2"},
-            "s2": {"node": "a", "fanout": ["l1"], "fanin": {"expect": []},
-                   "then": "s3"},
-            "s3": {"node": "r"}}}}
-    validate_pipeline(cfg)   # neither key may hard-fail: the join lane is unknowable
+def combined_fanin_fanout_stage_stays_sound_in_the_lattice() -> None:
+    # `validate_pipeline` now REJECTS a stage that is both a fanin (JOIN) and a
+    # fanout (SOURCE) — a walker-dependent trap (see the reject test below). But the
+    # dataflow lattice keeps handling the combo SOUNDLY as defense-in-depth: the two
+    # runtime walkers disagree (`_drive` runs the fanout merge; the branch walker
+    # `_walk` runs the join and never sets `results`), so the lattice must take the
+    # JOIN arm — the widest — with no hard error on either key and no closed claim
+    # that `results` is present (eval finding 2026-07, runtime-probed). We probe the
+    # lattice DIRECTLY here since validate now stops the config before it.
+    from yaah.dataflow import analyze_dataflow
+    nodes = {"a": {"type": "agent", "parse": False}, "l1": {"type": "agent"},
+             "r": {"type": "render", "template_text": "{{results}} {{never_provided}}"}}
+    stages = {"s1": {"node": "a", "then": "s2"},
+              "s2": {"node": "a", "fanout": ["l1"], "fanin": {"expect": []},
+                     "then": "s3"},
+              "s3": {"node": "r"}}
+    errors, _ = analyze_dataflow(nodes, stages, [], "s1", None)
+    assert not any("render-key-absent" in e for e in errors), errors
 
 
 def fanin_reduce_union_not_provably_absent() -> None:
@@ -940,6 +945,113 @@ def wrong_typed_parallel_shape_is_a_clean_error_not_a_crash() -> None:
             assert "'a'" in str(e) and key in str(e), (key, e)
         else:
             raise AssertionError("{}: 5 accepted".format(key))
+
+
+# ── node-owned CONSUMES (ADR-0006 symmetry): a node reports the keys it READS from its
+# inbound payload, the mirror of `provides`. render's consumes parses its `{{...}}`; a CUSTOM
+# node declares `consumes: [...]` in config and gets its inputs checked — impossible before,
+# when the checker hardcoded `type == "render"` as the only consumer. Behaviour for render is
+# unchanged; the new reach is custom nodes.
+
+def custom_node_consumes_declared_input_is_checked() -> None:
+    # `mine` (an unknown type) declares it READS `missing`. Upstream is a parse:false agent —
+    # a CLOSED {raw} payload that provably lacks `missing` — so the read is a provable hard
+    # ERROR. Before node-owned consumes, a custom node's reads were invisible: this validated.
+    cfg = {"nodes": {"a": {"type": "agent", "parse": False},
+                     "mine": {"type": "my-scorer", "consumes": ["missing"]}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "a", "then": "s2"},
+               "s2": {"node": "mine"}}}}
+    try:
+        validate_pipeline(cfg)
+    except ValueError as e:
+        assert "'s2'" in str(e) and "missing" in str(e), e
+        return
+    raise AssertionError("custom node reading a provably-absent declared key must fail loud")
+
+
+def custom_node_consumes_present_key_is_quiet() -> None:
+    # same shape, but `mine` reads `raw` — which the parse:false agent DOES provide → quiet.
+    cfg = {"nodes": {"a": {"type": "agent", "parse": False},
+                     "mine": {"type": "my-scorer", "consumes": ["raw"]}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "a", "then": "s2"},
+               "s2": {"node": "mine"}}}}
+    validate_pipeline(cfg)   # must NOT raise: raw is provided upstream
+
+
+def custom_node_without_consumes_reads_nothing_checkable() -> None:
+    # no `consumes:` and an unknown type → the node reports it reads nothing → no check,
+    # never a false positive (the "smart by default, but doesn't have to" floor).
+    cfg = {"nodes": {"a": {"type": "agent", "parse": False},
+                     "mine": {"type": "my-scorer"}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "a", "then": "s2"},
+               "s2": {"node": "mine"}}}}
+    validate_pipeline(cfg)   # must NOT raise
+
+
+def render_consumes_still_hard_fails_a_provably_absent_placeholder() -> None:
+    # render behaviour is PRESERVED through the new node-owned path: {{verdict}} after a
+    # parse:false agent (closed {raw}) is still a hard error naming verdict.
+    cfg = {"nodes": {"a": {"type": "agent", "parse": False},
+                     "r": {"type": "render", "template_text": "{{verdict}}"}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "a", "then": "s2"}, "s2": {"node": "r"}}}}
+    try:
+        validate_pipeline(cfg)
+    except ValueError as e:
+        assert "verdict" in str(e) and "render-key-absent" in str(e), e
+        return
+    raise AssertionError("render of a provably-absent key must still fail loud")
+
+
+def render_inline_consumes_does_not_fabricate_a_false_render_error() -> None:
+    # opus eval finding 1: a render fills {{raw}} fine but ALSO carries consumes:["verdict"].
+    # `verdict` is not a placeholder, so merging it would emit a FALSE "render FAILS" error on a
+    # render that runs. A built-in consumer is authoritative → inline consumes ignored → clean.
+    cfg = {"nodes": {"a": {"type": "agent", "parse": False},
+                     "r": {"type": "render", "template_text": "Report: {{raw}}",
+                           "consumes": ["verdict"]}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "a", "then": "s2"}, "s2": {"node": "r"}}}}
+    validate_pipeline(cfg)   # must NOT raise: raw is provided; verdict is not actually read
+
+
+def render_allow_unfilled_with_stray_consumes_is_not_blocked() -> None:
+    # opus eval finding 2: allow_unfilled render (author opted out of failing) must not be
+    # hard-blocked at load by a stray consumes:[...] — that self-contradicts its own advice.
+    cfg = {"nodes": {"a": {"type": "agent", "parse": False},
+                     "r": {"type": "render", "template_text": "{{raw}}",
+                           "allow_unfilled": True, "consumes": ["verdict"]}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "a", "then": "s2"}, "s2": {"node": "r"}}}}
+    validate_pipeline(cfg)   # must NOT raise
+
+
+def fanin_combined_with_a_parallel_source_is_rejected() -> None:
+    # A `fanin` is a parallel JOIN; `fanout`/`fork` is a parallel SOURCE. One stage
+    # that is BOTH is a walker-dependent trap: `_drive` treats it fork-first, the
+    # branch walker treats it fanin-first, so the runtime behaviour depends on which
+    # walker reaches it. The dataflow lattice was made sound either way, but the
+    # CONFIG is ambiguous — reject it at load, naming the stage and both shapes.
+    for src in ("fanout", "fork"):
+        cfg = {"nodes": {"n": {"type": "transform", "call": "envelope"}},
+               "graph": {"start": "j", "stages": {
+                   "b1": {"node": "n", "then": "j"},
+                   "j": {"node": "n", "fanin": {"expect": ["b1"]}, src: ["b1"]}}}}
+        try:
+            validate_pipeline(cfg)
+        except ValueError as e:
+            assert "'j'" in str(e) and "fanin" in str(e) and src in str(e), (src, e)
+        else:
+            raise AssertionError("fanin+{} accepted".format(src))
+    # a lone fanin (the legitimate join) is NOT rejected by this rule
+    ok = {"nodes": {"n": {"type": "transform", "call": "envelope"}},
+          "graph": {"start": "b1", "stages": {
+              "b1": {"node": "n", "then": "j"},
+              "j": {"node": "n", "fanin": {"expect": ["b1"]}}}}}
+    validate_pipeline(ok)   # must NOT raise on the fanin-only join
 
 
 # ── [lint: untrusted-unfenced] — agent-authored text rendered UNFENCED at a consumer ──
@@ -1258,9 +1370,16 @@ def main() -> None:
     provable_absence_upstream_of_the_fanout_still_fails_loud()
     non_fanout_stage_unaffected_engine_keys_still_absent()
     fork_rejoin_reduce_output_not_provably_absent()
-    combined_fanin_fanout_stage_takes_the_widest_arm()
+    combined_fanin_fanout_stage_stays_sound_in_the_lattice()
     fanin_reduce_union_not_provably_absent()
     wrong_typed_parallel_shape_is_a_clean_error_not_a_crash()
+    fanin_combined_with_a_parallel_source_is_rejected()
+    custom_node_consumes_declared_input_is_checked()
+    custom_node_consumes_present_key_is_quiet()
+    custom_node_without_consumes_reads_nothing_checkable()
+    render_consumes_still_hard_fails_a_provably_absent_placeholder()
+    render_inline_consumes_does_not_fabricate_a_false_render_error()
+    render_allow_unfilled_with_stray_consumes_is_not_blocked()
     warns_untrusted_agent_key_in_gate_ask()
     warns_untrusted_agent_key_in_render()
     warns_untrusted_agent_raw_is_authored()

@@ -572,6 +572,16 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
         is_fork = bool(fk)
         if fo and fk:
             errs.append("stage {!r}: has both 'fanout' and 'fork' — one stage, one parallel shape".format(name))
+        # A `fanin` is a parallel JOIN; `fanout`/`fork` is a parallel SOURCE. One stage
+        # that is both is a walker-dependent trap — `_drive` reaches it fork-first, the
+        # branch walker fanin-first, so which shape "wins" depends on the walk, not the
+        # config. Reject at load rather than run something order-dependent (the dataflow
+        # lattice tolerates it soundly, but the runtime behaviour is ambiguous).
+        if s.get("fanin") and (fo or fk):
+            src = "fanout" if fo else "fork"
+            errs.append("stage {!r}: has both 'fanin' (a parallel JOIN) and {!r} (a "
+                        "parallel SOURCE) — one stage cannot be both; split the join and "
+                        "the {} into separate stages".format(name, src, src))
         node = s.get("node")
         if not node:
             if not is_fork and not s.get("fanin"):
@@ -858,8 +868,8 @@ def _consumer_template(node: Dict[str, Any], base_path: Optional[str]) -> Option
         ask = node.get("ask")
         return ask if isinstance(ask, str) else None
     if ntype == "render":
-        from .dataflow import _render_template_text
-        return _render_template_text(node, base_path)
+        from .templating import render_template_text
+        return render_template_text(node, base_path)
     return None
 
 

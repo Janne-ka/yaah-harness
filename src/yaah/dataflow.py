@@ -30,11 +30,10 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .node_contract import Flow, apply, may_suspend, meet, resolve_contract
-from .templating import PLACEHOLDER as _PLACEHOLDER   # the {{mustache}} a render fills — one copy
+from .node_contract import (Flow, apply, may_suspend, meet, resolve_consumes,
+                            resolve_contract)
 
 # A provides value on an edge is None (the fixpoint identity — "not yet reached") or a
 # concrete Flow (known keys + how exact the set is). This module holds NO per-node key
@@ -268,28 +267,6 @@ def terminal_stages(stages: Dict[str, Any]) -> List[str]:
     return out
 
 
-def _render_template_text(rnode: Dict[str, Any], base_path: Optional[str]) -> Optional[str]:
-    """The render's template source, or None when it can't be read statically (skip — not
-    the linter's job to report a missing file). Inline `template_text` is always available;
-    a `template_file` is read relative to `base_path` (the root config's dir, matching
-    `_build_render`) when known, else by absolute path."""
-    inline = rnode.get("template_text")
-    if isinstance(inline, str):
-        return inline
-    tfile = rnode.get("template_file")
-    if not isinstance(tfile, str) or not tfile:
-        return None
-    path = tfile if os.path.isabs(tfile) else (
-        os.path.join(base_path, tfile) if base_path else None)
-    if path is None:
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
-    except OSError:
-        return None
-
-
 def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list: Any,
                      start: Optional[str], base_path: Optional[str], *,
                      entry: Optional[Flow] = None) -> "Tuple[List[str], List[str]]":
@@ -373,6 +350,21 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
             "allow_unfilled:true if intentionally literal. [lint: render-key-unprovided]".format(
                 s_name, missing, sorted(known - {"raw"})))
 
+    def consumes_msg(s_name: str, missing: List[str], known: "frozenset", hard: bool) -> str:
+        # a declared-`consumes` (custom) node reading an absent key — the render wording
+        # (render_unfilled_placeholders / allow_unfilled) would be wrong for it.
+        if hard:
+            return (
+                "stage {!r}: node reads {} (its `consumes`) which is provably ABSENT here — the "
+                "payload is a fixed set providing {}. Provide them upstream (an agent "
+                "output_schema, a transform `provides`, or graph `sticky`) or drop them from "
+                "`consumes`. [dataflow: input-key-absent]".format(
+                    s_name, missing, sorted(known - {"raw"})))
+        return (
+            "stage {!r}: node reads {} (its `consumes`) which nothing on the path to it "
+            "provides (provides {}). Declare an upstream provider or drop them from `consumes`. "
+            "[lint: input-key-unprovided]".format(s_name, missing, sorted(known - {"raw"})))
+
     for s_name, s in stages.items():
         node = nodes.get(s.get("node")) or {}
         pin_here = pin.get(s_name)
@@ -390,20 +382,22 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
                     warnings.append(branch_msg(s_name, on, flow.known, hard=False))
             else:
                 note_blocked(s_name)
-        # a render reads the payload that flows INTO it (provides_in).
-        if node.get("type") == "render" and not node.get("allow_unfilled"):
-            text = _render_template_text(node, base_path)
-            needs = sorted(set(_PLACEHOLDER.findall(text))) if text is not None else []
-            if not needs:
-                continue  # nothing read (no template / no placeholders) — nothing to check
+        # a node's CONSUMES: keys it reads from the payload flowing INTO it (ADR-0006
+        # symmetry — the node reports this, the checker holds no per-type knowledge). render
+        # parses its `{{...}}`; a custom node declares `consumes: [...]`; others read nothing.
+        needs = sorted(resolve_consumes(node.get("type"), node, base_path))
+        if needs:
+            # message SELECTION only (not contract logic): render keeps its established
+            # wording + tag; a declared-`consumes` node gets the generic one.
+            msg = render_msg if node.get("type") == "render" else consumes_msg
             if pin_here.closed:
-                missing = [ph for ph in needs if ph not in pin_here.known]
+                missing = [k for k in needs if k not in pin_here.known]
                 if missing:
-                    errors.append(render_msg(s_name, missing, pin_here.known, hard=True))
+                    errors.append(msg(s_name, missing, pin_here.known, hard=True))
             elif pin_here.complete:
-                missing = [ph for ph in needs if ph not in pin_here.known]
+                missing = [k for k in needs if k not in pin_here.known]
                 if missing:
-                    warnings.append(render_msg(s_name, missing, pin_here.known, hard=False))
+                    warnings.append(msg(s_name, missing, pin_here.known, hard=False))
             else:
                 note_blocked(s_name)
 

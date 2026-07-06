@@ -11,10 +11,33 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
+import os
 import re
-from typing import List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 PLACEHOLDER = re.compile(r"{{\s*(\w+)\s*}}")
+
+
+def render_template_text(rnode: Dict[str, Any], base_path: Optional[str]) -> Optional[str]:
+    """A render node's template SOURCE, or None when it can't be read statically (skip — not
+    the linter's job to report a missing file). Inline `template_text` is always available; a
+    `template_file` is read relative to `base_path` (the root config's dir, matching
+    `_build_render`) when known, else by absolute path. Never raises."""
+    inline = rnode.get("template_text")
+    if isinstance(inline, str):
+        return inline
+    tfile = rnode.get("template_file")
+    if not isinstance(tfile, str) or not tfile:
+        return None
+    path = tfile if os.path.isabs(tfile) else (
+        os.path.join(base_path, tfile) if base_path else None)
+    if path is None:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except OSError:
+        return None
 
 
 def fill(template: str, payload: dict) -> Tuple[str, List[str]]:

@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from yaah.node_contract import (
     Contract, Flow, apply, meet, opaque, preserve, preserve_declared, reset, resolve_contract,
+    resolve_consumes,
     agent_contract, transform_contract, render_contract, human_gate_contract,
     get_contract, post_contract, shell_contract, worktree_contract,
-    agent_loop_contract, validator_contract, builtin_contract_for,
+    agent_loop_contract, validator_contract, builtin_contract_for, builtin_consumes_for,
 )
 
 
@@ -136,6 +137,12 @@ def builtin_contract_for_unknown_is_none() -> None:
 def builtin_contract_for_matches_direct_call() -> None:
     assert builtin_contract_for("agent", {"parse": False}) == agent_contract({"parse": False})
 
+def builtin_for_never_raises_on_unhashable_type() -> None:
+    # both seams are documented "never raises" — an unhashable ntype must NOT blow up .get()
+    # (called directly, they're the D7 manifest/live-describe hook, outside resolve_*'s guard).
+    assert builtin_contract_for(["render"], {}) is None
+    assert builtin_consumes_for({"t": 1}, {}, None) is None
+
 
 # --- resolver ----------------------------------------------------------------------------
 
@@ -166,6 +173,52 @@ def resolve_contract_for_is_injectable() -> None:
     src = lambda t, cfg: reset({"m1"}, closed=True) if t == "ext" else None
     c = resolve_contract("ext", {"provides": ["m2"]}, contract_for=src)
     assert c.mode == "reset" and {"m1", "m2"} <= c.provides, c
+
+
+# --- consumes resolver (the provides mirror, ADR-0006 symmetry) --------------------------
+
+def consumes_render_parses_its_template() -> None:
+    assert resolve_consumes("render", {"template_text": "{{a}} {{b}}"}, None) == frozenset({"a", "b"})
+
+def consumes_render_allow_unfilled_reads_nothing() -> None:
+    assert resolve_consumes("render", {"template_text": "{{a}}", "allow_unfilled": True}, None) == frozenset()
+
+def consumes_unknown_no_inline_is_empty() -> None:
+    # the sound floor: an unknown type with no `consumes:` reads nothing checkable.
+    assert resolve_consumes("custom_node", {"type": "custom_node"}, None) == frozenset()
+
+def consumes_unknown_with_inline_is_that_set() -> None:
+    assert resolve_consumes("scorer", {"consumes": ["score", "label"]}, None) == frozenset({"score", "label"})
+
+def consumes_inline_ignored_for_builtin_consumer() -> None:
+    # a render's template is AUTHORITATIVE + complete (it reads exactly {{...}}). Inline
+    # `consumes:` must NOT augment it — merging a non-placeholder key would fabricate a read the
+    # render never performs → a false hard-error (opus eval finding). So `extra` is ignored.
+    got = resolve_consumes("render", {"template_text": "{{a}}", "consumes": ["extra"]}, None)
+    assert got == frozenset({"a"}), got
+
+def consumes_inline_ignored_even_when_render_reads_nothing() -> None:
+    # allow_unfilled render → template reads nothing → inline `consumes` still ignored (built-in
+    # is authoritative), so a valid pipeline is not blocked at load (opus eval finding 2).
+    got = resolve_consumes("render", {"template_text": "{{a}}", "allow_unfilled": True,
+                                      "consumes": ["verdict"]}, None)
+    assert got == frozenset(), got
+
+def consumes_ignores_non_string_inline_entries() -> None:
+    assert resolve_consumes("x", {"consumes": ["ok", 3, None, "two"]}, None) == frozenset({"ok", "two"})
+
+def consumes_never_raises() -> None:
+    assert resolve_consumes("render", None, None) == frozenset()   # cfg not a dict
+    assert resolve_consumes(None, {}, None) == frozenset()         # no type
+    assert resolve_consumes("render", {"consumes": "notalist"}, None) == frozenset()
+
+def consumes_for_is_injectable() -> None:
+    # the seam: a custom source supplies a node's reads (the D7 manifest/live-describe hook).
+    # When it answers (not None) it is AUTHORITATIVE → inline consumes ignored (unlike provides).
+    src = lambda t, cfg, bp: frozenset({"r1"}) if t == "ext" else None
+    assert resolve_consumes("ext", {"consumes": ["r2"]}, None, consumes_for=src) == frozenset({"r1"})
+    # but a type the source does NOT know falls to inline (the custom-node path).
+    assert resolve_consumes("other", {"consumes": ["r2"]}, None, consumes_for=src) == frozenset({"r2"})
 
 
 # --- flow algebra: apply + meet ----------------------------------------------------------
