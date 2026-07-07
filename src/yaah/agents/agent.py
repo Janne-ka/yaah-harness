@@ -385,7 +385,13 @@ class Agent(Node):
                 "model_call", corr=input.correlation_id, parent=input.id, t0=t0, t1=t1,
                 tokens_in=int(usage["tokens_in"] - in0), tokens_out=int(usage["tokens_out"] - out0),
                 model=usage.get("model") or model, status="ok",
-                attrs={"stage": self._stage, **span_attrs}))
+                # model_ref = the CONFIG ref ("provider:model") beside the
+                # backend-RESOLVED `model` name: price maps are authored
+                # against refs, records used to carry only the resolved name —
+                # the one-dialect pricing seam (aggregate prefers the ref)
+                attrs={"stage": self._stage,
+                       **({"model_ref": model} if model else {}),
+                       **span_attrs}))
             await self._emit("model returned {} chars".format(len(text)))
             return text
 

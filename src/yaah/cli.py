@@ -47,6 +47,11 @@ Author:
 
 Run & inspect:
   run <root>                    run the configured pipeline (the default)
+  ab <experiment.json>          run an A/B campaign: variants x inputs x repetitions,
+                                one durable row per run (cost + outcomes; see docs)
+                                add --report [--json] for the comparison matrix
+                                add --rescore SCHEMA to re-score stored raw outputs
+                                against a changed contract (zero model calls)
   list <root> [--json]          show parked gates (the mailbox view; --json for a parseable shape)
   resume <root> ID [FILE]       deliver a decision (optionally from FILE) to a parked gate
   baton-schema <root> <id>      print the JSON Schema of decision.json for one parked baton
@@ -181,6 +186,37 @@ def _parse_manual(rest: list) -> dict:
     return {"action": "manual"}
 
 
+def _parse_ab(rest: list) -> dict:
+    """`ab <experiment.json> [--report [--json]] [--rescore <schema.json>]` —
+    run an A/B campaign (one durable row per run); --report reduces collected
+    rows + trace into the comparison matrix; --rescore re-scores the stored
+    raw outputs against a (changed) contract — both pure reads, zero model
+    calls, safe mid-campaign."""
+    rescore: Any = None
+    rest = list(rest)
+    if "--rescore" in rest:
+        i = rest.index("--rescore")
+        if i + 1 >= len(rest) or rest[i + 1].startswith("-"):
+            _usage_exit("--rescore needs a schema file "
+                        "(yaah ab exp.json --rescore new-contract.json)")
+        rescore = rest[i + 1]
+        del rest[i:i + 2]
+    args = [a for a in rest if not a.startswith("-")]
+    flags = set(rest) - set(args)
+    unknown = flags - {"--report", "--json"}
+    if unknown:
+        _usage_exit("ab: unknown flag(s) {}".format(", ".join(sorted(unknown))))
+    if "--json" in flags and not ("--report" in flags or rescore):
+        _usage_exit("ab: --json applies to --report / --rescore")
+    if "--report" in flags and rescore:
+        _usage_exit("ab: --report and --rescore are separate reads — pick one")
+    if len(args) != 1:
+        _usage_exit("ab needs exactly one experiment config "
+                    "(yaah ab my-experiment.json [--report|--rescore SCHEMA] [--json])")
+    return {"action": "ab", "experiment": args[0], "rescore": rescore,
+            "report": "--report" in flags, "json": "--json" in flags}
+
+
 def _parse_scaffold(rest: list) -> dict:
     """`scaffold <archetype> <dir>` — pick the named archetype and write its
     template. `scaffold --list` prints the archetype catalog with one-liners."""
@@ -307,6 +343,7 @@ def _parse_baton_schema(rest: list) -> dict:
 # Registry of verb -> parser. The dict is the single source of truth for the
 # CLI surface — adding a verb is one entry here + the matching dispatcher.
 _VERB_PARSERS: Dict[str, Callable[[list], dict]] = {
+    "ab":            _parse_ab,
     "init":          _parse_init,
     "manual":        _parse_manual,
     "mcp-serve":     _parse_mcp_serve,
@@ -445,6 +482,95 @@ def _dispatch_mcp_serve(spec: Dict[str, Any]) -> None:
     asyncio.run(serve_process_stdio())
 
 
+def _dispatch_ab(spec: Dict[str, Any]) -> None:
+    """Run an A/B experiment campaign — or, with --report, reduce its collected
+    rows + trace into the comparison matrix (no runs)."""
+    path = os.path.abspath(spec["experiment"])
+    cfg = _read_json(path)
+    base = os.path.dirname(path)
+    if spec.get("rescore"):
+        from .experiment import rescore_rows
+        schema = _read_json(spec["rescore"])
+        result = asyncio.run(rescore_rows(cfg, base, schema))
+        if spec.get("json"):
+            print(json.dumps(result, indent=2))
+            return
+        _render_rescore(result)
+        return
+    if spec.get("report"):
+        from .experiment import build_matrix
+        matrix = asyncio.run(build_matrix(cfg, base))
+        if spec.get("json"):
+            print(json.dumps(matrix, indent=2))
+            return
+        _render_matrix(matrix)
+        return
+    from .experiment import run_experiment
+    summary = asyncio.run(run_experiment(cfg, base))
+    print("experiment {!r}: {} rows appended".format(
+        summary["experiment"], summary["rows"]))
+    for name, counts in summary["by_variant"].items():
+        line = ", ".join("{} {}".format(v, k) for k, v in counts.items() if v)
+        print("  {:<12} {}".format(name, line or "no runs"))
+    print("rows + trace under the experiment store (trace: {})".format(summary["trace"]))
+    print("compare:  yaah ab {} --report".format(spec["experiment"]))
+
+
+def _render_rescore(result: Dict[str, Any]) -> None:
+    """The rescore tier table on a terminal: per population — parse tiers
+    (strict/recovered/reject) and the conform gate against the candidate
+    contract, with the top schema errors (a count alone is not actionable)."""
+    print("experiment {!r} rescored against schema (required: {}) — {} cell(s)".format(
+        result["experiment"], ", ".join(result["schema_required"]) or "none",
+        len(result["cells"])))
+    for c in result["cells"]:
+        t = c["tiers"]
+        print("  {:<12} fp {}  N={} (no_raw={})".format(
+            c["variant"], c["fingerprint"][:12], c["n"], c["no_raw"]))
+        print("    parse: {} strict / {} recovered / {} reject".format(
+            t["strict"], t["recovered"], t["reject"]))
+        print("    conform: {} pass / {} fail".format(
+            c["conform"]["pass"], c["conform"]["fail"]))
+        for e in c["conform"]["top_errors"]:
+            print("      mismatch: {}".format(e))
+    for w in result["warnings"]:
+        print("  warning: " + w)
+
+
+def _render_matrix(matrix: Dict[str, Any]) -> None:
+    """The comparison matrix on a terminal: one line per (variant, population)
+    cell — N, outcomes, cost, duration, declared metrics. NO winner column by
+    design: the matrix presents, the human decides; warnings carry the
+    statistical-honesty flags (N<2, mid-campaign population splits)."""
+    print("experiment {!r} — {} cell(s)".format(
+        matrix["experiment"], len(matrix["cells"])))
+    for c in matrix["cells"]:
+        cost = c["cost_usd"]
+        cost_s = ("${:.4f} mean (${:.4f}-${:.4f}, sd {:.4f}, {} priced/{} un)".format(
+            cost["mean"], cost["min"], cost["max"], cost["stdev"],
+            cost["n_priced"], cost["n_unpriced"]) if cost.get("n")
+            else "no cost data ({} unpriced)".format(cost["n_unpriced"]))
+        outcomes = ", ".join("{} {}".format(v, k) for k, v in sorted(c["outcomes"].items()))
+        print("  {:<12} fp {}  N={}{}".format(
+            c["variant"], c["fingerprint"][:12], c["n"],
+            "  [INSUFFICIENT N]" if c["insufficient_n"] else ""))
+        print("    outcomes: {}   cost: {}".format(outcomes, cost_s))
+        dur = c["duration_s"]
+        if dur.get("n"):
+            print("    duration: {:.2f}s mean ({:.2f}-{:.2f})".format(
+                dur["mean"], dur["min"], dur["max"]))
+        for m, s in sorted(c["metrics"].items()):
+            if s.get("n"):
+                print("    metric {}: {:.3f} mean ({:.3f}-{:.3f}, sd {:.3f}, "
+                      "n={}, missing={})".format(m, s["mean"], s["min"], s["max"],
+                                                 s["stdev"], s["n"], s["missing"]))
+            else:
+                print("    metric {}: no numeric values (missing={})".format(
+                    m, s.get("missing", 0)))
+    for w in matrix["warnings"]:
+        print("  warning: " + w)
+
+
 def _dispatch_scaffold(spec: Dict[str, Any]) -> None:
     """Write the named archetype's template into target_dir. `yaah init <dir>`
     enters here with archetype="linear" (back-compat)."""
@@ -462,6 +588,7 @@ def _dispatch_scaffold(spec: Dict[str, Any]) -> None:
 
 
 _SELF_CONTAINED_DISPATCH: Dict[str, Callable[[Dict[str, Any]], None]] = {
+    "ab":            _dispatch_ab,
     "lint-overlay":  _dispatch_lint_overlay,
     "doctor":        _dispatch_doctor,
     "completion":    _dispatch_completion,

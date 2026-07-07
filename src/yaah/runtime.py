@@ -119,7 +119,12 @@ async def _assemble_harness(root: Dict[str, Any], base: str) -> Any:
     # trace topic on this comms so spans the harness/agents publish are persisted.
     tracer = await _build_tracer(root, comms, base)
 
-    pipeline = _read_json(_rel(base, root["pipeline"]))
+    # `pipeline` is a base-relative FILE PATH or an INLINE dict — both are valid
+    # per validate_root/schema; the file-only assumption here crashed inline
+    # dicts with a bare TypeError (fail-loud violation, A/B design eval).
+    pipeline_ref = root["pipeline"]
+    pipeline = (dict(pipeline_ref) if isinstance(pipeline_ref, dict)
+                else _read_json(_rel(base, pipeline_ref)))
     # Timeout budget coherence (BUG-635/626 class) — the assemble step is the
     # one place the deployment root (transport ceiling) and the pipeline
     # (per-node timeouts, fork waits) meet, so the admission check lives here.
@@ -128,7 +133,14 @@ async def _assemble_harness(root: Dict[str, Any], base: str) -> Any:
     # MUTABLE leaves (model/knobs/numeric bounds — validate.MUTABLE_LEAF_KEYS
     # line) from the pipeline file per invocation, mtime-cached. Opt-in;
     # default stays frozen-at-build.
-    live_path = _rel(base, root["pipeline"]) if root.get("live_config") else None
+    live_path = None
+    if root.get("live_config"):
+        if isinstance(pipeline_ref, dict):
+            raise ValueError(
+                "live_config: true needs a pipeline FILE to re-read per invocation — "
+                "an inline pipeline dict has no file; point `pipeline` at a path "
+                "or drop live_config")
+        live_path = _rel(base, pipeline_ref)
     roles = _resolve_serve(root.get("serve", "all"), pipeline)
 
     # One state store backs the resume-cursor (BatonStore) and execute-once

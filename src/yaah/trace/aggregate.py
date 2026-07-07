@@ -31,6 +31,19 @@ def cost_usd(model: Optional[str], tokens_in: int, tokens_out: int,
     return tokens_in / 1000.0 * p.get("input", 0.0) + tokens_out / 1000.0 * p.get("output", 0.0)
 
 
+def record_cost_usd(r: Dict[str, Any],
+                    price_map: Optional[Dict[str, Any]]) -> float:
+    """Price ONE model_call record — THE pricing seam, shared by aggregate and
+    the pretty/--cost renderers so they can never disagree. Prefers the CONFIG
+    ref (`model_ref`, "provider:model" — what price maps are authored against)
+    when the map knows it, else the backend-RESOLVED `model` name (older
+    records / maps keyed by API names). No silent $0 from the dialect gap."""
+    ref = r.get("model_ref")
+    model = r.get("model")
+    key = ref if (price_map and ref in price_map) else model
+    return cost_usd(key, r.get("tokens_in", 0), r.get("tokens_out", 0), price_map)
+
+
 def percentile(values: List[float], q: float) -> float:
     """Linear-interpolated percentile (q in 0..100), stdlib-only so there's no
     numpy dependency. Empty -> 0.0."""
@@ -81,7 +94,7 @@ def aggregate(records: Iterable[Dict[str, Any]],
             run["model_calls"] += 1
             ti, to = r.get("tokens_in", 0), r.get("tokens_out", 0)
             model = r.get("model")
-            c = cost_usd(model, ti, to, price_map)
+            c = record_cost_usd(r, price_map)
             run["tokens_in"] += ti
             run["tokens_out"] += to
             run["cost_usd"] += c

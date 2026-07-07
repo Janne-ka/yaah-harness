@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from .aggregate import cost_usd
+from .aggregate import record_cost_usd
 
 
 def _fmt_ms(ms: float) -> str:
@@ -95,9 +95,7 @@ def _render_run(corr: str, records: List[Dict[str, Any]],
     total_ms = sum(s.get("duration_ms", 0.0) for s in stages)
     tokens_in = sum(m.get("tokens_in", 0) for m in model_calls)
     tokens_out = sum(m.get("tokens_out", 0) for m in model_calls)
-    total_cost = sum(cost_usd(m.get("model"), m.get("tokens_in", 0),
-                              m.get("tokens_out", 0), price_map)
-                     for m in model_calls)
+    total_cost = sum(record_cost_usd(m, price_map) for m in model_calls)
 
     def _plural(n: int, noun: str) -> str:
         return "{} {}{}".format(n, noun, "" if n == 1 else "s")
@@ -151,9 +149,7 @@ def _render_run(corr: str, records: List[Dict[str, Any]],
                          _fmt_ms(child.get("duration_ms", 0.0)),
                          "{}→{} tokens".format(_fmt_tokens(child.get("tokens_in", 0)),
                                                _fmt_tokens(child.get("tokens_out", 0)))]
-                ccost = _fmt_cost(cost_usd(child.get("model"),
-                                           child.get("tokens_in", 0),
-                                           child.get("tokens_out", 0), price_map))
+                ccost = _fmt_cost(record_cost_usd(child, price_map))
                 if ccost:
                     cbits.append(ccost)
             elif cname == "tool_call":
@@ -199,9 +195,7 @@ def cost_summary(records: Iterable[Dict[str, Any]],
 
     total_in = sum(r.get("tokens_in", 0) for r in calls)
     total_out = sum(r.get("tokens_out", 0) for r in calls)
-    total_cost = sum(cost_usd(r.get("model"), r.get("tokens_in", 0),
-                              r.get("tokens_out", 0), price_map)
-                     for r in calls)
+    total_cost = sum(record_cost_usd(r, price_map) for r in calls)
 
     head_bits = ["{} model call{}".format(len(calls),
                                            "" if len(calls) == 1 else "s"),
@@ -225,8 +219,7 @@ def cost_summary(records: Iterable[Dict[str, Any]],
         d["calls"] += 1
         d["tokens_in"] += r.get("tokens_in", 0)
         d["tokens_out"] += r.get("tokens_out", 0)
-        d["cost_usd"] += cost_usd(r.get("model"), r.get("tokens_in", 0),
-                                   r.get("tokens_out", 0), price_map)
+        d["cost_usd"] += record_cost_usd(r, price_map)
     sort_key = "cost_usd" if total_cost > 0 else "calls"
     rows = sorted(per_model.items(), key=lambda kv: kv[1][sort_key], reverse=True)
 

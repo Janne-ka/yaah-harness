@@ -25,5 +25,12 @@ class CostContributor(TraceContributor):
         # only model calls carry token cost; keep other records lean
         if span.name != "model_call":
             return {}
-        return {"tokens_in": span.tokens_in, "tokens_out": span.tokens_out,
-                "model": span.model}
+        out: Dict[str, Any] = {"tokens_in": span.tokens_in,
+                               "tokens_out": span.tokens_out,
+                               "model": span.model}
+        # the CONFIG ref ("provider:model") beside the backend-RESOLVED name —
+        # price maps are authored against refs; without the ref on the RECORD,
+        # pricing a config-ref map against resolved names silently reads $0.00
+        if "model_ref" in span.attrs:
+            out["model_ref"] = span.attrs["model_ref"]
+        return out
