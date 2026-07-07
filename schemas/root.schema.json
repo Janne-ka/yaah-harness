@@ -241,6 +241,7 @@
           "items": {
             "enum": [
               "cost",
+              "live",
               "phase",
               "tools"
             ],

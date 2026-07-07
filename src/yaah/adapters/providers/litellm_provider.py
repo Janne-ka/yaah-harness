@@ -6,17 +6,27 @@ Where: hosts with `pip install litellm` + a provider key.
 Why: one provider-agnostic call for non-Claude models; litellm is imported
 lazily so it's only required if this backend is actually used.
 
-A native ApiProvider: `stream()` is its completion method — it calls litellm's
-acompletion once and projects the response into the StreamEvent vocabulary
-(text_delta + toolcall_end + done). `turn()` is kept as the tool-loop entry.
-Collected-text callers use the module-level `api_provider.complete()`.
+A native ApiProvider: `stream()` is its completion method. Two wire shapes,
+chosen by the `stream` opt (provider block or per-call; default OFF):
 
-Real chunk-by-chunk streaming (passing `stream=True` to acompletion and
-iterating the SSE chunks) is a FOLLOW-UP — the upgrade requires updating
-every injected test stub to return an async iterator instead of a
-ModelResponse, and no current consumer needs token-level deltas. The
-protocol shape today is sufficient for unifying the backend surface; the
-wire-level upgrade lights up when a consumer demands it.
+- DEFAULT (single-shot): one acompletion call, the full response projected into
+  the StreamEvent vocabulary (text_delta + toolcall_end + done). Battle-tested
+  extraction (`_as_dict`/`_first_message` handle the pydantic ModelResponse);
+  usage always rides the response. Stays the default until real chunk streaming
+  has live mileage.
+- `stream: true` (SSE chunks): acompletion(stream=True, stream_options=
+  {include_usage: True}), each chunk's delta projected as it arrives —
+  text fragments → per-chunk `text_delta` (the live-monitoring heartbeat's
+  raw material), indexed tool_call fragments ASSEMBLED across chunks into
+  `toolcall_end` (tools do NOT silently downgrade to single-shot — the
+  silent-underdelivery footgun), usage from the final chunk when the provider
+  honors include_usage (else `done` has no usage — the cost report then shows a
+  zero-token call, the documented forensic signal). A mid-stream SDK exception
+  PROPAGATES (the engine's consumers keep partial state local, so the call
+  fails as cleanly as a pre-yield raise).
+
+`turn()` is kept as the tool-loop entry. Collected-text callers use the
+module-level `api_provider.complete()`.
 
 Targets Python 3.9+.
 """
@@ -100,6 +110,10 @@ class LiteLLMProvider(ApiProvider, SupportsTurn):
         merged = dict(self._default_opts)
         merged.update(opts)
         on_usage = merged.pop("on_usage", None)  # cost bridge (R4) — not an SDK arg
+        # `stream` is OUR wire-shape switch (see module docstring), popped before
+        # the SDK call — the streaming path re-adds it deliberately alongside
+        # stream_options; the single-shot path must never forward it.
+        chunked = bool(merged.pop("stream", False))
         _strip_agent_opts(merged)
 
         model = context.get("model") or "gpt-4o-mini"
@@ -116,6 +130,11 @@ class LiteLLMProvider(ApiProvider, SupportsTurn):
         kwargs: Dict[str, Any] = dict(merged, model=model, messages=messages)
         if tools:
             kwargs["tools"] = tools
+
+        if chunked:
+            async for ev in self._iter_chunks(kwargs, on_usage, model):
+                yield ev
+            return
 
         # Exceptions from the SDK propagate naturally (legacy behavior preserved).
         # Consumers that want in-stream error events can wrap the iteration.
@@ -151,6 +170,84 @@ class LiteLLMProvider(ApiProvider, SupportsTurn):
                                 "stop_reason": "tool_use" if saw_calls else "end_turn"}
         usage = _as_dict(resp).get("usage")
         if isinstance(usage, dict):
+            done["usage"] = usage
+        yield done
+
+    async def _iter_chunks(self, kwargs: Dict[str, Any],
+                           on_usage: Optional[Callable[..., Any]],
+                           model: Optional[str]) -> AsyncIterator[StreamEvent]:
+        """The `stream: true` wire shape: iterate SSE chunks as they arrive.
+
+        Projection per chunk (defensive parity with the single-shot path — junk
+        is skipped, never a crash): delta.content → `text_delta`; delta.tool_calls
+        fragments accumulate BY INDEX (id+name arrive on the first fragment, the
+        arguments JSON in pieces) and flush as assembled `toolcall_end`s before
+        `done`; usage is reported from whichever chunk carries it (the final one,
+        when the provider honors include_usage). A mid-stream SDK exception
+        propagates — partial consumer state is local everywhere, so the call
+        fails as cleanly as a pre-yield raise."""
+        # include_usage by default so cost survives streaming; an AUTHOR-supplied
+        # stream_options wins on conflicts (opt-out, or dodging a provider that
+        # rejects the field's contents) — never silently clobbered.
+        so: Dict[str, Any] = {"include_usage": True}
+        if isinstance(kwargs.get("stream_options"), dict):
+            so.update(kwargs["stream_options"])
+        resp = await self._resolve()(**dict(kwargs, stream=True, stream_options=so))
+        pending: Dict[int, Dict[str, Any]] = {}   # index → {id, name, arguments}
+        order: List[int] = []
+        usage: Optional[Dict[str, Any]] = None
+        resolved_model: Optional[str] = None      # provider-RESOLVED name off the chunks,
+        saw_calls = False                         # so cost labels match the single-shot path
+        async for chunk in resp:
+            c = _as_dict(chunk)
+            if not c:
+                continue
+            m = c.get("model")
+            if isinstance(m, str) and m:
+                resolved_model = m
+            u = c.get("usage")
+            if isinstance(u, dict):
+                usage = u
+            choices = c.get("choices")
+            first = choices[0] if isinstance(choices, list) and choices \
+                and isinstance(choices[0], dict) else {}
+            delta = first.get("delta") or {}
+            text = delta.get("content")
+            if isinstance(text, str) and text:
+                yield {"type": "text_delta", "delta": text}
+            for frag in delta.get("tool_calls") or []:
+                if not isinstance(frag, dict):
+                    continue
+                idx = frag.get("index", 0)
+                slot = pending.get(idx)
+                if slot is None:
+                    slot = pending[idx] = {"id": "", "name": "", "arguments": ""}
+                    order.append(idx)
+                if frag.get("id"):
+                    slot["id"] = frag["id"]
+                fn = frag.get("function") or {}
+                if fn.get("name"):
+                    slot["name"] = fn["name"]
+                if isinstance(fn.get("arguments"), str):
+                    slot["arguments"] += fn["arguments"]
+            if first.get("finish_reason"):
+                saw_calls = saw_calls or first["finish_reason"] == "tool_calls"
+        for idx in order:                          # flush assembled calls, in arrival order
+            slot = pending[idx]
+            if not slot["id"] or not slot["name"]:
+                continue                           # malformed fragment set — skip, don't crash
+            try:
+                args = json.loads(slot["arguments"] or "{}")
+            except json.JSONDecodeError:
+                args = {}                          # partial/broken accumulated JSON degrades
+            saw_calls = True
+            yield {"type": "toolcall_end", "id": slot["id"], "name": slot["name"],
+                   "args": args}
+        if usage is not None:
+            _report_usage(on_usage, {"usage": usage, "model": resolved_model}, model)
+        done: Dict[str, Any] = {"type": "done",
+                                "stop_reason": "tool_use" if saw_calls else "end_turn"}
+        if usage is not None:
             done["usage"] = usage
         yield done
 

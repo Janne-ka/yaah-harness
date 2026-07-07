@@ -57,6 +57,39 @@ Two touches worth noticing in `starter.json`:
   root config) and the *same* pipeline runs for real. The model is one swappable
   part, not the structure.
 
+## Bonus: watch it live (monitoring)
+
+`starter-live.local.json` is the same run with the optional `live` trace capture
+turned on — the console then shows what the model is doing *mid-call*, not just
+which stage finished:
+
+```
+$ python3 -m yaah.runtime starter-live.local.json
+[trace] live summarize: turn started
+[trace] live summarize: generating (19 chars)
+[trace] live summarize: turn done (end_turn)
+[trace] stage summarize ok (1ms)
+[trace] stage render ok (1ms)
+```
+
+The whole feature is one config line — `"trace": {"capture": ["phase", "live"], ...}`
+— and fully optional: drop the flag and nothing fires. For a cloud/remote run,
+swap the console sink for `{"type": "file", "path": "trace.jsonl"}` and
+`tail -f` it (or a NATS transport to watch from another machine): a stage that
+shows `turn started` with no `turn done` and a stalled heartbeat is hung; a
+growing `generating (N chars)` is alive. Sizes and names only — model text never
+enters the trace.
+
+**Heartbeat honesty (check your backend):** the pulse can only prove liveness
+while the backend streams incrementally. The offline demo's scripted provider
+returns its text in one piece, so you see a single `generating` line. `litellm`
+defaults to the same single-shot shape — add `"stream": true` to its provider
+block for real SSE chunking (an actual growing heartbeat). `claude_cli` streams
+text for real and reports its internal tool activity as `tool X` / `tool X
+returned` pulses that bracket each tool run — the gap between the two is the
+tool executing, not a hang. The full per-backend list lives in
+`src/yaah/agents/live_events.py` (KNOWN LIMITS).
+
 ## Next
 
 - **Why is the pipeline a JSON file and not just Python?** →

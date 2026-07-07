@@ -82,6 +82,42 @@ async def scenario_envelope_carriage_truncation_marker_survives() -> None:
     assert "trace_truncated" in names, names
 
 
+async def scenario_eviction_drops_pulses_before_audit_records() -> None:
+    """mode:envelope + capture:[live]: llm_progress pulses are trash-after-read;
+    model_call/stage records are the cost/audit data the carriage exists for. On
+    overflow the tracer must evict a PULSE first — blind FIFO would let a long
+    streaming call (or an escalating agent's second rung) push an earlier rung's
+    model_call out of the buffer and silently lose its cost from the report."""
+    from yaah.trace import Span
+    from yaah.trace.contributors import LiveContributor
+    tr = EnvelopeTracer(contributors=[PhaseContributor(), LiveContributor()],
+                        buffer_max=3)
+    # oldest first: the audit record, then a flood of pulses over the cap
+    await tr.emit(Span.timed("model_call", corr="c", t0=0.0, t1=1.0,
+                             attrs={"stage": "s1"}))
+    for i in range(5):
+        await tr.emit(Span.timed("llm_progress", corr="c", t0=1.0, t1=1.0,
+                                 attrs={"event": "progress", "chars": i}))
+    drained = await tr.drain("c")
+    names = [r["name"] for r in drained]
+    assert "model_call" in names, "audit record was evicted by pulses: {}".format(names)
+    assert "trace_truncated" in names, names          # the drop is still marked
+    # only pulses were dropped; the survivors fit the cap (3) + the marker
+    assert names.count("llm_progress") == 2, names
+
+
+async def scenario_eviction_falls_back_to_fifo_without_pulses() -> None:
+    """No pulses in the buffer → the original oldest-first drop still applies
+    (the truncation-marker scenario above covers the end-to-end shape)."""
+    from yaah.trace import Span
+    tr = EnvelopeTracer(contributors=[PhaseContributor()], buffer_max=1)
+    await tr.emit(Span.timed("stage", corr="c", t0=0.0, t1=1.0, attrs={"stage": "a"}))
+    await tr.emit(Span.timed("stage", corr="c", t0=1.0, t1=2.0, attrs={"stage": "b"}))
+    drained = await tr.drain("c")
+    stages = [r.get("stage") for r in drained if r["name"] == "stage"]
+    assert stages == ["b"], drained   # oldest ("a") dropped
+
+
 async def scenario_boundary_drains_for_non_agent_nodes() -> None:
     """assessment #6: the drain lives at the serve boundary (CarriageBoundaryNode,
     applied by _wrap_node), not inside Agent.invoke — so spans emitted by ANY
@@ -151,9 +187,11 @@ async def main() -> None:
     await scenario_envelope_mode_carries_spans_on_headers_never_payload()
     await scenario_bus_mode_does_NOT_carry_on_headers()
     await scenario_envelope_carriage_truncation_marker_survives()
+    await scenario_eviction_drops_pulses_before_audit_records()
+    await scenario_eviction_falls_back_to_fifo_without_pulses()
     await scenario_boundary_drains_for_non_agent_nodes()
     await scenario_nested_broker_spans_survive()
-    print("test_envelope_carriage: PASS (5 scenarios)")
+    print("test_envelope_carriage: PASS (7 scenarios)")
 
 
 if __name__ == "__main__":

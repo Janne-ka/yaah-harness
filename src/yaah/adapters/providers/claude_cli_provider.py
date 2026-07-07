@@ -169,16 +169,21 @@ class ClaudeCliProvider(ApiProvider):
         to a StreamEvent.
 
         What surfaces as YAAH events:
-          - assistant.content[text]   → text_delta
-          - result                    → done(stop_reason, usage)
-          - process exit != 0         → error
-        What does NOT surface (claude handles its own tool loop internally):
-          - assistant.content[tool_use], user.content[tool_result] are
-            claude-internal. Emitting them as toolcall_end would mislead
-            consumers into thinking they need to dispatch.
+          - assistant.content[text]      → text_delta
+          - assistant.content[tool_use]  → notice(kind=tool_use, tool=name) — a
+            PASSIVE observation, NOT toolcall_end: claude runs its own tool
+            loop internally, so emitting the executable kind would mislead
+            consumers into thinking they must dispatch. The notice is inert to
+            every collector; the live-monitoring bridge turns it into a pulse.
+          - user.content[tool_result]    → notice(kind=tool_result, tool=name)
+            — the closing bracket of the tool window (the id is resolved to
+            the name recorded at tool_use time).
+          - result                       → done(stop_reason, usage)
+          - process exit != 0            → error
+        What does NOT surface:
           - assistant.content[thinking] is internal reasoning, not the
-            user-facing answer.
-        Other claude event types (system init, system api_retry, user,
+            user-facing answer (content capture is a separate concern).
+        Other claude event types (system init, system api_retry,
         rate_limit_event) are ignored — they're transport/diagnostic
         noise, not user-visible content.
 
@@ -239,6 +244,7 @@ class ClaudeCliProvider(ApiProvider):
         timeout = opts.get("timeout", self._timeout)
         usage: Optional[Dict[str, Any]] = None
         stop_reason = "end_turn"
+        tool_names: Dict[str, str] = {}  # tool_use id → name, to label tool_result notices
         while True:
             try:
                 line = await asyncio.wait_for(proc.stdout.readline(),
@@ -270,15 +276,37 @@ class ClaudeCliProvider(ApiProvider):
                         text = block.get("text") or ""
                         if text:
                             yield {"type": "text_delta", "delta": text}
-                    # thinking / tool_use: deliberately NOT surfaced
-                    # (claude-internal — see method docstring)
+                    elif btype == "tool_use":
+                        # claude runs its OWN tool loop, so this must NEVER be a
+                        # `toolcall_end` (the engine would think IT must execute
+                        # it). Surface it as a PASSIVE `notice` instead — inert
+                        # to every collector, mapped to a monitoring pulse by
+                        # the live bridge ("what is claude doing right now").
+                        name = str(block.get("name") or "")
+                        block_id = block.get("id")
+                        if isinstance(block_id, str) and block_id:
+                            tool_names[block_id] = name
+                        yield {"type": "notice", "kind": "tool_use", "tool": name}
+                    # thinking: deliberately NOT surfaced (claude-internal
+                    # reasoning — content capture is a separate concern)
+            elif event_type == "user":
+                # claude's tool RESULTS come back as user-role tool_result
+                # blocks — the closing bracket of the tool-activity window.
+                # The block carries only the tool_use_id; resolve it to the
+                # NAME recorded at tool_use time so the pulse reads
+                # "tool Read returned", not an opaque id.
+                for block in (obj.get("message") or {}).get("content") or []:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        ref = block.get("tool_use_id")
+                        yield {"type": "notice", "kind": "tool_result",
+                               "tool": tool_names.get(ref, "") if isinstance(ref, str) else ""}
             elif event_type == "result":
                 stop_reason = obj.get("stop_reason") or stop_reason
                 result_model = obj.get("model") or result_model
                 u = obj.get("usage")
                 if isinstance(u, dict):
                     usage = u
-            # system / user / rate_limit_event: ignored (diagnostic noise)
+            # system / rate_limit_event: ignored (diagnostic noise)
 
         # CRIT-004 (opus bugs review): drain stderr BEFORE wait(). If the
         # process filled its stderr pipe buffer (>64KB) it can't exit while

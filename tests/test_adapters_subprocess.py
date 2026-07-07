@@ -13,6 +13,7 @@ import asyncio
 
 from yaah.adapters.providers import ClaudeCliProvider
 from yaah.adapters.data import GitDiffSource
+from yaah.agents import api_provider as _ap
 
 
 class FakeProc:
@@ -93,6 +94,46 @@ async def claude_stream_cost_bridge_feeds_on_usage() -> None:
                                     on_usage=usage.update))
     assert usage == {"tokens_in": 125, "tokens_out": 30, "model": "claude-sonnet"}, usage
     assert [e["type"] for e in events] == ["start", "text_delta", "done"]
+
+
+async def claude_stream_surfaces_tool_activity_as_passive_notice() -> None:
+    # Live-monitoring seam: claude runs its OWN tool loop, so its tool_use blocks
+    # must NEVER become `toolcall_end` (the engine would think IT must execute
+    # them) — but they ARE the "what is it doing during the silent window" signal.
+    # They surface as a PASSIVE `notice` event: every stream consumer verifiably
+    # ignores unknown types; only the live bridge gives it meaning.
+    lines = [
+        b'{"type":"assistant","message":{"content":['
+        b'{"type":"tool_use","id":"t1","name":"Read","input":{"f":"x"}}]}}\n',
+        b'{"type":"user","message":{"content":['
+        b'{"type":"tool_result","tool_use_id":"t1","content":"data"}]}}\n',
+        b'{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}\n',
+        b'{"type":"result","subtype":"success","stop_reason":"end_turn"}\n',
+    ]
+    proc = FakeStreamProc(stdout_lines=lines)
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
+    events = await _drain(be.stream({"messages": [{"role": "user", "content": "hi"}]}))
+    types = [e["type"] for e in events]
+    assert "toolcall_end" not in types, events          # NEVER the executable kind
+    notices = [e for e in events if e["type"] == "notice"]
+    assert [n.get("kind") for n in notices] == ["tool_use", "tool_result"], notices
+    assert notices[0]["tool"] == "Read", notices
+    assert types[-1] == "done" and "text_delta" in types, events
+
+
+async def claude_notice_is_inert_to_collected_consumers() -> None:
+    # assemble_message (the complete()/turn() collector) must return IDENTICAL
+    # content whether or not notices are in the stream — passive means passive.
+    lines = [
+        b'{"type":"assistant","message":{"content":['
+        b'{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}\n',
+        b'{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}\n',
+        b'{"type":"result","subtype":"success","stop_reason":"end_turn"}\n',
+    ]
+    proc = FakeStreamProc(stdout_lines=lines)
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
+    out = await _ap.complete(be, "hi")
+    assert out == "hello", out
 
 
 # ---- GitDiffSource ----------------------------------------------------------
@@ -316,7 +357,9 @@ async def claude_stream_tool_use_session_skips_internal_tool_calls() -> None:
     # Claude runs its own tool loop internally — assistant.tool_use blocks
     # and user.tool_result events are CLAUDE's, not YAAH's. They MUST NOT
     # surface as YAAH toolcall_end events (would mislead consumers into
-    # thinking they need to dispatch). Only the final text answer surfaces.
+    # thinking they need to dispatch). Since the live-monitoring seam they DO
+    # surface as PASSIVE `notice` events (inert to every collector) — the
+    # invariant this test protects is the absence of the EXECUTABLE kind.
     lines = [
         b'{"type":"system","subtype":"init"}\n',
         b'{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"Read","input":{"file":"/x"}}]}}\n',
@@ -328,10 +371,13 @@ async def claude_stream_tool_use_session_skips_internal_tool_calls() -> None:
     be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
     events = await _drain(be.stream({"messages": [{"role": "user", "content": "read /x"}]}))
     types = [e["type"] for e in events]
-    # exactly one text_delta (the final answer), no toolcall_end
-    assert types == ["start", "text_delta", "done"], types
-    assert events[1]["delta"] == "The file contains foo"
+    # the tool activity surfaces as passive notices; the answer as one text_delta
+    assert types == ["start", "notice", "notice", "text_delta", "done"], types
     assert "toolcall_end" not in types
+    text = next(e for e in events if e["type"] == "text_delta")
+    assert text["delta"] == "The file contains foo"
+    # the tool_result notice resolves the id back to the tool NAME
+    assert [(-1 if e["type"] != "notice" else e["tool"]) for e in events][1:3] == ["Read", "Read"]
 
 
 async def claude_stream_thinking_blocks_skipped() -> None:
@@ -541,12 +587,13 @@ async def claude_stream_parses_captured_fixture_end_to_end() -> None:
     events = await _drain(be.stream({"messages": [{"role": "user", "content": "read it"}]}))
     types = [e["type"] for e in events]
     # The session has thinking (skipped) + an internal tool_use/tool_result
-    # (claude-internal, NOT surfaced) + one final assistant text + result.
-    assert types == ["start", "text_delta", "done"], types
+    # (surfaced as PASSIVE notices — never toolcall_end) + one text + result.
+    assert types == ["start", "notice", "notice", "text_delta", "done"], types
     assert "toolcall_end" not in types, "claude-internal tool calls must not surface"
-    assert events[1]["delta"] == "The file contains: example file contents"
-    assert events[2]["stop_reason"] == "end_turn"
-    assert events[2]["usage"]["input_tokens"] == 22
+    text = next(e for e in events if e["type"] == "text_delta")
+    assert text["delta"] == "The file contains: example file contents"
+    assert events[-1]["stop_reason"] == "end_turn"
+    assert events[-1]["usage"]["input_tokens"] == 22
 
 
 async def claude_stream_handles_none_stdout_without_crashing() -> None:
@@ -571,6 +618,8 @@ async def main() -> None:
         claude_rejects_isolation_defeating_flags,
         claude_build_args_covers_mcp_perm_and_tools,
         claude_stream_cost_bridge_feeds_on_usage,
+        claude_stream_surfaces_tool_activity_as_passive_notice,
+        claude_notice_is_inert_to_collected_consumers,
         # B3 — stream-json parsing
         claude_stream_simple_text_yields_text_delta_and_done,
         claude_stream_uses_output_format_stream_json_argv,

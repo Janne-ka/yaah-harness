@@ -93,7 +93,7 @@ TLS cert paths resolve relative to the root file.
 ```json
 "providers": {
   "claude": {"type": "claude_cli"},                     // claude -p (+ extra_args, allow_dangerous_flags)
-  "router": {"type": "litellm"},                        // any litellm-routed model
+  "router": {"type": "litellm", "stream": true},        // any litellm-routed model
   "fake":   {"type": "fake", "default": "ok"}           // offline/test: canned responses
 },
 "default_provider": "claude"
@@ -101,6 +101,10 @@ TLS cert paths resolve relative to the root file.
 A node's `model: "claude:claude-sonnet-4-6"` is `provider:model`. `fake` and
 `fake_scripted` (fixtures `by_model`) make a root runnable offline — the `--fake`
 flag merges an inline `_fake` block over the top so one file covers both.
+litellm's `"stream": true` (optional, default off) switches it to real SSE
+chunking — incremental deltas feed the `live` monitoring heartbeat; the default
+stays a single collected call (usage always attached) until chunking has live
+mileage.
 
 ## Prompt / data / mcp sources
 
@@ -133,9 +137,12 @@ store is what lets `--list`/`--resume` work cross-process and survive a crash.
                     {"type": "file", "path": "trace.jsonl"}]}
 ```
 `capture` is an orthogonal SET, not a verbosity level — `phase` (stage/status/
-duration, default-on), `cost` (tokens/model), `tools`. `stats_file` takes a
-`price_map` (tokens→$). Cross-field checks reject silently-dropped config (e.g.
-`sinks` under `mode: none`). `--explain` shows the effective trace block.
+duration, default-on), `cost` (tokens/model), `tools`, `live` (mid-call
+monitoring pulses: turn started / a throttled chars-so-far heartbeat / each tool
+call / done — answers "alive or hung?" while a model call runs; sizes and names
+only, never model text). `stats_file` takes a `price_map` (tokens→$).
+Cross-field checks reject silently-dropped config (e.g. `sinks` under
+`mode: none`). `--explain` shows the effective trace block.
 
 ## Plugins (extension types)
 

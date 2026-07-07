@@ -1,6 +1,6 @@
 """yaah.trace.contributors — the bundled capture modules (pure projection, no
 external system). Each implements the TraceContributor port. `phase` is the
-default-on minimum; `cost` and `tools` are opt-in. Compose freely via
+default-on minimum; `cost`, `tools` and `live` are opt-in. Compose freely via
 `capture: [...]`. A capture that binds to an outside system would instead be an
 adapter in yaah.adapters.trace.
 """
@@ -8,6 +8,7 @@ from typing import Callable, Dict
 
 from ..contributor import TraceContributor
 from .cost import CostContributor
+from .live import LiveContributor
 from .phase import PhaseContributor
 from .tools import ToolsContributor
 
@@ -18,7 +19,8 @@ BUILTIN_CONTRIBUTORS: Dict[str, Callable[[], TraceContributor]] = {
     "phase": PhaseContributor,
     "cost": CostContributor,
     "tools": ToolsContributor,
+    "live": LiveContributor,
 }
 
 __all__ = ["PhaseContributor", "CostContributor", "ToolsContributor",
-           "BUILTIN_CONTRIBUTORS"]
+           "LiveContributor", "BUILTIN_CONTRIBUTORS"]

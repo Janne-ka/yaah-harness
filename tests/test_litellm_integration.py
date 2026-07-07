@@ -52,6 +52,24 @@ async def _run() -> None:
     )
     assert turn == {"text": "final"}, "turn() lost text through the real ModelResponse: {!r}".format(turn)
 
+    # `stream: true` against the REAL SDK's chunk objects (ModelResponseStream —
+    # pydantic, delta-shaped). This is the shape gap the dict-stub tests can't
+    # close: if model_dump() on a real chunk didn't nest {"choices":[{"delta":…}]}
+    # the feature would silently yield nothing live (eval finding #3). mock_response
+    # + stream=True drives litellm's genuine chunking machinery, no network.
+    be_stream = LiteLLMProvider(stream=True)
+    events = []
+    async for ev in be_stream.stream(
+            {"messages": [{"role": "user", "content": "ping"}],
+             "model": "gpt-4o-mini"},
+            mock_response="pong"):
+        events.append(ev)
+    types = [e["type"] for e in events]
+    assert types[0] == "start" and types[-1] == "done", types
+    text = "".join(e.get("delta", "") for e in events if e["type"] == "text_delta")
+    assert text == "pong", "real chunk objects lost content through _as_dict: {!r} ({})".format(
+        text, types)
+
 
 if __name__ == "__main__":
     main()
