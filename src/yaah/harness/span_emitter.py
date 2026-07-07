@@ -44,19 +44,44 @@ class SpanEmitter:
 
     async def resumed(self, stage_name: str, input: Envelope, *,
                       awaiting: Optional[str],
-                      decision_keys: Iterable[str]) -> None:
+                      decision_keys: Iterable[str],
+                      approver: Optional[str] = None,
+                      decision_diff: Optional[Dict[str, Any]] = None) -> None:
         """Emit a point-in-time `stage` span recording an EXTERNAL (human) RESUME
         decision. Without it the human-override event had NO trace record at all:
         resume() routes PAST the gate without re-executing it, so the run's trace
         ended at status:suspended and the baton — the only other witness — is
         deleted on completion (the "override is logged" audit gap). Status is
         plain "ok" (no new taxonomy in aggregate; a resume is not an error and
-        must not count as one). Attrs carry the decision's payload KEYS only,
-        sorted — payload VALUES may be sensitive (a human's free-text ruling)
-        and must never reach the trace."""
+        must not count as one).
+
+        Two audit policies, deliberately different (they answer different
+        questions of AI-Act Art. 14(4)(d)):
+        - Decision CONTENT stays out. `decision_keys` (and `decision_diff` below)
+          carry payload KEYS only, sorted — payload VALUES may be sensitive (a
+          human's free-text ruling) and must never reach the trace.
+        - Decision AUTHOR is recorded. The OPTIONAL `approver` is the human's
+          identity ("who overrode") — it IS the audit signal, so it is kept even
+          though it is likely PII. It rides the resume envelope's `approver`
+          HEADER — metadata, distinct from the domain-data payload and from the
+          standard `sender` header: `sender` names the COMPONENT that produced
+          the envelope (a node role, a driver), `approver` names the HUMAN who
+          authorized the override — even when one operator is both, the audit
+          needs the roles kept apart. The header never pollutes the merged
+          decision that flows downstream (_merge_decision drops it on both the
+          artifact-merge and the no-artifact paths).
+          Absent header ⇒ no attr (records stay as they were).
+
+        `decision_diff` is the emitted-vs-edited key-level audit (the self-repair
+        corpus signal): {emitted, added, changed} key lists (bounded, values-free)
+        computed by the caller at the decision merge."""
         attrs: dict = {"resumed": True, "decision_keys": sorted(decision_keys)}
         if awaiting is not None:  # always set on a suspended baton; guard anyway
             attrs["awaiting"] = awaiting
+        if approver is not None:
+            attrs["approver"] = approver
+        if decision_diff is not None:
+            attrs["decision_diff"] = decision_diff
         await self.note(stage_name, input, status="ok", attrs=attrs)
 
     async def stage(self, stage_name: str, input: Envelope, t0: float,

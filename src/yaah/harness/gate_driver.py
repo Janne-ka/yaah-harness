@@ -60,7 +60,13 @@ async def drive(harness: Any, task: Envelope, decide: Decider, *,
 def _stdin_decision(suspended: Suspended) -> Envelope:
     """Prompt the operator at a gate and read one line of JSON (or bare text) as
     the decision. Used by build_decider's interactive fallback — the simplest
-    human gate; a UI node + mailbox is the richer, distributed version (TODO)."""
+    human gate; a UI node + mailbox is the richer, distributed version (TODO).
+
+    The resume carries `approver: "terminal:<os-user>"` — a terminal answer IS a
+    human, so best-effort identity beats none; the `terminal:` prefix honestly
+    discloses OS-level attribution (who was logged in), not authenticated
+    identity. Header, never payload (see Harness.resume: a payload key would
+    become a decision key and flow downstream)."""
     print("\n[GATE] awaiting: {}".format(suspended.awaiting), flush=True)
     if getattr(suspended, "ask", ""):
         print("  question: {}".format(suspended.ask), flush=True)
@@ -71,7 +77,12 @@ def _stdin_decision(suspended: Suspended) -> Envelope:
         payload = json.loads(line) if line.strip() else {}
     except json.JSONDecodeError:
         payload = {"text": line.strip()}
-    return Envelope(Kind.RESUME, payload)
+    try:
+        import getpass
+        user = getpass.getuser() or "unknown"
+    except Exception:  # no resolvable user (daemonized, stripped env) — still honest
+        user = "unknown"
+    return Envelope(Kind.RESUME, payload, {"approver": "terminal:{}".format(user)})
 
 
 def build_decider(root: Dict[str, Any]) -> Optional[Decider]:
@@ -105,7 +116,12 @@ def build_decider(root: Dict[str, Any]) -> Optional[Decider]:
                 candidates = (awaiting, awaiting.split(":", 1)[-1], awaiting.split(":", 1)[0])
             for key in candidates:
                 if key in decisions:
-                    return Envelope(Kind.RESUME, dict(decisions[key]))
+                    # `approver: "config:decisions"` — an auto-answer is config,
+                    # not a person; the RESERVED namespaced value lets the audit
+                    # trail distinguish "automated by declared config" from
+                    # "resumed by an unknown path" (absent approver).
+                    return Envelope(Kind.RESUME, dict(decisions[key]),
+                                    {"approver": "config:decisions"})
         if interactive:
             return _stdin_decision(suspended)
         # No decision for this gate: leave the run PARKED (drive returns the

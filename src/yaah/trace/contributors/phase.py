@@ -26,13 +26,15 @@ class PhaseContributor(TraceContributor):
         # artifact is), plus the model-ladder escalation labels (M7 — which model
         # a rung escalated FROM and why; without them a laddered run's second
         # model_call is only inferable, never labeled), plus the human-resume
-        # record (resumed/decision_keys — the "override is logged" audit line;
-        # decision_keys are payload KEYS only, values never enter the span). These
-        # must reach the projected record, not just sit in span.attrs — else the
-        # lines are dead in real runs (the sink only sees the record, never the
+        # audit record: `resumed`/`decision_keys` (the "override is logged" line),
+        # `approver` (WHO overrode — identity only), and `decision_diff` (the
+        # emitted-vs-edited key-level audit / self-repair corpus signal). All of
+        # these carry payload KEYS only (or an identity), never decision VALUES.
+        # These must reach the projected record, not just sit in span.attrs — else
+        # the lines are dead in real runs (the sink only sees the record, never the
         # raw span).
         for k in ("stage", "awaiting", "artifact", "ladder_from", "ladder_trigger",
-                  "resumed", "decision_keys"):
+                  "resumed", "decision_keys", "approver", "decision_diff"):
             if k in span.attrs:
                 out[k] = span.attrs[k]
         return out

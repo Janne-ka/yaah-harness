@@ -205,9 +205,13 @@ _PROVIDER_TYPES = {
     "fake": (lambda spec, base: FakeProvider(responses=spec.get("responses"),
                                             default=spec.get("default", "")),
              frozenset({"responses", "default"})),
+    # on_exhaustion="raise" makes an exhausted/mismatched script FAIL LOUD instead
+    # of yielding "" — the replay loader's anti-silent-green guard (yaah.replay).
     "fake_scripted": (lambda spec, base: ScriptedProvider(_scripted_by_model(spec, base),
-                                                         default=spec.get("default", "")),
-                      frozenset({"fixtures", "by_model", "default"})),
+                                                         default=spec.get("default", ""),
+                                                         on_exhaustion=spec.get(
+                                                             "on_exhaustion", "default")),
+                      frozenset({"fixtures", "by_model", "default", "on_exhaustion"})),
     # Scripted tool-loop backend — drives an `agent_loop` node from a list of
     # canned turn responses ({"text": "..."} or {"calls": [{name,args,id}, ...]}).
     # For tests + spike examples; proves the ApiProvider seam is replaceable.

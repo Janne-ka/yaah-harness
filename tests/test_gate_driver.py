@@ -162,6 +162,45 @@ async def scenario_fault_park_exact_key_only() -> None:
     assert not await h2.batons.list_suspended(), "baton evicted after the exact-key resume finishes"
 
 
+async def scenario_auto_decision_carries_namespaced_approver() -> None:
+    """Audit clarity (approver wiring): a config-`decisions` auto-answer is not a
+    person — its resume envelope carries the RESERVED, namespaced approver
+    'config:decisions' so the trace distinguishes 'automated by declared config'
+    from 'resumed by an unknown path'. Header, never payload (the lane-A trap:
+    a payload key would become a decision key and flow downstream)."""
+    decide = build_decider({"decisions": {"merge": {"ok": True}}})
+    env = await decide(_FakeSuspended("merge"))
+    assert env is not None
+    assert env.headers.get("approver") == "config:decisions", env.headers
+    assert "approver" not in env.payload, "approver must be a header, not a decision key"
+
+
+async def scenario_stdin_decision_carries_terminal_approver(monkey_stdin=None) -> None:
+    """The interactive stdin fallback IS a human — record best-effort identity as
+    'terminal:<os-user>': the prefix honestly discloses OS-level attribution
+    (who was logged in), not authenticated identity."""
+    import io
+    import sys as _sys
+    from yaah.harness.gate_driver import _stdin_decision
+    old = _sys.stdin
+    _sys.stdin = io.StringIO('{"ok": true}\n')
+    try:
+        env = _stdin_decision(_FakeSuspended("merge"))
+    finally:
+        _sys.stdin = old
+    approver = env.headers.get("approver", "")
+    assert approver.startswith("terminal:") and len(approver) > len("terminal:"), env.headers
+    assert env.payload == {"ok": True}, env.payload
+
+
+class _FakeSuspended:
+    """Just enough Suspended surface for the decider paths (awaiting + ask/concerns)."""
+    def __init__(self, awaiting: str) -> None:
+        self.awaiting = awaiting
+        self.ask = ""
+        self.concerns = []
+
+
 async def scenario_driven_walkaway_is_graceful() -> None:
     """A decisions-driven run that reaches a gate it has no answer for must end
     as a parked baton, NOT a traceback: drive() returns the Suspended outcome
@@ -204,6 +243,8 @@ async def main() -> None:
     await scenario_single_gate_to_done()
     await scenario_multi_gate_async_decider()
     await scenario_concerns_reach_decider()
+    await scenario_auto_decision_carries_namespaced_approver()
+    await scenario_stdin_decision_carries_terminal_approver()
     await scenario_fault_park_exact_key_only()
     await scenario_driven_walkaway_is_graceful()
     await scenario_max_gates_guard()

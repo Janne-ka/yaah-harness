@@ -56,6 +56,8 @@ _EXPERIMENT_KEYS = frozenset({
     "id", "variants", "inputs", "repetitions", "price_map", "store", "note",
     "metrics",   # {name: dotted payload path} — read by the report AND by the
                  # pre-flight plausibility check (contracts.py); validated in _check
+    "scrub",     # [dotted key path] — volatile keys removed from both sides by
+                 # the golden diff (golden.py); validated in _check
 })
 
 
@@ -124,6 +126,8 @@ def _check_experiment(cfg: Dict[str, Any]) -> None:
         errs.append("`metrics` must map metric name -> dotted payload path with "
                     "non-empty segments (e.g. {\"score\": \"review.score\"}; "
                     "\".score\" or \"a..b\" is a typo)")
+    from .golden import _validate_scrub
+    errs.extend(_validate_scrub(cfg.get("scrub")))
     if errs:
         raise ValueError("invalid experiment config:\n  - " + "\n  - ".join(errs))
 

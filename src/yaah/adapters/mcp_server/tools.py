@@ -107,7 +107,8 @@ async def _tool_resume(args: Dict[str, Any]) -> Dict[str, Any]:
     root, base = _load_root(args["root_path"])
     validate_root(root)
     out = await resume_gate(root, base, args["baton_id"],
-                            dict(args.get("decision") or {}))
+                            dict(args.get("decision") or {}),
+                            approver=args.get("approver"))
     return _outcome_json(out)
 
 
@@ -176,7 +177,12 @@ TOOLS: List[Dict[str, Any]] = [
                                     "baton_id": _BATON_ID_PROP,
                                     "decision": {"type": "object",
                                                  "description": "The decision payload; "
-                                                                "shape per baton_schema."}},
+                                                                "shape per baton_schema."},
+                                    "approver": {"type": "string",
+                                                 "description": "Optional: WHO approved — "
+                                                                "recorded on the resume audit "
+                                                                "span (identity only, never "
+                                                                "decision values)."}},
                      "required": ["root_path", "baton_id", "decision"]},
      "handler": _tool_resume},
     {"name": "run",

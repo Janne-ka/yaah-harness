@@ -43,6 +43,19 @@ _UNSET = object()  # "ttl argument not provided" — distinct from ttl=None (nev
 # above any real linear pipeline; overridable per-harness for tests.
 _MAX_STAGE_STEPS = 10000
 
+# The reserved resume-envelope HEADER that names WHO approved an override (the
+# AI-Act Art. 14(4)(d) audit signal). A header, not a payload key: identity is
+# metadata, and a payload key would both risk colliding with a domain decision
+# key and leak into the merged decision that flows downstream.
+_APPROVER_HEADER = "approver"
+
+# Upper bounds on a resume record's decision_diff, so a pathological decision
+# can't bloat the trace (keys only ever, never values): at most _MAX_DIFF_KEYS
+# keys per list, each key name clipped to _MAX_DIFF_KEY_CHARS. Both are far
+# above any real human approval form.
+_MAX_DIFF_KEYS = 40
+_MAX_DIFF_KEY_CHARS = 120
+
 
 def _route_key(value: object) -> str:
     """Normalize a branch value to its route-key string. Route keys come from
@@ -259,7 +272,8 @@ class Harness:
                 "bug — report with the corresponding trace".format(baton_id))
         baton.status = "running"
         stage = self.graph.stages[baton.stage]
-        resume_input = self._merge_decision(baton.pending, response)
+        pending = baton.pending  # the gate's EMITTED artifact, captured before the merge clears it
+        resume_input = self._merge_decision(pending, response)
         baton.pending = None
         # LOG THE OVERRIDE: without this record the human decision left no trace
         # at all — resume routes PAST the gate (no stage re-execution, so no
@@ -267,22 +281,79 @@ class Harness:
         # ended at status:suspended. Emitted BEFORE the run continues, so the
         # decision is on record even if the continuation fails. Keys only, never
         # values (the RESPONSE payload may be sensitive); corr rides the merged
-        # input, which keeps the parked run's correlation_id.
+        # input, which keeps the parked run's correlation_id. `approver` (WHO
+        # overrode) rides the resume envelope's header — identity is recorded,
+        # content is not. `decision_diff` is the emitted-vs-edited audit.
         await self._spans.resumed(stage.name, resume_input,
                                   awaiting=baton.awaiting,
-                                  decision_keys=response.payload.keys())
+                                  decision_keys=response.payload.keys(),
+                                  approver=response.headers.get(_APPROVER_HEADER),
+                                  decision_diff=self._decision_diff(pending, response))
         baton.stage = self._next_stage(stage, resume_input)
         return await self._settle(baton, resume_input)
 
     @staticmethod
     def _merge_decision(pending: Optional[Envelope], response: Envelope) -> Envelope:
         """Fold the human decision onto the failed stage's artifact (decision keys
-        win). No prior artifact (a plain gate) → just the response."""
+        win). No prior artifact (a fanout/foreach member's AWAIT parks without one)
+        → the response alone, MINUS the reserved approver header: the identity is
+        recorded on the resume span and must stop there — passing the response
+        through verbatim carried it into the merged input and downstream (eval
+        finding; the pending path never leaked, its headers come from pending)."""
         if pending is None:
-            return response
+            headers = {k: v for k, v in response.headers.items()
+                       if k != _APPROVER_HEADER}
+            return Envelope(kind=response.kind, payload=dict(response.payload),
+                            headers=headers)
         payload = dict(pending.payload)
         payload.update(response.payload)
         return Envelope(kind=response.kind, payload=payload, headers=dict(pending.headers))
+
+    @staticmethod
+    def _decision_diff(pending: Optional[Envelope], response: Envelope) -> Dict[str, Any]:
+        """Key-level audit of what the human EDITED at the gate — the emitted-vs-
+        edited signal a future self-repair corpus reads off the trace record.
+        Compares the gate's EMITTED artifact (`pending`) against the human's
+        decision (`response`):
+          - emitted: keys the gate produced (the pending artifact; [] for a gate
+            with no prior artifact),
+          - added:   keys the human introduced (in response, not emitted),
+          - changed: keys the human overrode (in both, VALUE differs).
+        No `removed`: the merge is additive (merged = emitted ∪ response), so an
+        emitted key is never dropped from the flow — a `removed` list would be
+        provably always empty, i.e. padding.
+
+        KEYS ONLY — values are compared in-memory to detect `changed` but never
+        stored (same keys-only contract as decision_keys; a value may be a
+        sensitive free-text ruling). Bounded on BOTH axes (eval finding — a count
+        cap alone lets one megabyte-long key NAME bloat the record): each list is
+        capped at _MAX_DIFF_KEYS entries AND each stored key name is clipped to
+        _MAX_DIFF_KEY_CHARS; either cut sets the `truncated` flag."""
+        emitted = pending.payload if pending is not None else {}
+        resp = response.payload
+        added = sorted(k for k in resp if k not in emitted)
+        changed = sorted(k for k in resp if k in emitted and emitted[k] != resp[k])
+        emitted_keys = sorted(emitted.keys())
+        truncated = max(len(emitted_keys), len(added), len(changed)) > _MAX_DIFF_KEYS
+
+        def clip(keys: List[str]) -> List[str]:
+            nonlocal truncated
+            out = []
+            for k in keys[:_MAX_DIFF_KEYS]:
+                if len(k) > _MAX_DIFF_KEY_CHARS:
+                    truncated = True
+                    k = k[:_MAX_DIFF_KEY_CHARS] + "…"
+                out.append(k)
+            return out
+
+        diff: Dict[str, Any] = {
+            "emitted": clip(emitted_keys),
+            "added": clip(added),
+            "changed": clip(changed),
+        }
+        if truncated:
+            diff["truncated"] = True
+        return diff
 
     # -- internals --
 

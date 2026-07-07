@@ -70,6 +70,18 @@ class Upper:
         return input.reply("result", text=str(input.payload.get("text", "")).upper())
 
 
+class ConfigurableGate:
+    """A plain gate whose awaiting/ask are set per-instance — lets one graph carry
+    two distinct gates so a two-resume run can be checked for distinct records."""
+
+    def __init__(self, awaiting: str, ask: str = "approve?") -> None:
+        self._awaiting = awaiting
+        self._ask = ask
+
+    async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
+        return input.reply("await", awaiting=self._awaiting, ask=self._ask)
+
+
 # --- helpers ------------------------------------------------------------------
 
 def _resume_records(tr: RecordingTracer) -> list:
@@ -207,11 +219,232 @@ async def scenario_aggregate_and_pretty_stay_sane() -> None:
     assert "error" not in out.splitlines()[0], out  # header reports no error for it
 
 
+# --- approver identity (AI-Act Art. 14(4)(d): WHO overrode) -------------------
+
+async def scenario_approver_identity_recorded() -> None:
+    """An OPTIONAL approver identity, supplied as the reserved `approver` HEADER on
+    the resume envelope, lands on the projected record as `approver` — identity
+    only. It must NOT leak into the payload / decision_keys / downstream, and the
+    decision VALUE (SECRET) still must not appear."""
+    comms = InProcessComms()
+    comms.register("role:gate", GateNode())
+    graph = Graph.of(Stage("approve", node="role:gate"))
+    tr = RecordingTracer([PhaseContributor()])
+    harness = _park(tr, comms, graph)
+
+    outcome = await harness.run(Envelope("task", {}))
+    assert isinstance(outcome, Suspended), outcome
+    decision = Envelope("result", {"approved": True, "secret_token": SECRET},
+                        headers={"approver": "alice@example.com"})
+    final = await harness.resume(outcome.baton_id, decision)
+    assert isinstance(final, Done), final
+
+    [rec] = _resume_records(tr)
+    assert rec["approver"] == "alice@example.com", rec
+    # identity is metadata, not a decision key — it must not masquerade as one
+    assert "approver" not in rec["decision_keys"], rec
+    dumped = json.dumps(tr.records)
+    assert "alice@example.com" in dumped, "the identity IS the audit signal"
+    assert SECRET not in dumped, "decision VALUE must still never be traced"
+
+
+async def scenario_approver_absent_omitted() -> None:
+    """Backward compatibility: a resume WITHOUT an approver header produces a
+    record with NO `approver` attr at all (today's records are unchanged)."""
+    comms = InProcessComms()
+    comms.register("role:gate", GateNode())
+    graph = Graph.of(Stage("approve", node="role:gate"))
+    tr = RecordingTracer([PhaseContributor()])
+    harness = _park(tr, comms, graph)
+
+    outcome = await harness.run(Envelope("task", {}))
+    final = await harness.resume(outcome.baton_id, Envelope("result", {"approved": True}))
+    assert isinstance(final, Done), final
+    [rec] = _resume_records(tr)
+    assert "approver" not in rec, "no approver header ⇒ no approver attr, got: {!r}".format(rec)
+
+
+# --- AB-5 gate-outcome capture (emitted vs edited, keys only) ------------------
+
+async def scenario_gate_diff_escalate() -> None:
+    """The resume record carries a key-level `decision_diff` of the gate's EMITTED
+    artifact vs the human's edit: emitted keys, keys the human ADDED, keys the
+    human CHANGED (value differs). Keys only — no values. On the escalate path the
+    emitted artifact is the failed stage's last output (text/ok) plus `escalation`."""
+    comms = InProcessComms()
+    comms.register("role:stubborn", Stubborn())
+    comms.register("role:check", OkValidator())
+    graph = Graph.of(
+        Stage("gate", node="role:stubborn", validators=["role:check"],
+              max_attempts=1, escalate="human"))
+    tr = RecordingTracer([PhaseContributor()])
+    harness = _park(tr, comms, graph)
+
+    outcome = await harness.run(Envelope("task", {}))
+    assert isinstance(outcome, Suspended), outcome
+    # Stubborn's failed artifact: text="nope", ok=False; escalate adds `escalation`.
+    # Human overrides text+ok (changed) and adds a new note (added).
+    decision = Envelope("result", {"text": "human-approved", "ok": True,
+                                   "note": "override rationale " + SECRET})
+    final = await harness.resume(outcome.baton_id, decision)
+    assert isinstance(final, Done), final
+
+    [rec] = _resume_records(tr)
+    diff = rec["decision_diff"]
+    assert diff["emitted"] == ["escalation", "ok", "text"], diff  # sorted emitted keys
+    assert diff["added"] == ["note"], diff                        # new key the human introduced
+    assert diff["changed"] == ["ok", "text"], diff                # overridden (value differs)
+    assert "truncated" not in diff, diff                          # small payload, no cap
+    assert SECRET not in json.dumps(tr.records), "diff must store keys, never values"
+
+
+async def scenario_gate_diff_plain() -> None:
+    """A plain gate: emitted = what flowed into the gate + the gate's ask/awaiting;
+    the human's single new key is `added`, nothing `changed`."""
+    comms = InProcessComms()
+    comms.register("role:gate", GateNode())
+    graph = Graph.of(Stage("approve", node="role:gate"))
+    tr = RecordingTracer([PhaseContributor()])
+    harness = _park(tr, comms, graph)
+
+    outcome = await harness.run(Envelope("task", {"text": "hello"}))
+    assert isinstance(outcome, Suspended), outcome
+    final = await harness.resume(outcome.baton_id, Envelope("result", {"approved": True}))
+    assert isinstance(final, Done), final
+
+    [rec] = _resume_records(tr)
+    diff = rec["decision_diff"]
+    assert diff["emitted"] == ["ask", "awaiting", "text"], diff
+    assert diff["added"] == ["approved"], diff
+    assert diff["changed"] == [], diff
+
+
+async def scenario_gate_diff_bounded() -> None:
+    """A pathological decision with many keys must not blow up the trace: each
+    diff list is capped and flagged `truncated`; no VALUE ever enters the record."""
+    comms = InProcessComms()
+    comms.register("role:gate", GateNode())
+    graph = Graph.of(Stage("approve", node="role:gate"))
+    tr = RecordingTracer([PhaseContributor()])
+    harness = _park(tr, comms, graph)
+
+    outcome = await harness.run(Envelope("task", {}))
+    assert isinstance(outcome, Suspended), outcome
+    big = {"k{:03d}".format(i): "{}-{}".format(SECRET, i) for i in range(200)}
+    final = await harness.resume(outcome.baton_id, Envelope("result", big))
+    assert isinstance(final, Done), final
+
+    [rec] = _resume_records(tr)
+    diff = rec["decision_diff"]
+    assert len(diff["added"]) <= 40, "added list must be capped, got {}".format(len(diff["added"]))
+    assert diff["truncated"] is True, diff
+    assert SECRET not in json.dumps(tr.records), "no decision VALUE may enter the record"
+
+
+async def scenario_approver_header_never_flows_downstream() -> None:
+    """Eval finding: a fanout suspend parks with NO artifact (pending=None), and
+    _merge_decision used to return the response Envelope VERBATIM — carrying the
+    reserved `approver` header into the merged input and downstream. The identity
+    must be recorded on the span and then STOP there."""
+    comms = InProcessComms()
+    comms.register("role:gate", GateNode())
+
+    class HeaderProbe:
+        async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
+            return input.reply("result", saw_approver="approver" in input.headers)
+
+    comms.register("role:probe", HeaderProbe())
+    graph = Graph.of(
+        # fanout member AWAIT ⇒ _Suspend with no artifact ⇒ pending=None
+        # (node= is unused on a fanout stage but required by the dataclass)
+        Stage("par", node="role:gate", fanout=["role:gate"], then="after"),
+        Stage("after", node="role:probe"))
+    tr = RecordingTracer([PhaseContributor()])
+    harness = _park(tr, comms, graph)
+
+    outcome = await harness.run(Envelope("task", {}))
+    assert isinstance(outcome, Suspended), outcome
+    final = await harness.resume(
+        outcome.baton_id,
+        Envelope("result", {"approved": True}, headers={"approver": "alice@example.com"}))
+    assert isinstance(final, Done), final
+
+    assert final.output.payload["saw_approver"] is False, \
+        "reserved approver header leaked into the downstream flow"
+    [rec] = _resume_records(tr)
+    assert rec["approver"] == "alice@example.com", rec   # recorded on the span...
+    assert rec["decision_diff"]["emitted"] == [], rec    # ...and the no-artifact diff is sane
+
+
+async def scenario_gate_diff_bounds_key_length() -> None:
+    """Eval finding: the 40-key cap bounds key COUNT, not key SIZE — one megabyte
+    key NAME would bloat the record. Each stored key must be length-clipped and
+    the clip flagged `truncated`."""
+    comms = InProcessComms()
+    comms.register("role:gate", GateNode())
+    graph = Graph.of(Stage("approve", node="role:gate"))
+    tr = RecordingTracer([PhaseContributor()])
+    harness = _park(tr, comms, graph)
+
+    outcome = await harness.run(Envelope("task", {}))
+    assert isinstance(outcome, Suspended), outcome
+    huge_key = "k" * 10_000
+    final = await harness.resume(outcome.baton_id, Envelope("result", {huge_key: True}))
+    assert isinstance(final, Done), final
+
+    [rec] = _resume_records(tr)
+    diff = rec["decision_diff"]
+    assert all(len(k) <= 200 for k in diff["added"]), \
+        "stored key names must be length-bounded, got len={}".format(
+            max(len(k) for k in diff["added"]))
+    assert diff["truncated"] is True, diff
+
+
+async def scenario_two_resumes_distinct_diffs() -> None:
+    """Two sequential gates ⇒ two resumes ⇒ two DISTINCT resume records that
+    ACCUMULATE (no double-recording, no overwrite — the audit wants a durable
+    history): each carries its own stage, decision_diff, and approver (two
+    different humans must both stay on record)."""
+    comms = InProcessComms()
+    comms.register("role:g1", ConfigurableGate("human:one"))
+    comms.register("role:g2", ConfigurableGate("human:two"))
+    graph = Graph.of(
+        Stage("first", node="role:g1", then="second"),
+        Stage("second", node="role:g2"))
+    tr = RecordingTracer([PhaseContributor()])
+    harness = _park(tr, comms, graph)
+
+    out1 = await harness.run(Envelope("task", {}))
+    assert isinstance(out1, Suspended), out1
+    out2 = await harness.resume(
+        out1.baton_id, Envelope("result", {"a": 1}, headers={"approver": "alice"}))
+    assert isinstance(out2, Suspended), out2       # parks again at the second gate
+    final = await harness.resume(
+        out2.baton_id, Envelope("result", {"b": 2}, headers={"approver": "bob"}))
+    assert isinstance(final, Done), final
+
+    recs = _resume_records(tr)
+    assert len(recs) == 2, "one record per resume, got {}".format(len(recs))
+    assert [r["stage"] for r in recs] == ["first", "second"], recs
+    assert recs[0]["decision_diff"]["added"] == ["a"], recs[0]
+    assert recs[1]["decision_diff"]["added"] == ["b"], recs[1]
+    assert [r["approver"] for r in recs] == ["alice", "bob"], \
+        "each resume must keep ITS approver — no overwrite: {!r}".format(recs)
+
+
 async def main() -> None:
     await scenario_resume_emits_projected_record()
     await scenario_decision_values_never_leak()
     await scenario_plain_gate_resume_record()
     await scenario_aggregate_and_pretty_stay_sane()
+    await scenario_approver_identity_recorded()
+    await scenario_approver_absent_omitted()
+    await scenario_gate_diff_escalate()
+    await scenario_gate_diff_plain()
+    await scenario_gate_diff_bounded()
+    await scenario_approver_header_never_flows_downstream()
+    await scenario_gate_diff_bounds_key_length()
+    await scenario_two_resumes_distinct_diffs()
     print("PASS test_resume_trace")
 
 

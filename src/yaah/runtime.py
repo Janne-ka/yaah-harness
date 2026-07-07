@@ -257,17 +257,24 @@ async def list_gates(root: Dict[str, Any], base: str) -> "List[Baton]":
 
 
 async def resume_gate(root: Dict[str, Any], base: str, baton_id: str,
-                      decision: Dict[str, Any]) -> "Outcome":
+                      decision: Dict[str, Any], *,
+                      approver: Optional[str] = None) -> "Outcome":
     """Deliver a human decision to a parked gate and run to the next gate or
     completion — possibly in a different process than the one that suspended it
     (the durable store is the rendezvous). Returns the Outcome (rendering is the
     caller's job, same contract as run_root). `--resume` entrypoint. NOTE for
     callers: the originally-detached engine exited at the park; the CALLING
-    process runs the engine until the next gate or completion."""
+    process runs the engine until the next gate or completion.
+
+    `approver` (optional) names WHO delivered this decision — recorded on the
+    resume audit span (identity only, never decision values). It rides a
+    reserved HEADER: putting it in `decision` would make it a decision key
+    that flows downstream (see Harness.resume)."""
     load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
     async with opened_store(root.get("state"), base) as store:  # release the built backend
         harness = await _assemble_harness(root, base, store=store)
-        return await harness.resume(baton_id, Envelope(Kind.RESUME, decision))
+        headers = {"approver": approver} if approver else {}
+        return await harness.resume(baton_id, Envelope(Kind.RESUME, decision, headers))
 
 
 class ActionError(ValueError):

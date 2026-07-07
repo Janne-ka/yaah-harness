@@ -69,3 +69,8 @@ Until those triggers fire, the cookbook stays read-only-by-design.
   `explain` → `list` → `trace --pretty` → state-store inspection.
   When to ask "is this a yaah bug or a pipeline bug" + symptom → command
   table.
+- [bounded-loop-best-of-n.md](bounded-loop-best-of-n.md) — bounded
+  cross-stage loop + best-of-N reduce: produce → judge → tally (with
+  cycle counter + best-so-far), branch backward, exit at the cap or
+  a score threshold, return the highest-scoring attempt. Reference
+  implementation in `examples/verify-loop/`.

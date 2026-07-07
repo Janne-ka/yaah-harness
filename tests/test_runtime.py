@@ -235,10 +235,17 @@ def scenario_cli_parser() -> None:
     assert _parse_cli(["root.json", "--clear"]) == {"action": "clear", "root": "root.json", "fake": False, "debug": False}
     assert _parse_cli(["root.json", "--resume", "B"]) == {
         "action": "resume", "root": "root.json", "fake": False, "debug": False,
-        "baton_id": "B", "decision_file": None}
+        "baton_id": "B", "approver": None, "decision_file": None}
     assert _parse_cli(["root.json", "--resume", "B", "d.json"]) == {
         "action": "resume", "root": "root.json", "fake": False, "debug": False,
-        "baton_id": "B", "decision_file": "d.json"}
+        "baton_id": "B", "approver": None, "decision_file": "d.json"}
+    # --approver: identity for the resume audit span; position-independent
+    assert _parse_cli(["root.json", "--resume", "B", "d.json", "--approver", "alice"]) == {
+        "action": "resume", "root": "root.json", "fake": False, "debug": False,
+        "baton_id": "B", "approver": "alice", "decision_file": "d.json"}
+    assert _parse_cli(["root.json", "--resume", "--approver", "bob", "B"]) == {
+        "action": "resume", "root": "root.json", "fake": False, "debug": False,
+        "baton_id": "B", "approver": "bob", "decision_file": None}
 
     # --fake / --debug are order-independent and compose with each action
     assert _parse_cli(["root.json", "--fake"]) == {"action": "run", "root": "root.json", "fake": True, "debug": False}
@@ -247,7 +254,7 @@ def scenario_cli_parser() -> None:
     assert _parse_cli(["root.json", "--list", "--fake"]) == {"action": "list", "root": "root.json", "fake": True, "debug": False, "json": False}
     assert _parse_cli(["root.json", "--debug", "--fake", "--resume", "B"]) == {
         "action": "resume", "root": "root.json", "fake": True, "debug": True,
-        "baton_id": "B", "decision_file": None}
+        "baton_id": "B", "approver": None, "decision_file": None}
 
     # unknown flag, missing root, extra args, --resume without id — all exit
     for bad in [[], ["root.json", "--bogus"],

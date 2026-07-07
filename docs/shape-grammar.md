@@ -51,7 +51,9 @@ This file is the compressed essence, not the source of truth.
   },
   "graph": {
     "start": "<stage-name>",
-    "sticky": ["<payload-key>", ...],   // optional: re-fold across stages
+    "sticky": ["<payload-key>", ...],   // fill-if-missing after EVERY stage: a reset
+                                        // node can't wipe these (workdir, run frame);
+                                        // also auto-included in foreach per-item inputs
     "stages": {
       "<stage-name>": {
         "node":         "<node-id>"  | "",  // "" for pure control stages (fork/fanin)
@@ -233,5 +235,6 @@ autocomplete lies.
 - Every key in detail → [`docs/root-config-reference.md`](root-config-reference.md)
 - Every node in detail → [`docs/node-reference.md`](node-reference.md)
 - Copy-paste recipes → [`docs/cookbook/`](cookbook/)
+  - Bounded cross-stage loop + best-of-N → [`docs/cookbook/bounded-loop-best-of-n.md`](cookbook/bounded-loop-best-of-n.md)
 - Generated catalog (always current) → [`docs/module-catalog.md`](module-catalog.md)
 - IDE-ready JSON Schemas → [`schemas/`](../schemas/)

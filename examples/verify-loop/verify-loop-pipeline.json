@@ -1,0 +1,52 @@
+{
+  "$schema": "../../schemas/pipeline.schema.json",
+  "_doc": "Bounded cross-stage loop with best-of-N tracking. produce → judge → tally → loop or done.",
+  "nodes": {
+    "role:produce": {
+      "type": "agent",
+      "model": "fake:produce",
+      "template": "Write a one-sentence poetic description of a sunset.\n{{loop_feedback}}\nReturn JSON: {\"artifact\": \"your sentence here\"}",
+      "output_schema": {
+        "properties": {"artifact": {"type": "string"}},
+        "required": ["artifact"]
+      }
+    },
+    "role:judge": {
+      "type": "agent",
+      "model": "fake:judge",
+      "template": "Score this sentence on creative quality from 1 to 10.\n\nSentence: {{artifact}}\n\nReturn JSON: {\"score\": <number>, \"notes\": \"<one-line reason>\"}",
+      "carry": ["artifact"],
+      "output_schema": {
+        "properties": {
+          "score": {"type": "integer"},
+          "notes": {"type": "string"}
+        },
+        "required": ["score", "notes"]
+      }
+    },
+    "role:tally": {
+      "type": "transform",
+      "call": "envelope",
+      "target": "fn:transforms:tally",
+      "config": {"max_cycles": 3, "pass_threshold": 8},
+      "provides": ["cycle", "best_score", "best_artifact", "loop_done", "loop_feedback"]
+    },
+    "role:emit_best": {
+      "type": "transform",
+      "call": "envelope",
+      "target": "fn:transforms:emit_best",
+      "provides": ["best_artifact", "best_score", "total_cycles"]
+    }
+  },
+  "graph": {
+    "start": "produce",
+    "sticky": ["cycle", "best_score", "best_artifact", "loop_feedback"],
+    "stages": {
+      "produce":   {"node": "role:produce",   "then": "judge"},
+      "judge":     {"node": "role:judge",     "then": "tally"},
+      "tally":     {"node": "role:tally",
+                    "branch": {"on": "loop_done", "routes": {"yes": "emit_best"}, "default": "produce"}},
+      "emit_best": {"node": "role:emit_best", "then": null}
+    }
+  }
+}

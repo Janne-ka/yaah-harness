@@ -52,6 +52,8 @@ Run & inspect:
                                 add --report [--json] for the comparison matrix
                                 add --rescore SCHEMA to re-score stored raw outputs
                                 against a changed contract (zero model calls)
+                                add --golden FILE to diff collected outputs against
+                                a pinned expected artifact (zero model calls)
   list <root> [--json]          show parked gates (the mailbox view; --json for a parseable shape)
   resume <root> ID [FILE]       deliver a decision (optionally from FILE) to a parked gate
   baton-schema <root> <id>      print the JSON Schema of decision.json for one parked baton
@@ -146,12 +148,23 @@ def _parse_cli(argv: list) -> dict:
             _usage_exit("--lint-overlay takes no extra arguments")
         return {"action": "lint-overlay", "root": root, "fake": fake, "debug": debug}
     if cmd == "--resume":
+        rest = list(rest)
+        approver = None
+        if "--approver" in rest:
+            # WHO is delivering this decision — lands on the resume audit span as
+            # identity metadata (a reserved HEADER, never a decision key; putting
+            # it in the decision file would flow it downstream as payload).
+            i = rest.index("--approver")
+            if i + 1 >= len(rest):
+                _usage_exit("--approver needs a value (who is approving)")
+            approver = rest[i + 1]
+            del rest[i:i + 2]
         if len(rest) < 2:
             _usage_exit("--resume needs a baton id")
         if len(rest) > 3:
             _usage_exit("--resume takes a baton id and an optional decision file")
         return {"action": "resume", "root": root, "fake": fake, "debug": debug,
-                "baton_id": rest[1],
+                "baton_id": rest[1], "approver": approver,
                 "decision_file": rest[2] if len(rest) == 3 else None}
     _usage_exit("unknown argument {!r}".format(cmd))
     return {}  # unreachable; satisfies type checkers
@@ -188,34 +201,46 @@ def _parse_manual(rest: list) -> dict:
 
 
 def _parse_ab(rest: list) -> dict:
-    """`ab <experiment.json> [--report [--json]] [--rescore <schema.json>]` —
-    run an A/B campaign (one durable row per run); --report reduces collected
-    rows + trace into the comparison matrix; --rescore re-scores the stored
-    raw outputs against a (changed) contract — both pure reads, zero model
-    calls, safe mid-campaign."""
+    """`ab <experiment.json> [--report [--json]] [--rescore <schema.json>]
+    [--golden <expected.json>]` — run an A/B campaign (one durable row per run);
+    --report reduces collected rows + trace into the comparison matrix; --rescore
+    re-scores the stored raw outputs against a (changed) contract; --golden diffs
+    the collected outputs against a pinned expected artifact — all three pure
+    reads, zero model calls, safe mid-campaign, and mutually exclusive."""
     rescore: Any = None
+    golden: Any = None
     rest = list(rest)
-    if "--rescore" in rest:
-        i = rest.index("--rescore")
-        if i + 1 >= len(rest) or rest[i + 1].startswith("-"):
-            _usage_exit("--rescore needs a schema file "
-                        "(yaah ab exp.json --rescore new-contract.json)")
-        rescore = rest[i + 1]
-        del rest[i:i + 2]
+    for flag, attr in (("--rescore", "rescore"), ("--golden", "golden")):
+        if flag in rest:
+            i = rest.index(flag)
+            if i + 1 >= len(rest) or rest[i + 1].startswith("-"):
+                _usage_exit("{} needs a file argument "
+                            "(yaah ab exp.json {} FILE)".format(flag, flag))
+            if attr == "rescore":
+                rescore = rest[i + 1]
+            else:
+                golden = rest[i + 1]
+            del rest[i:i + 2]
     args = [a for a in rest if not a.startswith("-")]
     flags = set(rest) - set(args)
     unknown = flags - {"--report", "--json"}
     if unknown:
         _usage_exit("ab: unknown flag(s) {}".format(", ".join(sorted(unknown))))
-    if "--json" in flags and not ("--report" in flags or rescore):
-        _usage_exit("ab: --json applies to --report / --rescore")
-    if "--report" in flags and rescore:
-        _usage_exit("ab: --report and --rescore are separate reads — pick one")
+    reads = [name for name, on in (("--report", "--report" in flags),
+                                   ("--rescore", bool(rescore)),
+                                   ("--golden", bool(golden))) if on]
+    if "--json" in flags and not reads:
+        _usage_exit("ab: --json applies to --report / --rescore / --golden")
+    if len(reads) > 1:
+        _usage_exit("ab: {} are separate reads — pick one".format(
+            " and ".join(reads)))
     if len(args) != 1:
-        _usage_exit("ab needs exactly one experiment config "
-                    "(yaah ab my-experiment.json [--report|--rescore SCHEMA] [--json])")
+        _usage_exit("ab needs exactly one experiment config (yaah ab "
+                    "my-experiment.json [--report|--rescore SCHEMA|--golden FILE] "
+                    "[--json])")
     return {"action": "ab", "experiment": args[0], "rescore": rescore,
-            "report": "--report" in flags, "json": "--json" in flags}
+            "golden": golden, "report": "--report" in flags,
+            "json": "--json" in flags}
 
 
 def _parse_scaffold(rest: list) -> dict:
@@ -513,6 +538,15 @@ def _dispatch_ab(spec: Dict[str, Any]) -> None:
             return
         _render_rescore(result)
         return
+    if spec.get("golden"):
+        from .experiment import golden_diff_rows, load_golden
+        golden = load_golden(spec["golden"])
+        result = asyncio.run(golden_diff_rows(cfg, base, golden))
+        if spec.get("json"):
+            print(json.dumps(result, indent=2))
+            return
+        _render_golden(result)
+        return
     if spec.get("report"):
         from .experiment import build_matrix
         matrix = asyncio.run(build_matrix(cfg, base))
@@ -549,6 +583,29 @@ def _render_rescore(result: Dict[str, Any]) -> None:
             c["conform"]["pass"], c["conform"]["fail"]))
         for e in c["conform"]["top_errors"]:
             print("      mismatch: {}".format(e))
+    for w in result["warnings"]:
+        print("  warning: " + w)
+
+
+def _render_golden(result: Dict[str, Any]) -> None:
+    """The golden diff on a terminal: per (variant, population) cell — how many
+    collected runs MATCH the pinned golden, and for those that drifted the
+    compact added/removed/changed keys (values bounded). A REPORT, not a gate:
+    n_differ==0 is your green, but the read never fails on drift; warnings carry
+    the no-output, multi-input, and never-hit-scrub flags."""
+    print("experiment {!r} vs golden (scrub: {}) — {} cell(s)".format(
+        result["experiment"], ", ".join(result["scrub"]) or "none",
+        len(result["cells"])))
+    for c in result["cells"]:
+        print("  {:<12} fp {}  N={}  {} match / {} differ (no_output={})".format(
+            c["variant"], c["fingerprint"][:12], c["n"],
+            c["n_match"], c["n_differ"], c["n_no_output"]))
+        for dd in c["diffs"]:
+            parts = []
+            for label in ("added", "removed", "changed"):
+                if dd[label]:
+                    parts.append("{} {}".format(label, ", ".join(sorted(dd[label]))))
+            print("    x{}: {}".format(dd["count"], "; ".join(parts)))
     for w in result["warnings"]:
         print("  warning: " + w)
 
@@ -795,7 +852,8 @@ def _dispatch_resume(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> N
     # (was previously silently blocking).
     print("[yaah resume] engine running in this process until next gate or completion",
           file=sys.stderr)
-    _render_outcome(asyncio.run(resume_gate(root, base, spec["baton_id"], decision)))
+    _render_outcome(asyncio.run(resume_gate(root, base, spec["baton_id"], decision,
+                                            approver=spec.get("approver"))))
 
 
 def _dispatch_run(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:

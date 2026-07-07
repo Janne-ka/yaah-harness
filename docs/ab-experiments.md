@@ -135,6 +135,53 @@ old outputs, not the model's quality — recovery is deliberately anchored on
 the CANDIDATE schema's required keys, exactly as the runtime would anchor it
 once that schema ships.
 
+## Golden diff — regress collected outputs against a pinned artifact
+
+`yaah ab judge-experiment.json --golden expected.json` (add `--json` for
+machines) diffs every collected run's output payload against a **golden** — a
+plain JSON file you pin by copying a known-good run's output. It closes the
+"no expected artifact to diff a run against" gap: per (variant, fingerprint)
+population you get `n_match` / `n_differ` and, for the runs that drifted, a
+compact deduplicated diff (`added` / `removed` / `changed` keys, identical
+drift shapes collapsed with a count).
+
+Like `--report` and `--rescore` it is a **pure read, zero model calls, safe
+mid-campaign** — and a **report, not a gate**: `n_differ == 0` is your green,
+but the read never fails on drift (a caller that wants CI enforcement keys off
+`n_differ` itself). The diff direction is golden → actual: `removed` is an
+expected key the run didn't produce, `added` is a key the run produced beyond
+the golden, `changed` carries a bounded `{golden, actual}` pair. Objects are
+recursed (drift lands on a dotted path like `meta.score`); values are
+**bounded** — a long string is previewed with its length, a list/object becomes
+a shape token (`{"array": N}` / `{"object": N}`), and a blown-up path list is
+capped with a `__truncated__` sentinel — so a multi-KB payload can never flood
+the report.
+
+### Scrub — declare volatile keys so the golden doesn't churn
+
+Timestamps, ids, correlation ids and run paths differ every run; left in, they
+make a golden mismatch on every diff. Declare them as data in the experiment
+config and they're removed from **both** the golden and every output before
+diffing:
+
+```json
+"scrub": ["ts", "corr", "meta.run_id"]
+```
+
+Each entry is a dotted key **path**. v1 is meant for **top-level keys and one
+nesting level** (`"ts"`, `"meta.run_id"`) — that shallow shape is the intended
+simplicity; deeper paths work but aren't the design point. A scrub key present
+**nowhere** (golden or any output) is warned, not silently ignored — a
+misdeclared volatile key would otherwise churn the diff and get blamed on the
+pipeline.
+
+Two honest limits: values are compared with `==` (no float-epsilon tolerance —
+diff FAKE/deterministic campaigns, or `scrub` the volatile keys you can name; a
+stochastic model will drift every leaf), and **lists are compared as whole
+values**, not recursed by index, so a single element change reads as a
+whole-array change. One golden is diffed against every row, so a cell spanning
+multiple inputs is warned (pin a single-input experiment for a clean golden).
+
 ## Promotion
 
 When the matrix says B wins: point production at B's files, or merge B's
