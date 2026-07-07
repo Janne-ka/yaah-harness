@@ -464,7 +464,16 @@ class Harness:
         the key wins). The engine-level kill for the dropped-key defect class
         (H5) — payload-replacing nodes plus hand-maintained carry lists meant a
         load-bearing key (task, workdir, repo_root...) was eventually forgotten.
-        Runs on the linear pass path and on a fork's reduced join."""
+        Runs on the linear pass path and on a fork's reduced join.
+
+        A `final: true` TERMINAL stage opts its OUTPUT out of this re-fold — the
+        skip is a guard at the linear call site in `_drive`, NOT here and NOT in
+        the fork coordinator's walk. `final` is honored only on the linear
+        terminal because that is the one place a stage's own output becomes the
+        run's Done surface; the fork-machinery fold sites (this method's other
+        callers) stay unconditional. validate enforces the match — it rejects
+        `final` on any stage with a continuation key AND on any fork-scoped stage
+        — so a fork/branch fold never needs a `final` skip here."""
         for k in self.graph.sticky:
             if k in stage_input.payload and k not in stage_output.payload:
                 stage_output.payload[k] = stage_input.payload[k]
@@ -556,7 +565,11 @@ class Harness:
                     ask = result.last_output.payload.get("ask") or result.last_output.payload.get("question") or ""
                 return Suspended(baton.id, result.awaiting, concerns=list(baton.concerns), ask=ask)
             baton.concerns.extend(result.concerns)  # soft gate: noted, not blocking
-            self._fold_sticky(input, result.output)
+            # `final: true` (terminal only, enforced by validate): this stage's
+            # output is the run's FINAL word — skip the sticky re-fold so a tidy
+            # cleanup stage can drop the loop-state run frame from the Done output.
+            if not stage.final:
+                self._fold_sticky(input, result.output)
             input = result.output  # handover: output becomes next stage's input
             if stage.clears:  # this node clears the named gate(s) on completion
                 await self._clear_bus.publish_clears(stage.clears, input.correlation_id, input.payload)

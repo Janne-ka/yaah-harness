@@ -51,6 +51,11 @@ This file is the compressed essence, not the source of truth.
   },
   "graph": {
     "start": "<stage-name>",
+    "on_failure": "rollback",           // opt-in AUTO-SAGA (ADR-0009): on terminal
+                                        // StageFailed, auto-run `yaah rollback` over
+                                        // completed stages (cheap-only; object form
+                                        // {"mode":"rollback","include_costly":true});
+                                        // always re-raises the failure + reports
     "sticky": ["<payload-key>", ...],   // fill-if-missing after EVERY stage: a reset
                                         // node can't wipe these (workdir, run frame);
                                         // also auto-included in foreach per-item inputs
@@ -58,6 +63,8 @@ This file is the compressed essence, not the source of truth.
       "<stage-name>": {
         "node":         "<node-id>"  | "",  // "" for pure control stages (fork/fanin)
         "then":         "<next-stage>" | null,
+        "final":        true,               // TERMINAL only: skip the graph.sticky re-fold on
+                                            // this stage's output (its payload is the final word)
         "validators":   ["<node-id>", ...], "max_attempts": 1, "feedback": false,
         "branch":       {"on": "<payload-key>", "routes": {"<value>": "<stage>"}},
         "fork":         ["<branch-stage>", ...],

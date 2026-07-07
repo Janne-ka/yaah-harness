@@ -143,7 +143,11 @@ call / done — answers "alive or hung?" while a model call runs; sizes and name
 only, never model text). `stats_file` takes a `price_map` (tokens→$).
 Cross-field checks reject silently-dropped config (e.g. `sinks` under
 `mode: none`). `--explain` shows the effective trace block.
-Pipelines in which any node declares `rollback:` require a `{"type": "file", ...}`
+Pipelines in which any node declares `rollback:` — or arm the auto-saga
+(`graph.on_failure: "rollback"`, ADR-0009: automatic unwind of completed stages
+on terminal failure; cheap-only unless `include_costly`; always re-raises; on a
+non-inproc transport the trace may lag by the final records, a documented bounded
+limit) — require a `{"type": "file", ...}`
 entry in `sinks` (FileTraceSink) UNDER the default `mode: "tracer"` — a file sink
 declared beside `mode: "none"`/`"envelope"` never persists (the tracer builder
 short-circuits before sinks), so those modes are rejected too. The trace record

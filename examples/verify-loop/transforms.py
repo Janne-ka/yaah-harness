@@ -80,9 +80,10 @@ def emit_best(envelope, config) -> Dict[str, Any]:
 
     best_artifact and best_score are already in the payload (maintained by tally,
     preserved across loop iterations by graph.sticky). This transform returns only
-    the three named keys; graph.sticky will re-fold any sticky keys not present in
-    the return dict (cycle, loop_feedback) — those will appear in the final payload
-    too, which is fine. The winner keys are best_artifact and best_score.
+    the three named keys. The emit_best STAGE is declared `final: true` in the
+    pipeline, which tells the harness to skip the graph.sticky re-fold on this
+    stage's output — so the loop-state run-frame keys (cycle, loop_feedback) do NOT
+    re-appear in the Done payload. The final output is exactly the three keys below.
     """
     p = envelope.payload
     return {

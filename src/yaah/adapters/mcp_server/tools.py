@@ -120,6 +120,7 @@ async def _tool_run(args: Dict[str, Any]) -> Dict[str, Any]:
     prompt has no place on a protocol channel) and no serve-forever (a
     serve-only root would block the protocol loop for the process lifetime).
     The run itself is seeded identically (runtime._seed_task)."""
+    from ... import saga
     from ...runtime import _assemble_harness, _seed_task
     from ...runtime_factories import opened_store
     root, base = _load_root(args["root_path"])
@@ -130,7 +131,11 @@ async def _tool_run(args: Dict[str, Any]) -> Dict[str, Any]:
     async with opened_store(root.get("state"), base) as store:
         harness = await _assemble_harness(root, base, store=store)
         task, run_kw = _seed_task(root, base)
-        out = await harness.run(task, **run_kw)
+        # ADR-0009 D6: route through settle_terminal so a StageFailed arms the
+        # auto-saga, then re-raises — the raised StageFailed propagates to the
+        # server's tools/call wrapper and comes back as isError:true (unchanged).
+        out = await saga.settle_terminal(root, base, harness,
+                                         harness.run(task, **run_kw))
         return _outcome_json(out)
 
 

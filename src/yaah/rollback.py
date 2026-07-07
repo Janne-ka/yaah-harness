@@ -298,7 +298,8 @@ def _entry(c: Dict[str, Any]) -> Dict[str, Any]:
 async def execute(records: List[Dict[str, Any]], stages: Dict[str, Any],
                   nodes: Dict[str, Any], corr: str, *, include_costly: bool = False,
                   only: Optional[List[str]] = None,
-                  accept_partial: bool = False) -> Dict[str, Any]:
+                  accept_partial: bool = False,
+                  exclude: Optional[set] = None) -> Dict[str, Any]:
     """Walk the run's candidates in REVERSE completion order and call each undo
     `target` with ctx `{correlation_id, stage, node, effects, cost}` — DELIBERATELY
     NOT compensate's ctx (which hands the failing stage's full payload); rollback
@@ -306,6 +307,14 @@ async def execute(records: List[Dict[str, Any]], stages: Dict[str, Any],
     design-eval #7). A `costly` candidate is skipped unless `include_costly`;
     `only` (stage names, all occurrences) restricts the set; execution STOPS on the
     first failed undo unless `accept_partial` (a half-unwound run is never silent).
+
+    `exclude` (ADR-0009 D4): a set of `(stage, occurrence)` keys already rolled
+    back by a PRIOR run (the auto-saga's per-corr idempotency ledger, read from
+    earlier `saga` trace records). Excluded candidates are dropped from the walk —
+    neither re-called nor re-reported — so a retried resume never re-undoes what an
+    earlier saga already undid. (The occurrence key is stable across re-reads: the
+    trace is append-only, so `_resolve` assigns the same numbers to the same
+    completions.) This also gives the verb a future `--skip`.
 
     Returns the exactly-five-bucket report
     `{run, rolled_back, skipped_costly, impossible, failed, not_attempted}`.
@@ -327,6 +336,10 @@ async def execute(records: List[Dict[str, Any]], stages: Dict[str, Any],
                     corr, ", ".join(missing), ", ".join(sorted(names)) or "none"))
         wanted = set(only)
         ordered = [c for c in ordered if c["stage"] in wanted]
+    if exclude:
+        # already undone by a prior saga (ADR-0009 D4) — drop, don't re-call.
+        ordered = [c for c in ordered
+                   if (c["stage"], c["occurrence"]) not in exclude]
     report: Dict[str, Any] = {
         "run": corr, "rolled_back": [], "skipped_costly": [],
         "impossible": impossible, "failed": [], "not_attempted": [],

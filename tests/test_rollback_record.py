@@ -270,17 +270,19 @@ def _root(sinks) -> dict:
 
 def test_helper_fires_only_without_file_sink() -> None:
     nodes = {"push": {"type": "transform", "rollback": {"target": "fn:u"}}}
+    pl = {"nodes": nodes}   # widened signature (ADR-0009): pass the pipeline
     # no file sink -> error naming the node + "rollback input"
-    errs = check_rollback_trace_sink({"trace": {"sinks": [{"type": "console"}]}}, nodes)
+    errs = check_rollback_trace_sink({"trace": {"sinks": [{"type": "console"}]}}, pl)
     assert errs and "push" in errs[0] and "rollback input" in errs[0], errs
     # a bare single-dict sink shape (factory accepts it) is handled
-    errs = check_rollback_trace_sink({"trace": {"sinks": {"type": "console"}}}, nodes)
+    errs = check_rollback_trace_sink({"trace": {"sinks": {"type": "console"}}}, pl)
     assert errs, errs
     # with a file sink -> satisfied
     assert check_rollback_trace_sink(
-        {"trace": {"sinks": [{"type": "console"}, {"type": "file"}]}}, nodes) == []
+        {"trace": {"sinks": [{"type": "console"}, {"type": "file"}]}}, pl) == []
     # no node declares rollback -> no requirement even with no sink at all
-    assert check_rollback_trace_sink({}, {"push": {"type": "transform"}}) == []
+    assert check_rollback_trace_sink(
+        {}, {"nodes": {"push": {"type": "transform"}}}) == []
 
 
 def test_helper_rejects_nonpersisting_trace_modes() -> None:
@@ -288,13 +290,14 @@ def test_helper_rejects_nonpersisting_trace_modes() -> None:
     # (_build_tracer short-circuits before the sink-subscribe loop) — sink
     # declaration alone must not satisfy the check.
     nodes = {"push": {"type": "transform", "rollback": {"target": "fn:u"}}}
+    pl = {"nodes": nodes}   # widened signature (ADR-0009): pass the pipeline
     for mode in ("none", "envelope"):
         errs = check_rollback_trace_sink(
-            {"trace": {"mode": mode, "sinks": [{"type": "file"}]}}, nodes)
+            {"trace": {"mode": mode, "sinks": [{"type": "file"}]}}, pl)
         assert errs and "push" in errs[0] and mode in errs[0], (mode, errs)
     # absent mode defaults to "tracer" -> file sink satisfies (unchanged)
     assert check_rollback_trace_sink(
-        {"trace": {"sinks": [{"type": "file"}]}}, nodes) == []
+        {"trace": {"sinks": [{"type": "file"}]}}, pl) == []
 
 
 def test_validate_config_author_time_refuses() -> None:

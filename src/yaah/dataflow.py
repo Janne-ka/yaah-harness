@@ -32,8 +32,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .node_contract import (Flow, apply, may_suspend, meet, resolve_consumes,
-                            resolve_contract)
+from .node_contract import (ConsumesFor, ContractFor, Flow, apply, may_suspend, meet,
+                            resolve_consumes, resolve_contract)
 
 # A provides value on an edge is None (the fixpoint identity — "not yet reached") or a
 # concrete Flow (known keys + how exact the set is). This module holds NO per-node key
@@ -71,7 +71,8 @@ def _fanout_role_may_suspend(role: Any, nodes: Dict[str, Any]) -> bool:
 
 def _transfer(stage: Any, node: Optional[Dict[str, Any]], pin: Provides, sticky: Set[str],
               tainted: List[str], stage_name: str,
-              nodes: Optional[Dict[str, Any]] = None) -> Flow:
+              nodes: Optional[Dict[str, Any]] = None, *,
+              contract_for: Optional[ContractFor] = None) -> Flow:
     """How this stage rewrites the incoming flow. A routing stage (no node) passes the
     payload through; every real node's effect comes from its resolved contract — the module
     has no per-type key table. An undeclared envelope-transform resolves to `opaque` (nothing
@@ -155,7 +156,7 @@ def _transfer(stage: Any, node: Optional[Dict[str, Any]], pin: Provides, sticky:
         # a pure routing stage (no node) passes the payload through
         flow = Flow(pin.known | sticky_fs, pin.complete, pin.closed)
     else:
-        contract = resolve_contract(node.get("type"), node)
+        contract = resolve_contract(node.get("type"), node, contract_for=contract_for)
         if contract.mode == "opaque" and _undeclared_envelope_transform(node):
             tainted.append(stage_name)
         flow = apply(contract, pin, sticky_fs)
@@ -193,7 +194,8 @@ def _edges(stages: Dict[str, Any]) -> Dict[str, List[str]]:
 
 def compute_provides(nodes: Dict[str, Any], stages: Dict[str, Any], sticky: Set[str],
                      start: Optional[str], tainted: List[str],
-                     entry: Optional[Flow] = None) -> "Tuple[Dict[str, Provides], Dict[str, List[str]]]":
+                     entry: Optional[Flow] = None, *,
+                     contract_for: Optional[ContractFor] = None) -> "Tuple[Dict[str, Provides], Dict[str, List[str]]]":
     """Forward dataflow to a least fixpoint: provides_in(stage) = meet over predecessors
     of provides_out(pred). Monotone (sets only shrink from TOP), so it converges; loops
     (retry/`then` cycles) are handled by the fixpoint, not a special case. Unreached
@@ -220,7 +222,7 @@ def compute_provides(nodes: Dict[str, Any], stages: Dict[str, Any], sticky: Set[
             # from `start`, so it never runs and must not taint the merge (a real path that
             # provides the key would otherwise be intersected away → false warning).
             incoming = [_transfer(stages[p], nodes.get(stages[p].get("node")), pin[p],
-                                  sticky, tainted, p, nodes)
+                                  sticky, tainted, p, nodes, contract_for=contract_for)
                         for p in preds[s] if pin[p] is not None]
             if not incoming:
                 continue  # no reachable predecessors: keep the seed (start) or TOP (unreached)
@@ -244,18 +246,21 @@ def compute_provides(nodes: Dict[str, Any], stages: Dict[str, Any], sticky: Set[
 
 def stage_outflows(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list: Any,
                    start: Optional[str], *,
-                   entry: Optional[Flow] = None) -> "Dict[str, Provides]":
+                   entry: Optional[Flow] = None,
+                   contract_for: Optional[ContractFor] = None) -> "Dict[str, Provides]":
     """Provides-OUT per stage: the Flow LEAVING each reachable stage (None = unreachable).
     The read surface for callers reasoning about what a stage HANDS FORWARD — e.g. the
     `yaah ab` pre-flight checking terminal payloads against declared metric paths — so
     they consume the same lattice `analyze_dataflow` walks instead of re-deriving it."""
     sticky = set(k for k in sticky_list if isinstance(k, str)) if isinstance(sticky_list, list) else set()
-    pin, _ = compute_provides(nodes, stages, sticky, start, [], entry=entry)
+    pin, _ = compute_provides(nodes, stages, sticky, start, [], entry=entry,
+                              contract_for=contract_for)
     out: Dict[str, Provides] = {}
     for s_name, s in stages.items():
         p = pin.get(s_name)
         out[s_name] = None if p is None else _transfer(
-            s, nodes.get(s.get("node")), p, sticky, [], s_name, nodes)
+            s, nodes.get(s.get("node")), p, sticky, [], s_name, nodes,
+            contract_for=contract_for)
     return out
 
 
@@ -281,7 +286,9 @@ def terminal_stages(stages: Dict[str, Any]) -> List[str]:
 
 def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list: Any,
                      start: Optional[str], base_path: Optional[str], *,
-                     entry: Optional[Flow] = None) -> "Tuple[List[str], List[str]]":
+                     entry: Optional[Flow] = None,
+                     contract_for: Optional[ContractFor] = None,
+                     consumes_for: Optional[ConsumesFor] = None) -> "Tuple[List[str], List[str]]":
     """The requires↔provides graph analysis (ADR-0005 slice B + ADR-0006 §D5). ONE pass, two
     severities, split by how exact the provided set is where a consumer reads it:
 
@@ -297,12 +304,19 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
     `lint_pipeline` the warnings (it runs on an already-valid config, so it sees only
     warnings). `entry` (see compute_provides) lets a caller that KNOWS the entry payload's
     keys seed the start stage — entry-key mismatches then surface as errors/warnings under
-    the same two-severity rules."""
+    the same two-severity rules.
+
+    `contract_for` / `consumes_for` (ADR-0006 D7.2) inject a caller-composed contract/consumes
+    SOURCE — the seam an embedding app uses to reach its CUSTOM node types' contracts (built via
+    `Registry.contract_source()` / `consumes_source()`, which chain the registered custom slot
+    onto the built-ins). Default `None` = the built-in sources only, byte-for-byte today's
+    behaviour: a custom type stays opaque unless it declares inline `provides:`/`consumes:`."""
     errors: List[str] = []
     warnings: List[str] = []
     sticky = set(k for k in sticky_list if isinstance(k, str)) if isinstance(sticky_list, list) else set()
     tainted: List[str] = []
-    pin, preds = compute_provides(nodes, stages, sticky, start, tainted, entry=entry)
+    pin, preds = compute_provides(nodes, stages, sticky, start, tainted, entry=entry,
+                                  contract_for=contract_for)
     tainted_set = set(tainted)
 
     def tainted_ancestors(stage: str) -> List[str]:
@@ -385,7 +399,8 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
         # branch.on reads the payload AFTER this stage's node runs (the node's OUTPUT).
         on = (s.get("branch") or {}).get("on")
         if isinstance(on, str) and on:
-            flow = _transfer(s, node, pin_here, sticky, [], s_name, nodes)
+            flow = _transfer(s, node, pin_here, sticky, [], s_name, nodes,
+                             contract_for=contract_for)
             if flow.closed:
                 if on not in flow.known:
                     errors.append(branch_msg(s_name, on, flow.known, hard=True))
@@ -422,7 +437,8 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
         # a node's CONSUMES: keys it reads from the payload flowing INTO it (ADR-0006
         # symmetry — the node reports this, the checker holds no per-type knowledge). render
         # parses its `{{...}}`; a custom node declares `consumes: [...]`; others read nothing.
-        needs = sorted(resolve_consumes(node.get("type"), node, base_path))
+        needs = sorted(resolve_consumes(node.get("type"), node, base_path,
+                                        consumes_for=consumes_for))
         if needs and isinstance(fe, dict):
             # a foreach WORKER's input is not the stage inbound — it is the
             # engine-made per-item payload {into, item_index} ∪ carry ∪ sticky

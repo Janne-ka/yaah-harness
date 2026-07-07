@@ -46,7 +46,7 @@
       "judge":     {"node": "role:judge",     "then": "tally"},
       "tally":     {"node": "role:tally",
                     "branch": {"on": "loop_done", "routes": {"yes": "emit_best"}, "default": "produce"}},
-      "emit_best": {"node": "role:emit_best", "then": null}
+      "emit_best": {"node": "role:emit_best", "then": null, "final": true}
     }
   }
 }

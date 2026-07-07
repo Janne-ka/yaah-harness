@@ -1501,6 +1501,251 @@ def untrusted_strict_fails_with_exit_2() -> None:
     assert _UT in err, err
 
 
+# ── [lint: reserved-key-collision] — author declares an engine-injected key as their own ──
+# The harness `_with_feedback` (harness.py) injects `feedback` (the validator failures) AND
+# `priorAttempt` (the prior output) onto the payload on every `feedback: true` retry, and the
+# agent node's `_render` (agents/agent.py) auto-appends a non-empty `feedback` payload value to
+# the prompt. An author who DECLARES either name as their own key gets silent double-injection/
+# collision — the verify-loop example renames its own key to `loop_feedback` for exactly this.
+
+_RK = "reserved-key-collision"
+
+
+def _rk(cfg):
+    return [m for m in lint_pipeline(cfg) if _RK in m]
+
+
+def warns_reserved_feedback_in_node_provides() -> None:
+    cfg = {"nodes": {"t": {"type": "transform", "target": "fn:m:f", "provides": ["feedback"]}},
+           "graph": {"start": "s", "stages": {"s": {"node": "t"}}}}
+    w = _rk(cfg)
+    assert w and "feedback" in w[0] and "provides" in w[0], w
+
+
+def warns_reserved_priorattempt_in_node_provides() -> None:
+    cfg = {"nodes": {"t": {"type": "transform", "target": "fn:m:f", "provides": ["priorAttempt"]}},
+           "graph": {"start": "s", "stages": {"s": {"node": "t"}}}}
+    w = _rk(cfg)
+    assert w and "priorAttempt" in w[0], w
+
+
+def warns_reserved_in_output_schema_properties() -> None:
+    cfg = {"nodes": {"a": {"type": "agent",
+                          "output_schema": {"properties": {"feedback": {"type": "string"}}}}},
+           "graph": {"start": "s", "stages": {"s": {"node": "a"}}}}
+    w = _rk(cfg)
+    assert w and "feedback" in w[0] and "output_schema" in w[0], w
+
+
+def warns_reserved_in_output_schema_required() -> None:
+    cfg = {"nodes": {"a": {"type": "agent", "output_schema": {"required": ["priorAttempt"]}}},
+           "graph": {"start": "s", "stages": {"s": {"node": "a"}}}}
+    assert any("priorAttempt" in m for m in _rk(cfg)), _rk(cfg)
+
+
+def warns_reserved_in_sticky() -> None:
+    cfg = {"nodes": {"a": {"type": "agent"}},
+           "graph": {"start": "s", "stages": {"s": {"node": "a"}}, "sticky": ["feedback"]}}
+    w = _rk(cfg)
+    assert w and "feedback" in w[0] and "sticky" in w[0], w
+
+
+def warns_reserved_in_foreach_into() -> None:
+    cfg = {"nodes": {"a": {"type": "agent", "provides": ["items"]}, "w": {"type": "agent"}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "a", "then": "s2"},
+               "s2": {"node": "w", "foreach": {"items": "items", "into": "feedback"}}}}}
+    w = _rk(cfg)
+    assert w and "feedback" in w[0] and "foreach" in w[0], w
+
+
+def warns_reserved_in_foreach_items() -> None:
+    cfg = {"nodes": {"a": {"type": "agent", "provides": ["feedback"]}, "w": {"type": "agent"}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "a", "then": "s2"},
+               "s2": {"node": "w", "foreach": {"items": "feedback"}}}}}
+    assert any("feedback" in m and "foreach" in m for m in _rk(cfg)), _rk(cfg)
+
+
+def warns_reserved_in_foreach_carry() -> None:
+    cfg = {"nodes": {"a": {"type": "agent", "provides": ["reqs"]}, "w": {"type": "agent"}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "a", "then": "s2"},
+               "s2": {"node": "w", "foreach": {"items": "reqs", "carry": ["priorAttempt"]}}}}}
+    assert any("priorAttempt" in m and "foreach" in m for m in _rk(cfg)), _rk(cfg)
+
+
+def warns_reserved_in_effects_from() -> None:
+    cfg = {"nodes": {"p": {"type": "post"}},
+           "graph": {"start": "s", "stages": {"s": {"node": "p", "effects_from": "feedback"}}}}
+    w = _rk(cfg)
+    assert w and "feedback" in w[0] and "effects_from" in w[0], w
+
+
+def warns_reserved_in_concerns_from_and_into() -> None:
+    cfg = {"nodes": {"a": {"type": "agent"}},
+           "graph": {"start": "s", "stages": {
+               "s": {"node": "a", "concerns_from": "feedback", "concerns_into": "priorAttempt"}}}}
+    w = _rk(cfg)
+    assert any("feedback" in m and "concerns_from" in m for m in w), w
+    assert any("priorAttempt" in m and "concerns_into" in m for m in w), w
+
+
+def reserved_message_names_key_surface_and_injection() -> None:
+    cfg = {"nodes": {"t": {"type": "transform", "target": "fn:m:f", "provides": ["feedback"]}},
+           "graph": {"start": "s", "stages": {"s": {"node": "t"}}}}
+    m = _rk(cfg)[0]
+    assert "feedback" in m and "provides" in m, m       # names the key + surface
+    assert "inject" in m.lower(), m                      # cites the auto-injection behavior
+    assert "retry" in m.lower(), m
+    assert _RK in m, m
+
+
+# ── reserved-key near-misses that must stay SILENT ──
+
+def quiet_reserved_normal_config() -> None:
+    cfg = {"nodes": {"a": {"type": "agent", "provides": ["verdict"],
+                          "output_schema": {"required": ["verdict"]}}},
+           "graph": {"start": "s", "stages": {"s": {"node": "a"}}, "sticky": ["run_id"]}}
+    assert not _rk(cfg), lint_pipeline(cfg)
+
+
+def quiet_reserved_loop_feedback_rename() -> None:
+    # the verify-loop workaround: an author who renames the key to `loop_feedback` is CLEAN,
+    # across provides + sticky (the real example's surfaces).
+    cfg = {"nodes": {"t": {"type": "transform", "target": "fn:m:f",
+                          "provides": ["cycle", "loop_feedback"]}},
+           "graph": {"start": "s", "stages": {"s": {"node": "t"}},
+                     "sticky": ["cycle", "loop_feedback"]}}
+    assert not _rk(cfg), lint_pipeline(cfg)
+
+
+def quiet_reserved_node_level_carry_not_a_surface() -> None:
+    # arch-drift carries `feedback` on a NODE-level `carry` list (cooperating with the engine
+    # convention to keep `{{feedback}}` filled) — node-level carry is NOT a declared-key surface,
+    # only a foreach `carry` is. Must stay silent.
+    cfg = {"nodes": {"a": {"type": "agent", "carry": ["snapshot", "feedback"]}},
+           "graph": {"start": "s", "stages": {"s": {"node": "a"}}}}
+    assert not _rk(cfg), lint_pipeline(cfg)
+
+
+def quiet_reserved_human_gate_decision_schema_not_a_surface() -> None:
+    # arch-drift-ab's human_gate exposes a `feedback` field in its `decision_schema` (the human's
+    # revise note) — decision_schema is NOT `output_schema` and is out of scope. Silent.
+    cfg = {"nodes": {"g": {"type": "human_gate", "form": "json_schema",
+                          "decision_schema": {"type": "object", "required": ["decision"],
+                                              "properties": {"decision": {"enum": ["ok"]},
+                                                             "feedback": {"type": "string"}}}}},
+           "graph": {"start": "s", "stages": {"s": {"node": "g"}}}}
+    assert not _rk(cfg), lint_pipeline(cfg)
+
+
+def reserved_lint_never_raises_on_malformed() -> None:
+    for cfg in (
+        {"nodes": {"a": {"type": "agent", "provides": "feedback"}},   # provides not a list
+         "graph": {"start": "s", "stages": {"s": {"node": "a"}}}},
+        {"nodes": {"a": {"type": "agent", "output_schema": ["bad"]}},
+         "graph": {"start": "s", "stages": {"s": {"node": "a"}}}},
+        {"nodes": {"a": {"type": "agent"}},
+         "graph": {"stages": {"s": {"node": "a", "foreach": "not-a-dict"}}}},
+        {"nodes": {"a": "not-a-dict"}, "graph": {}},
+        # adversarial-eval 2026-07-07: the container shapes that ACTUALLY crashed
+        # lint_pipeline (via pre-existing sibling lints, reached before the new rules) —
+        # a non-dict stages container, a non-dict stage VALUE, a non-dict graph,
+        # a non-dict nodes container. The never-raises contract must hold on the
+        # dimension where it was weak, not only where it was already strong.
+        {"nodes": {"a": {"type": "agent"}}, "graph": {"stages": ["not-a-dict"]}},
+        {"nodes": {"a": {"type": "agent"}},
+         "graph": {"start": "s", "stages": {"s": "not-a-dict"}}},
+        {"nodes": {"a": {"type": "agent"}}, "graph": ["not-a-dict"]},
+        {"nodes": "not-a-dict", "graph": {"stages": {"s": {"node": "a"}}}},
+    ):
+        lint_pipeline(cfg)   # must not raise
+
+
+# ── [lint: clear-is-not-rollback] — an idempotent (committed-effect) node under bare `clear` ──
+# ADR-0008: `on_error: "clear"` (the default) drops ENGINE state only. A node the author marked
+# `idempotent: true` commits a replay-sensitive EXTERNAL effect; failing under clear READS as
+# cleaned up while the effect persists. Nudge the author to declare compensate / rollback, or
+# `on_error: null` to acknowledge fail-as-is.
+
+_CR = "clear-is-not-rollback"
+
+
+def _cr(cfg):
+    return [m for m in lint_pipeline(cfg) if _CR in m]
+
+
+def _idem_cfg(*, rollback=None, on_error="__absent__", idempotent=True):
+    node = {"type": "post"}
+    if idempotent:
+        node["idempotent"] = True
+    if rollback is not None:
+        node["rollback"] = rollback
+    stage = {"node": "p"}
+    if on_error != "__absent__":
+        stage["on_error"] = on_error
+    return {"nodes": {"p": node}, "graph": {"start": "s", "stages": {"s": stage}}}
+
+
+def warns_idempotent_default_clear() -> None:
+    w = _cr(_idem_cfg())                                  # no on_error, no rollback
+    assert w and "'p'" in w[0], w
+
+
+def warns_idempotent_explicit_clear() -> None:
+    assert _cr(_idem_cfg(on_error="clear")), lint_pipeline(_idem_cfg(on_error="clear"))
+
+
+def clear_rollback_message_names_the_escape_hatches() -> None:
+    m = _cr(_idem_cfg())[0]
+    assert "clear" in m and "engine" in m.lower(), m
+    assert "compensate" in m and "rollback" in m and "on_error: null" in m, m
+    assert _CR in m, m
+
+
+def quiet_idempotent_with_rollback() -> None:
+    cfg = _idem_cfg(rollback={"target": "fn:undo:x"})
+    assert not _cr(cfg), lint_pipeline(cfg)
+
+
+def quiet_idempotent_with_compensate() -> None:
+    cfg = _idem_cfg(on_error={"compensate": "fn:undo:x"})
+    assert not _cr(cfg), lint_pipeline(cfg)
+
+
+def quiet_idempotent_on_error_null_optout() -> None:
+    cfg = _idem_cfg(on_error=None)                        # explicit fail-as-is
+    assert not _cr(cfg), lint_pipeline(cfg)
+
+
+def quiet_non_idempotent_bare_clear() -> None:
+    cfg = _idem_cfg(idempotent=False)                    # not a committed-effect node
+    assert not _cr(cfg), lint_pipeline(cfg)
+
+
+def clear_rollback_multistage_warns_on_the_uncovered_stage() -> None:
+    # one node run by TWO stages: one compensates, one clears. The clearing stage is a real
+    # silent-effect risk -> warn, naming that stage (soundness over per-node blanket-quiet).
+    cfg = {"nodes": {"p": {"type": "post", "idempotent": True}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "p", "on_error": {"compensate": "fn:undo:x"}, "then": "s2"},
+               "s2": {"node": "p"}}}}
+    w = _cr(cfg)
+    assert w and "'s2'" in w[0] and "'s1'" not in w[0], w
+
+
+def clear_rollback_lint_never_raises_on_malformed() -> None:
+    for cfg in (
+        {"nodes": {"p": {"type": "post", "idempotent": True, "rollback": "bad"}},
+         "graph": {"start": "s", "stages": {"s": {"node": "p"}}}},
+        {"nodes": {"p": {"type": "post", "idempotent": True}},
+         "graph": {"stages": {"s": {"node": "p", "on_error": ["weird"]}}}},
+        {"nodes": {"p": "not-a-dict"}, "graph": {}},
+    ):
+        lint_pipeline(cfg)   # must not raise
+
+
 def main() -> None:
     warns_on_required_only_schema()
     quiet_on_typed_properties()
@@ -1612,6 +1857,31 @@ def main() -> None:
     untrusted_lint_never_raises_on_malformed()
     untrusted_hits_carry_one_floor_caveat()
     untrusted_strict_fails_with_exit_2()
+    warns_reserved_feedback_in_node_provides()
+    warns_reserved_priorattempt_in_node_provides()
+    warns_reserved_in_output_schema_properties()
+    warns_reserved_in_output_schema_required()
+    warns_reserved_in_sticky()
+    warns_reserved_in_foreach_into()
+    warns_reserved_in_foreach_items()
+    warns_reserved_in_foreach_carry()
+    warns_reserved_in_effects_from()
+    warns_reserved_in_concerns_from_and_into()
+    reserved_message_names_key_surface_and_injection()
+    quiet_reserved_normal_config()
+    quiet_reserved_loop_feedback_rename()
+    quiet_reserved_node_level_carry_not_a_surface()
+    quiet_reserved_human_gate_decision_schema_not_a_surface()
+    reserved_lint_never_raises_on_malformed()
+    warns_idempotent_default_clear()
+    warns_idempotent_explicit_clear()
+    clear_rollback_message_names_the_escape_hatches()
+    quiet_idempotent_with_rollback()
+    quiet_idempotent_with_compensate()
+    quiet_idempotent_on_error_null_optout()
+    quiet_non_idempotent_bare_clear()
+    clear_rollback_multistage_warns_on_the_uncovered_stage()
+    clear_rollback_lint_never_raises_on_malformed()
     print("ok")
 
 

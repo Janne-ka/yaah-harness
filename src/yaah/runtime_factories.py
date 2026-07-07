@@ -17,11 +17,13 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import sys
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Dict, Optional
 
 # Engine ports + zero-config references (next to the kernel) ...
 from .agents import FakeProvider, RoutingProvider, ScriptedProvider
+from .agents.recording_provider import RecordingProvider
 from .comms import InProcessComms
 from .data import RoutingDataSink, RoutingDataSource
 from .mcp import RoutingMcpSource, StaticMcpSource
@@ -179,8 +181,11 @@ def _load_price_map(pm: Any, base: str) -> Any:
 def _kw(spec: Dict[str, Any]) -> Dict[str, Any]:
     """Spec keys except the dispatch 'type' — i.e. the leaf's constructor kwargs.
     Used by: the pass-through factories below (claude_cli/litellm/langfuse) that
-    forward every remaining config key straight to the leaf constructor."""
-    return {k: v for k, v in spec.items() if k != "type"}
+    forward every remaining config key straight to the leaf constructor.
+    `record_to` is stripped here too: it's an engine-side wrapper opt (handled in
+    `_build_provider`), not a leaf constructor kwarg, so an open-spec provider
+    (claude_cli/litellm) must not forward it and blow up on an unknown arg."""
+    return {k: v for k, v in spec.items() if k not in ("type", "record_to")}
 
 
 def _scripted_by_model(spec: Dict[str, Any], base: str) -> Any:
@@ -199,24 +204,30 @@ def _scripted_by_model(spec: Dict[str, Any], base: str) -> Any:
 # reads these SAME maps for its type enums AND unknown-key checks, so adding a
 # type = one entry here and the validator learns it for free — no parallel
 # tables to drift (the sink/sinks bug class).
+# Every provider accepts an optional `record_to: <path>` — an engine-side opt (NOT
+# a leaf kwarg) that wraps the built leaf in a RecordingProvider (see
+# `_build_provider`). It's in each closed-spec frozenset so validate.py (which
+# reads these SAME maps) accepts it; the open-spec entries (claude_cli/litellm)
+# accept any key already, and `_kw` strips `record_to` before the constructor.
 _PROVIDER_TYPES = {
     "claude_cli": (lambda spec, base: ClaudeCliProvider(**_kw(spec)), None),
     "litellm": (lambda spec, base: LiteLLMProvider(**_kw(spec)), None),
     "fake": (lambda spec, base: FakeProvider(responses=spec.get("responses"),
                                             default=spec.get("default", "")),
-             frozenset({"responses", "default"})),
+             frozenset({"responses", "default", "record_to"})),
     # on_exhaustion="raise" makes an exhausted/mismatched script FAIL LOUD instead
     # of yielding "" — the replay loader's anti-silent-green guard (yaah.replay).
     "fake_scripted": (lambda spec, base: ScriptedProvider(_scripted_by_model(spec, base),
                                                          default=spec.get("default", ""),
                                                          on_exhaustion=spec.get(
                                                              "on_exhaustion", "default")),
-                      frozenset({"fixtures", "by_model", "default", "on_exhaustion"})),
+                      frozenset({"fixtures", "by_model", "default", "on_exhaustion",
+                                 "record_to"})),
     # Scripted tool-loop backend — drives an `agent_loop` node from a list of
     # canned turn responses ({"text": "..."} or {"calls": [{name,args,id}, ...]}).
     # For tests + spike examples; proves the ApiProvider seam is replaceable.
     "fake_tool": (lambda spec, base: FakeToolProvider(turns=spec.get("turns", [])),
-                  frozenset({"turns"})),
+                  frozenset({"turns", "record_to"})),
 }
 _PROMPT_TYPES = {
     "file": (lambda spec, base: FilePromptSource(_rel(base, spec.get("dir", "prompts")),
@@ -275,8 +286,32 @@ def _build_router(specs: Any, *, factories: Dict[str, Any], router_cls: Any,
     return router_cls(leaves, default=default)
 
 
+def _recording(factory: Any) -> Any:
+    """Wrap a provider factory so a `record_to: <path>` in the spec decorates the
+    built leaf with a RecordingProvider (appends every completion to a JSONL). Off
+    unless `record_to` is set. The wrap is INSIDE the RoutingProvider, so the leaf
+    (and its recorder) sees the post-prefix bare model name — the key a replay
+    script (ScriptedProvider `by_model`) is indexed by. PRIVACY: a completion is
+    model output and may hold sensitive derived content; a loud stderr notice is
+    printed on every provider BUILD (each run_root re-prints it) so enabling
+    recording is never silent (full privacy note in recording_provider.py)."""
+    def wrapped(spec: Dict[str, Any], base: str) -> Any:
+        leaf = factory(spec, base)
+        rec = spec.get("record_to")
+        if not rec:
+            return leaf
+        path = _rel(base, rec)
+        print("yaah: RECORDING completions to {} — model OUTPUT, may contain "
+              "sensitive derived content; keep the file private".format(path),
+              file=sys.stderr, flush=True)
+        return RecordingProvider(leaf, path)
+    return wrapped
+
+
 def _build_provider(cfg: Dict[str, Any], base: str) -> RoutingProvider:
-    return _build_router(cfg.get("providers"), factories=_PROVIDER_TYPES,
+    factories = {name: (_recording(fac), keys)
+                 for name, (fac, keys) in _PROVIDER_TYPES.items()}
+    return _build_router(cfg.get("providers"), factories=factories,
                          router_cls=RoutingProvider, default=cfg.get("default_provider"),
                          base=base, optional=False)
 

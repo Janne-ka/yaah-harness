@@ -71,6 +71,10 @@ from .runtime_factories import (  # noqa: F401  (_read_json re-exported)
     _rel,
     opened_store,
 )
+# ADR-0009 auto-saga: the runtime-boundary policy (arm on a terminal StageFailed,
+# then re-raise). Imported as a module so `saga.settle_terminal` is patchable in
+# tests. saga does NOT import runtime, so there is no import cycle.
+from . import saga
 
 
 def _resolve_serve(serve: Any, pipeline: Dict[str, Any]) -> Optional[set]:
@@ -136,11 +140,13 @@ async def _assemble_harness(root: Dict[str, Any], base: str, *, store: Any) -> A
     # one place the deployment root (transport ceiling) and the pipeline
     # (per-node timeouts, fork waits) meet, so the admission check lives here.
     validate_budgets(root, pipeline)
-    # ADR-0008 D2: refuse to RUN a rollback-declaring pipeline without a persisted
-    # file trace sink — the record is the rollback input, so `yaah run` must fail
-    # BEFORE any effect is committed that it could never record (validate_config,
-    # the author-time surface, never runs on `yaah run`).
-    rb_errs = check_rollback_trace_sink(root, pipeline.get("nodes") or {})
+    # ADR-0008 D2 + ADR-0009 D1: refuse to RUN a rollback-declaring pipeline (or an
+    # armed `graph.on_failure` auto-saga) without a persisted file trace sink — the
+    # record is the rollback/saga input, so `yaah run` must fail BEFORE any effect
+    # is committed that it could never record (validate_config, the author-time
+    # surface, never runs on `yaah run`). The widened check sees the whole pipeline
+    # (nodes + graph) so it can enforce the on_failure cross-checks too.
+    rb_errs = saga.check_rollback_trace_sink(root, pipeline)
     if rb_errs:
         raise ValueError("invalid config:\n  - " + "\n  - ".join(rb_errs))
     # live-vars mechanism (a): `live_config: true` makes every node re-read its
@@ -228,10 +234,16 @@ async def run_root(root: Dict[str, Any], base: str) -> "Optional[Outcome]":
 
         task, run_kw = _seed_task(root, base)
         decider = _build_decider(root)
+        # ADR-0009 D6: route the terminal call through settle_terminal so a
+        # StageFailed — from the initial run OR any resume inside the gate loop —
+        # arms the auto-saga, then re-raises the ORIGINAL failure. drive() calls
+        # harness.run/resume RAW (no inner settle), so the saga fires exactly once.
         if decider is not None:  # drive gates to completion (resume at each Suspended)
-            return await drive(harness, task, decider, **run_kw)
+            return await saga.settle_terminal(
+                root, base, harness, drive(harness, task, decider, **run_kw))
         # default: run once; a gated pipeline stops (Suspended) at the first gate
-        return await harness.run(task, **run_kw)
+        return await saga.settle_terminal(
+            root, base, harness, harness.run(task, **run_kw))
 
 
 def _baton_json(b: "Baton") -> Dict[str, Any]:
@@ -281,7 +293,13 @@ async def resume_gate(root: Dict[str, Any], base: str, baton_id: str,
     async with opened_store(root.get("state"), base) as store:  # release the built backend
         harness = await _assemble_harness(root, base, store=store)
         headers = {"approver": approver} if approver else {}
-        return await harness.resume(baton_id, Envelope(Kind.RESUME, decision, headers))
+        # ADR-0009 D6: a resume can drive the run to a genuine ungated StageFailed
+        # (a later stage, no human in the loop) — arm the saga there too, possibly
+        # in a DIFFERENT process than the one that suspended it (the trace file has
+        # every stage across every process, so the unwind stays complete).
+        return await saga.settle_terminal(
+            root, base, harness,
+            harness.resume(baton_id, Envelope(Kind.RESUME, decision, headers)))
 
 
 class ActionError(ValueError):

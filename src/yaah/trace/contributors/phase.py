@@ -34,10 +34,18 @@ class PhaseContributor(TraceContributor):
         # the lines are dead in real runs (the sink only sees the record, never the
         # raw span). The `effects`/`effects_truncated`/`effects_head` trio is the
         # ADR-0008 rollback handle: the author-chosen effect descriptor (bounded)
-        # the `yaah rollback` verb reads back from the persisted record.
+        # the `yaah rollback` verb reads back from the persisted record. The
+        # `saga` record's five bucket attrs (`rolled_back`/`skipped_costly`/
+        # `impossible`/`failed`/`not_attempted`) plus a `skipped` marker are the
+        # ADR-0009 auto-saga LEDGER: without them here the projected saga record
+        # persists with EMPTY buckets and idempotency is a silent no-op (a retried
+        # resume would re-undo everything — design-eval #1). Buckets are identities
+        # only (stage/occurrence/node), consistent with the keys-only trace contract.
         for k in ("stage", "awaiting", "artifact", "ladder_from", "ladder_trigger",
                   "resumed", "decision_keys", "approver", "decision_diff",
-                  "effects", "effects_truncated", "effects_head"):
+                  "effects", "effects_truncated", "effects_head",
+                  "rolled_back", "skipped_costly", "impossible", "failed",
+                  "not_attempted", "skipped"):
             if k in span.attrs:
                 out[k] = span.attrs[k]
         return out

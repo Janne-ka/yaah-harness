@@ -29,6 +29,19 @@ class Stage:
     feedback: bool = False  # feed the verdict back into the retry input
     escalate: Optional[str] = None  # 'human' → suspend when attempts run out
     then: Optional[str] = None  # next stage name, or None to finish
+    final: bool = False  # TERMINAL stage only: skip the graph.sticky re-fold on THIS
+                         # stage's output, so its payload is the run's FINAL word — a
+                         # tidy cleanup stage (e.g. project the best-of-N winner) can
+                         # drop the loop-state run frame (cycle/feedback...) instead of
+                         # having sticky re-inject it into the Done output. Legal ONLY
+                         # on a terminal stage (validate rejects it alongside any
+                         # continuation key: then/branch/fork/fanout/fanin/foreach),
+                         # because sticky is the run frame the dataflow lattice re-folds
+                         # on every edge (downstream cwd_from threading depends on it) —
+                         # only the last word may drop it. Also rejected on a fork-scoped
+                         # stage (a fork branch / fan-in `then` chain): the fork
+                         # coordinator's fold sites are unconditional, so `final` is
+                         # honored only on the linear terminal, not inside a fork.
     fanout: Optional[List[str]] = None  # role BARRIER: run these ROLES in parallel on this one stage; merge to {results, roles}. Distinct from `fork` (branch chains) — explicit keys since the 2026-06-11 split.
     min_success: Optional[int] = None  # k-of-n fanout completion (M9a): with k set, the stage PASSES the merged payload when >= k members succeeded (failed_roles still names the dead ones, for a downstream degraded-mode concern) instead of all-or-nothing failing N-1 healthy members for 1 flaky one. None (default) = every member must succeed, unchanged.
     branch: Optional[Dict[str, Any]] = None  # conditional next: {on, routes:{val:stage}, default}

@@ -42,6 +42,8 @@ def build_graph(g: Dict[str, Any]) -> Graph:
             feedback=bool(s.get("feedback", False)),
             escalate=s.get("escalate"),
             then=s.get("then"),
+            final=bool(s.get("final", False)),  # terminal-only: skip sticky re-fold on this output
+
             fanout=s.get("fanout"),  # role BARRIER: ask N workers, merge replies
             min_success=(int(s["min_success"]) if s.get("min_success") is not None
                          else None),  # k-of-n fanout completion (M9a)

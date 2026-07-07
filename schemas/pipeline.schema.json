@@ -17,6 +17,32 @@
       "properties": {
         "constraints": {},
         "note": {},
+        "on_failure": {
+          "oneOf": [
+            {
+              "const": "rollback"
+            },
+            {
+              "additionalProperties": false,
+              "patternProperties": {
+                "^_": {}
+              },
+              "properties": {
+                "include_costly": {
+                  "type": "boolean"
+                },
+                "mode": {
+                  "const": "rollback"
+                },
+                "note": {}
+              },
+              "required": [
+                "mode"
+              ],
+              "type": "object"
+            }
+          ]
+        },
         "stages": {
           "additionalProperties": {
             "additionalProperties": false,
@@ -41,6 +67,9 @@
               "fanin": {},
               "fanout": {},
               "feedback": {},
+              "final": {
+                "type": "boolean"
+              },
               "foreach": {
                 "additionalProperties": false,
                 "properties": {

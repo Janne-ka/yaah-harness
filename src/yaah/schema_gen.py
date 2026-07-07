@@ -206,6 +206,9 @@ def build_pipeline_schema() -> Dict[str, Any]:
     typed_stage_keys: Dict[str, Any] = {
         "max_attempts": {"type": "integer", "minimum": 1},
         "error_retries": {"type": "integer", "minimum": 0},
+        # terminal-only: skip the sticky re-fold on this stage's output (its payload
+        # is the final word). Cross-field check (final ⇒ terminal) lives in validate.py.
+        "final": {"type": "boolean"},
         # fanout: additionally ≤ len(fanout); foreach: no static upper bound (the
         # item count is runtime-sized) — both cross-field checks live in validate.py
         "min_success": {"type": "integer", "minimum": 1},
@@ -254,6 +257,20 @@ def build_pipeline_schema() -> Dict[str, Any]:
             "additionalProperties": stage_schema,
         },
         "sticky": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        # ADR-0009 D1: the auto-saga opt-in ("rollback" | {mode, include_costly}).
+        # Hard check in yaah.saga.check_on_failure_value (wired via validate.py).
+        "on_failure": {"oneOf": [
+            {"const": "rollback"},
+            {"type": "object",
+             "required": ["mode"],
+             "properties": {
+                 "mode": {"const": "rollback"},
+                 "include_costly": {"type": "boolean"},
+                 "note": {},  # config-comment convention, matches the validator
+             },
+             "patternProperties": {"^_": {}},  # `_*` comments, as stage/graph allow
+             "additionalProperties": False},
+        ]},
         "constraints": {},
         "note": {},
     }

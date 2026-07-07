@@ -159,6 +159,21 @@ After `emit_best`, the final payload carries the **highest-scoring** attempt, re
 of when it occurred. The reference run demonstrates this: scores 3, 7, 5 across three
 attempts; the winner is attempt 2 (score 7), not attempt 3 (the last).
 
+The `emit_best` stage is declared `final: true` so the tidy projection is the run's
+actual final output:
+
+```json
+"emit_best": {"node": "role:emit_best", "then": null, "final": true}
+```
+
+`graph.sticky` re-folds the loop-state keys (`cycle`, `loop_feedback`, …) onto every
+stage's output — that is what keeps them alive across the loop — and would otherwise
+re-inject them onto the terminal cleanup's output too. `final: true` tells the harness
+to skip the re-fold **on this one stage**, so the Done payload is exactly what
+`emit_best` returned (`best_artifact`, `best_score`, `total_cycles`). It is legal only on
+a terminal stage (validate rejects it alongside any `then`/`branch`/`fork`/`fanout`/
+`fanin`/`foreach`): sticky is the run frame, and only the last word may drop it.
+
 The reduce logic is in the transform, not the engine — swap `score > best_score` for
 any custom comparator (e.g. "lowest cost", "passes all heuristics") without changing
 the pipeline shape.
@@ -192,6 +207,11 @@ every stage to prevent a payload-replacing agent from silently dropping these ke
 but it does not change WHERE they are stored. If you add a `human_gate` inside the
 loop, configure file-backed state so the cycle count and best candidate survive the
 suspension. See [`docs/cookbook/deploy.md`](deploy.md).
+
+Because sticky fires every stage, it also re-injects the loop-state keys into a
+terminal cleanup stage's tidy output — declare that stage `final: true` to skip the
+re-fold and make its projection the run's actual final word (see "The best-of-N
+reduce" above). `final` is legal only on a terminal stage.
 
 **ScriptedProvider scripts must have at least `max_cycles` entries.**
 

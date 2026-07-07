@@ -36,9 +36,7 @@ $ PYTHONPATH=../../src python3 -m yaah.runtime verify-loop.local.json
 RESULT: Done(output=Envelope(kind='result', payload={
   'best_artifact': 'A gilded crown of fire sank behind the hills, washing the world in amber.',
   'best_score': 7,
-  'total_cycles': 3,
-  'cycle': 3,
-  'loop_feedback': 'Atmospheric but vague; missing a concrete anchor.'
+  'total_cycles': 3
 }, ...))
 ```
 
@@ -52,10 +50,14 @@ Three `produce → judge → tally` cycles ran. Scores were:
 
 `best_artifact` is attempt 2 (score 7), not attempt 3 (score 5, the last one). Best-of-N beat last-attempt.
 
-`cycle` and `loop_feedback` also appear in the final payload because `graph.sticky`
-re-folds them from `emit_best`'s input — they were not in `emit_best`'s own output dict,
-so sticky preserved the last tally values. This is expected; `total_cycles` is the
-human-readable name for `cycle`.
+The final payload is exactly the three keys `emit_best` projected — `cycle` and
+`loop_feedback` do NOT leak in. `graph.sticky` re-folds those loop-state keys onto
+every OTHER stage's output (that is how they survive the produce agent's payload-replace
+across the loop), and it would normally re-inject them onto `emit_best`'s output too.
+The `emit_best` stage is declared **`final: true`**, which tells the harness to skip
+the sticky re-fold on that one stage — its payload is the run's final word. See
+["The terminal-cleanup stage"](#the-terminal-cleanup-stage-finaltrue) below.
+`total_cycles` is the human-readable name for `cycle`.
 
 ## How the loop works
 
@@ -111,6 +113,26 @@ surfaces it cleanly.
 `judge` has `carry: ["artifact"]` so the current attempt text survives from produce's
 output into tally's input (where `tally` reads and compares it to `best_artifact`).
 `artifact` is not sticky (it's a per-iteration value, not run-wide state).
+
+## The terminal-cleanup stage (`final:true`)
+
+`graph.sticky` re-folds the loop-state keys onto **every** stage's output — that is
+exactly what keeps `cycle`/`best_score`/`best_artifact`/`loop_feedback` alive across the
+produce agent's payload-replace. But the same mechanism fights the terminal cleanup:
+`emit_best` deliberately projects a tidy three-key payload, and without help sticky would
+re-inject `cycle` and `loop_feedback` right back into the Done output.
+
+The fix is a stage key:
+
+```json
+"emit_best": {"node": "role:emit_best", "then": null, "final": true}
+```
+
+`final: true` tells the harness to **skip the sticky re-fold on this stage's output** —
+its payload is the run's final word. It is legal ONLY on a terminal stage (no `then` /
+`branch` / `fork` / `fanout` / `fanin` / `foreach`): sticky is the run frame the harness
+re-folds on every edge, so only the last word may drop it. `yaah validate` rejects
+`final: true` on any stage that still routes onward, naming why.
 
 ## The canonical recipe
 
