@@ -4,8 +4,10 @@ Every built-in pipeline `type:` — what it does, the config keys it reads, the
 output shape it produces, and a minimal example. **Ground truth is the code**:
 `src/yaah/build/builders.py` (which keys each builder reads, and the error you
 get when a required one is missing) and the node sources in `src/yaah/nodes/`.
-The auto-generated [module-catalog.md](module-catalog.md) lists the same
-surface as one-liners; this file is the sit-down version for pipeline authors.
+The auto-generated [module-catalog.md](module-catalog.md) is the full
+machine-readable index — one-liner surface for every node type, port, adapter,
+contributor, and key terminology; this file is the sit-down version for
+pipeline authors.
 For how a stage *uses* a node (validators / retry / branch / fork), see
 [architecture.md](architecture.md) §4–5.
 
@@ -125,6 +127,13 @@ to your config and it just resolves. For shared or production code, install it
 as a package (`pip install -e .`) and use a dotted path, e.g.
 `fn:mypkg.transforms:func`. The convenience is the on-ramp; packaging is the
 durable path.
+
+**`json.loads` vs `extract_json` in transform functions.** Use
+`yaah.jsonio.extract_json` whenever the string to parse came from a real LLM —
+most models (all except opus reliably) wrap JSON in markdown fences or prose
+that `json.loads` rejects. Use plain `json.loads` only for trusted
+machine-generated JSON (e.g. a file your pipeline wrote, a tool's structured
+output). Rule of thumb: if it touched an LLM, use `extract_json`.
 
 ## `get` — read through the data port
 

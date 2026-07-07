@@ -29,7 +29,10 @@ The `agent` node has a new config key: `parse` (default `true`).
 
 When `parse: true` (the default), the agent runs `extract_json` on its
 model output and merges the parsed dict onto the reply payload (alongside
-`raw`, which is kept for back-compat and debugging). On parse failure or
+`raw`, which is kept for back-compat and debugging). The reply payload is a
+FRESH payload — the incoming payload does not flow through; only `raw`, the
+parsed keys, and the node's `carry:` keys survive an agent (the mechanics of
+`carry:` are in [node-reference](../node-reference.md)). On parse failure or
 non-object JSON, the agent emits a `Verdict.failed` envelope of the same
 shape `json_object` validator would have — so the harness's
 retry+feedback loop catches it the same way.

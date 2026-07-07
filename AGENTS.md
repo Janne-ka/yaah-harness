@@ -63,17 +63,22 @@ are battle-tested in ways a fresh design isn't.
 
 ## Authoring a pipeline (the rules that bite)
 
-- **Agent output: parse-by-default** (ADR-0004). An `agent` node returns its
-  model text in `payload["raw"]` AND auto-merges the parsed JSON keys onto
-  the payload (`extract_json`-tolerant of markdown fences). So
-  `{"summary": "..."}` from the model becomes `payload["summary"]` directly
-  — downstream `render` / `branch` find the keys they need without an
-  intermediate `transform`. On parse failure the agent emits a failed
-  verdict that the harness's retry+feedback loop catches the same way a
-  `json_object` validator would. Opt out with `"parse": false` on the
-  agent node for streaming/raw-only cases; the load-time graph linter
-  will then require a `transform` between the agent and any
-  render/branch.
+- **Agent output: parse-by-default** (ADR-0004) — and the reply **REPLACES
+  the payload**. The new payload is exactly: `raw` (the model text) + the
+  parsed JSON keys (`extract_json`-tolerant of markdown fences) + the keys
+  the node's `carry:` list forwards. So `{"summary": "..."}` from the model
+  becomes `payload["summary"]` directly — downstream `render` / `branch`
+  find the keys they need without an intermediate `transform`. **But
+  nothing else survives the agent:** an `input` key like `topic` that a
+  stage AFTER the agent still reads dies there unless the agent declares
+  `"carry": ["topic"]` (symptom: `render_unfilled_placeholders` naming
+  that key at the later stage — and `validate --strict` cannot pre-catch
+  it, since a parsing agent counts as "could provide anything"). On parse
+  failure the agent emits a failed verdict that the harness's
+  retry+feedback loop catches the same way a `json_object` validator
+  would. Opt out with `"parse": false` on the agent node for
+  streaming/raw-only cases; the load-time graph linter will then require
+  a `transform` between the agent and any render/branch.
 - **A human gate must `branch` on `decision`** — a gate with only `then` is a pause,
   not a gate; the human's reject is ignored.
 - **`fn:` targets resolve relative to the config's directory** — keep

@@ -1,6 +1,53 @@
 # YAAH 🥱
 
-Yet Another Agentic Harness. A generic, distributed runtime for orchestrating agentic workers.
+**Yet Another Agentic Harness** — a runtime for multi-step AI workflows whose *shape* (the steps, branches, loops, and human-approval gates) is a JSON config you can read, diff, and run, instead of code.
+
+## yaah in 60 seconds
+
+Here is a whole pipeline. An `agent` summarizes some input; a `render` step drops the result into a template:
+
+```mermaid
+flowchart LR
+    summarize["summarize · agent<br/>(calls a model)"] --> render["render<br/>(fills a template)"]
+```
+
+```json
+{
+  "nodes": {
+    "summarize": {"type": "agent",  "prompt": "file:summarize", "model": "fake:summarize"},
+    "render":    {"type": "render", "template_file": "output.html", "out": "summary.html"}
+  },
+  "graph": {
+    "start": "summarize",
+    "stages": {
+      "summarize": {"node": "summarize", "then": "render"},
+      "render":    {"node": "render",    "then": null}
+    }
+  }
+}
+```
+
+Read it top-down: **`nodes`** are the workers (an `agent` calls a model; `render` fills a template). **`graph`** wires them — `start` names the first stage, each stage runs a node and names what comes `then` (`null` ends the run). A name like `summarize` shows up twice on purpose: once as the worker, once as its slot in the graph. That two-block split *is* the mental model — branches, parallel forks, and human-approval gates are just more stages in the same file.
+
+`fake:summarize` is an offline stub backend, so this runs with **no API key** — swap it for `claude:haiku` or `openai:gpt-4o` to go real. A runnable version of this shape (plus a retry-on-bad-JSON loop) ships in `examples/hello-yaah`:
+
+```bash
+cd examples/hello-yaah && yaah run starter.local.json     # a 2-stage agent → render, offline
+```
+
+Because the whole workflow is a data file, the same config a machine runs is one you — or an AI assistant — can read, diff, and rewire. That's the idea; everything below is detail.
+
+## Coming from LangGraph?
+
+LangGraph covers most agentic-workflow needs; if you're already in that ecosystem, staying there is usually the right call. yaah is a deliberately **smaller subset** with one different bet: the graph is **config (JSON), not Python**. So the shape above — branches, loops, gates, and their decision forms — is *data*: legible to your diff tool, to a reviewer, and to an AI assistant that reads a run's trace and delivers a gate decision through the declared JSON (an operator surface that doesn't assume a human). It's a narrower surface than LangGraph, not a wider one.
+
+- **Reach for yaah** when you want the workflow shape as reviewable, machine-operable config, durable human gates, and a tiny zero-dependency footprint.
+- **Stay with LangGraph** for ecosystem breadth, streaming, LangSmith, and best-in-class durability/replay.
+- **Compose, don't replace** — let yaah own the graph while your platform keeps what it's good at (e.g. emit yaah's trace into LangSmith or MLflow).
+
+Full honest side-by-side — capabilities, and where each tool wins: **[docs/why-yaah.md § Versus other orchestration protocols](docs/why-yaah.md#versus-other-orchestration-protocols)**.
+
+## The mental model
 
 YAAH treats agents as workers, not first-class citizens. The harness owns routing and control; a worker does one job and is interchangeable. (In our harness, agents are first-class citizens only in their dreams, after they clock off.)
 

@@ -98,15 +98,15 @@ def _build_agent(spec: Dict[str, Any], ctx: BuildContext) -> Node:
     if attach_spec:
         from ..agents.attaching_agent import AttachingAgent
         from ..agents.attacher import Attacher
-        from ..external_call import import_callable
+        from ..external_call import FN_PREFIX, import_callable
         attachers = []
         for i, item in enumerate(attach_spec):
-            if not isinstance(item, str) or not item.startswith("fn:"):
+            if not isinstance(item, str) or not item.startswith(FN_PREFIX):
                 raise ValueError(
                     "agent 'attach[{}]' must be a 'fn:module:func' string "
                     "(got {!r}); attachers ship in consumer code per ADR-0003".format(
                         i, item))
-            cls = import_callable(item[len("fn:"):])
+            cls = import_callable(item[len(FN_PREFIX):])
             if not (isinstance(cls, type) and issubclass(cls, Attacher)):
                 raise ValueError(
                     "agent 'attach[{}]' = {!r} resolved to {!r}, expected a "

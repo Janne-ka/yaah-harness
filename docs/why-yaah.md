@@ -247,6 +247,14 @@ Be honest about these — adopting an engine you don't need is its own cost:
 
 Honest comparison — every tool here is good; the question is fit.
 
+**If you know LangGraph:** YAAH is the same core idea — a directed graph of steps
+with conditional edges, loops, and durable human interrupts — authored as JSON
+config instead of Python. That one difference is the whole trade: you give up
+ecosystem breadth, streaming, and LangSmith, and you gain a machine-readable
+topology a human or an AI can diff, overlay (`_extends`), and rewire without a
+redeploy. LangGraph covers more use cases; YAAH is the smaller, config-first
+subset. The table shows the fit honestly.
+
 | Capability | YAAH | LangGraph | Temporal | PromptFlow |
 |---|---|---|---|---|
 | Where the graph is **defined** | **config (JSON + `_extends`)** | Python (`StateGraph`) | Python/Go code | YAML + Python tools |

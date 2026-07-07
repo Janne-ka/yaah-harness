@@ -193,7 +193,7 @@ beside the builder: `register(type, builder, contract)`. This IS the static bind
 change (except the intentional severity broadening in §D5, flagged for review).** Helpers:
 `carry = _as_key_set(cfg.get("carry"))`; `cwd = {cfg["cwd_from"]}` if it's a non-empty str else `{}`.
 
-> **‡ An agent is NEVER `closed`.** An agent merges its whole parsed reply onto the payload
+> **‡ An agent is NEVER `closed`.** An agent's whole parsed reply becomes the payload
 > (`agent.py:388` spreads `**parsed`), and `check_schema` does not enforce `additionalProperties`
 > (`jsonschema.py` handles only `type/enum/required/properties/items`) — so the model can emit keys
 > the schema never listed and they still get through. We therefore can NEVER prove an agent's output

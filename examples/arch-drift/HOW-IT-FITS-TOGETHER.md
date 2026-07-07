@@ -176,7 +176,7 @@ code](../../docs/why-data-not-code.md)**.
 ## Run it yourself (offline, no API key)
 
 ```bash
-MERMAID_RENDERER=:canned yaah run examples/arch-drift/arch-drift.local.json
+MERMAID_RENDERER=:fixed_test_svg yaah run examples/arch-drift/arch-drift.local.json
 ```
 
 It runs the line on a fake model, stops at the human gate, and tells you the

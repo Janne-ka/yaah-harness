@@ -28,6 +28,11 @@ from typing import Any, Optional
 
 from .core import Envelope
 
+# Scheme prefix for local callable targets, e.g. "fn:module:func".
+# Used wherever a target string is sliced after the prefix — centralised so
+# a typo here fails a single import rather than silently slicing wrong.
+FN_PREFIX = "fn:"
+
 
 async def call_target(target: str, args: Any, *, comms: Any = None,
                       timeout: Optional[float] = None, reply_to: Optional[Envelope] = None) -> Any:

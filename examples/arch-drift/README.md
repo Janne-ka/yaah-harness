@@ -63,7 +63,7 @@ snapshot → read-svg → extract → render-svg → diff
   parse-by-default (ADR-0004), so `mermaid` and `notes` land on the payload
   directly — no separate parse stage.
 - **render-svg** — `transforms.render_mermaid` shells out to `mmdc`
-  (mermaid-cli). When `MERMAID_RENDERER=:canned` is set in the environment,
+  (mermaid-cli). When `MERMAID_RENDERER=:fixed_test_svg` is set in the environment,
   returns a pre-baked SVG — used by the local/fake config so the example
   runs offline without npm.
 - **diff** — normalized SVG comparison (strips run-unique ids, collapses
@@ -88,7 +88,7 @@ needed). Not installed? `python3 -m yaah.runtime <config>` is the equivalent of
 `yaah run <config>`; from a source checkout prefix `PYTHONPATH=src`.
 
 ```bash
-MERMAID_RENDERER=:canned yaah run examples/arch-drift/arch-drift.local.json
+MERMAID_RENDERER=:fixed_test_svg yaah run examples/arch-drift/arch-drift.local.json
 ```
 
 The fake provider scripts a canned mermaid response and the canned renderer
@@ -132,7 +132,7 @@ the first time we ran this end-to-end. Address them once and you're set.
 
 | Need | Why |
 |---|---|
-| `mmdc` on PATH | `npm install -g @mermaid-js/mermaid-cli` (may need sudo depending on your npm prefix). The `MERMAID_RENDERER=:canned` override is **test-only** — it returns a fixed pre-baked SVG that doesn't vary by input, so real artifacts need the real renderer. |
+| `mmdc` on PATH | `npm install -g @mermaid-js/mermaid-cli` (may need sudo depending on your npm prefix). The `MERMAID_RENDERER=:fixed_test_svg` override is **test-only** — it returns a fixed pre-baked SVG that doesn't vary by input, so real artifacts need the real renderer. |
 | `claude` on PATH | yaah's `claude_cli` backend shells out to it. Comes with Claude Code; check with `which claude`. |
 | `extract_json` (already in `transforms.py`) | Real sonnet/haiku wrap JSON in markdown fences; strict `json.loads` fails. Only opus is reliably strict. The example uses `yaah.jsonio.extract_json` (fence/prose-tolerant) — copy that pattern in your own transforms. |
 | `by_model: null` in real config (already there) | yaah's `_extends` is a deep merge per RFC 7396 JSON Merge Patch — child `null` deletes a key from the base. `arch-drift.real.json` extends `.local.json` and explicitly nulls the `by_model` field so the `claude_cli` backend doesn't get the fake's `by_model` map. See [docs/root-config-reference.md](../../docs/root-config-reference.md). |
@@ -246,7 +246,7 @@ keys and computes approximate $ from a `prices` map on the prepare stage
 Run it offline:
 
 ```bash
-MERMAID_RENDERER=:canned yaah run examples/arch-drift/arch-drift-ab.local.json
+MERMAID_RENDERER=:fixed_test_svg yaah run examples/arch-drift/arch-drift-ab.local.json
 ```
 
 The fake provider scripts two distinct mermaid responses (visible

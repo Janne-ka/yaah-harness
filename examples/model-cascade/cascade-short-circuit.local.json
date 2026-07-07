@@ -1,0 +1,15 @@
+{
+  "_doc": "Offline demo — the SHORT-CIRCUIT path. The cheap model (haiku) answers the simple line confidently with an empty `help`, so the engine does NOT ladder — the expensive model is never called (its script entry is left untouched, present only to prove it isn't consumed). Same pipeline; the input and the cheap script differ from cascade-escalate.local.json.",
+  "transport": {"type": "inproc"},
+  "providers": {"claude": {"type": "fake_scripted", "by_model": {
+    "claude-haiku-4-5": ["{\"answer\": \"4.50\", \"help\": \"\"}"],
+    "claude-opus-4-6":  ["UNUSED — if you see 4.50 in the output and no 'escalating' line, the expensive model was never called"]
+  }}},
+  "default_provider": "claude",
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "memory"},
+  "pipeline": "cascade-pipeline.json",
+  "input": "fixtures/simple-line.json",
+  "run": true
+}

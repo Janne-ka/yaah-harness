@@ -1,0 +1,5 @@
+{
+  "_doc": "The PASS path: a valid (untrimmed) input clears the guard, gets normalized (whitespace stripped), and reaches the summarize agent — the one run where a model call actually happens. Same pipeline, one overlay key (`input`) different from preflight.local.json.",
+  "_extends": "preflight.local.json",
+  "input": "fixtures/valid.json"
+}

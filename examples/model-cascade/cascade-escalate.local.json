@@ -1,0 +1,15 @@
+{
+  "_doc": "Offline demo — the ESCALATION path. The cheap model (haiku) is scripted to reply with a truthy `help` on the ambiguous line, so the engine ladders ONCE to the expensive model (opus), which is scripted with the correct answer. Prove the ladder fired via the trace (escalation is published to the events topic, NOT stderr): run with the file trace sink and check `yaah trace --counts` for the opus `(ladder)` row — see this example's README. The final answer (47.90) comes from opus. Deterministic, no API key.",
+  "transport": {"type": "inproc"},
+  "providers": {"claude": {"type": "fake_scripted", "by_model": {
+    "claude-haiku-4-5": ["{\"answer\": \"\", \"help\": \"ambiguous 47,90 — comma could be decimal or thousands separator; unsure of currency\"}"],
+    "claude-opus-4-6":  ["{\"answer\": \"47.90\", \"help\": \"\"}"]
+  }}},
+  "default_provider": "claude",
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "memory"},
+  "pipeline": "cascade-pipeline.json",
+  "input": "fixtures/messy-line.json",
+  "run": true
+}

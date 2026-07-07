@@ -1,5 +1,5 @@
 {
-  "_doc": "Offline / fake config for the arch-drift example. Runs end-to-end with no API key and no mmdc install. The provider NAMED `claude` is wired here to a fake_scripted backend, so the pipeline's `model: \"claude:claude-sonnet-4-6\"` resolves to a canned reply. The mermaid renderer returns a canned SVG when MERMAID_RENDERER=:canned (see README). For the real-model run, use arch-drift.real.json.",
+  "_doc": "Offline / fake config for the arch-drift example. Runs end-to-end with no API key and no mmdc install. The provider NAMED `claude` is wired here to a fake_scripted backend, so the pipeline's `model: \"claude:claude-sonnet-4-6\"` resolves to a canned reply. The mermaid renderer returns a canned SVG when MERMAID_RENDERER=:fixed_test_svg (see README). For the real-model run, use arch-drift.real.json.",
   "transport": {"type": "inproc"},
   "providers": {
     "claude": {

@@ -1,0 +1,1 @@
+{"title": "Release notes", "text": "This body is deliberately longer than the 280-character limit configured on the guard so that the preflight stage rejects it BEFORE any model call is made. Padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding padding."}
