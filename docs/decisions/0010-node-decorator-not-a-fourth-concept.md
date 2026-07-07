@@ -1,6 +1,9 @@
 # 0010 — The node decorator: name the wrapper pattern, don't grow a `wrap:` key
 
-**Status:** Proposed — design-only. The maintainer decides; do NOT read this as Accepted.
+**Status:** Accepted — 2026-07-07 (maintainer). Option A: the pattern is named "Node
+decorator" with the transparency invariant; no `wrap:` key (`wrap:` stays in the deferred
+ledger with its trigger). The `agent_contract`/`attach:` fix this ADR recommended is
+SHIPPED on the same branch (see the FIXED note below).
 **Date:** 2026-07-07
 **Answers:** the parked `.notes/todos.md` item "Wrapper-as-fourth-concept ADR — form-plan
 eval finding. `OnceNode + CarriageBoundaryNode + AttachingAgent` is an unnamed pattern.
@@ -70,6 +73,14 @@ payload keys). For `AttachingAgent` it is a **latent soundness gap**:
   ERROR** (`validate` fail-loud) even though the attacher supplies `usage` at runtime. **No
   such config exists in the repo** — so this is latent, not a live bug.
 
+> **FIXED 2026-07-07** (same branch, on this ADR's recommendation): `agent_contract` now
+> reads `attach` — a non-empty attach list drops `closed` (attacher keys are fn: code,
+> unenumerable statically). A/B-verified: `parse:false` + `attach:` + `render "{{usage}}"`
+> no longer hard-errors at validate, while `--strict` still advises
+> `[lint: render-key-unprovided]` with the declare-it remedy. Without `attach:` the honest
+> hard error is unchanged. Tests: `test_node_contract.py` (attach ×3, incl. empty-list
+> keeps closed).
+
 This is exactly the false-positive class ADR-0006 worked to design out for custom nodes,
 re-opened by a wrapper that changes the payload behind `describe()`'s back. It is the single
 strongest technical argument in this whole decision — and, verified, it has **no present
@@ -110,7 +121,7 @@ subpipeline node, added and retired in 24h, is the standing precedent).
 
 ### The two options, pinned concretely
 
-**Option A (recommended) — today's shape, named and governed.** No config change.
+**Option A (ACCEPTED) — today's shape, named and governed.** No config change.
 
 ```json
 "role:commit": {"type": "shell", "command": "git commit …", "idempotent": true},
@@ -195,13 +206,17 @@ constructor signature; the Python duck-typed `Node` is sufficient. No base class
 - The `AttachingAgent` payload-contract gap is on the record with a bounded, direct fix,
   instead of lurking as an undocumented latent false-positive.
 
-**What this commits us to (if A is accepted)**
+**What this commits us to (A accepted 2026-07-07 — every commitment discharged same day)**
 - A one-paragraph "Node decorator" section in `AGENTS.md` / the engine map, stating the
   transparency invariant and listing the three decorators + their triggers.
+  **DONE 2026-07-07** — AGENTS.md "Editing the engine — invariants", convention tier.
 - Either fix `agent_contract` to read `attach` (preferred — makes the invariant true), or
   document the parse=false+attach+render caveat where `attach:` is described. **This ADR
   recommends the fix**; it is small and removes a real (if latent) unsoundness.
-- A deferred-ledger row (`.notes/deferred-ledger-2026-07-07.md`, section A):
+  **DONE 2026-07-07** — shipped on this branch; see the FIXED note in the violation
+  section above. The invariant now holds with no known violations.
+- A deferred-ledger row (`.notes/deferred-ledger-2026-07-07.md`).
+  **DONE 2026-07-07** — the row lives in the ledger's §A2 with this trigger:
 
   | Deferred | Use case it would serve | Why deferred / trigger |
   |---|---|---|
@@ -226,4 +241,4 @@ constructor signature; the Python duck-typed `Node` is sufficient. No base class
   `AttachingAgent` gap re-opens.
 - `src/yaah/build/builders.py` (`_build_agent`, `_wrap_node`) — where all three decorators are
   wired; the build-order and trigger facts above come from here.
-- `.notes/deferred-ledger-2026-07-07.md` — where the `wrap:` trigger row lands if A is accepted.
+- `.notes/deferred-ledger-2026-07-07.md` — holds the `wrap:` trigger row (§A2, added 2026-07-07).

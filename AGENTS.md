@@ -140,6 +140,17 @@ which is which.
   agent its own critic's output. Counterfactual critics cold-read,
   never see the author's reasoning. **Not runtime-checked** — author
   discipline + the pre-submission rubric's "agent isolation" item.
+- **Node decorators are transparent** (ADR-0010). The engine has one
+  wrapper pattern — a Node holding an inner Node, delegating and adding
+  one behavior: `AttachingAgent` (the `attach:` key — merges post-invoke
+  data like token usage), `OnceNode` (at-most-once), `CarriageBoundaryNode`
+  (engine-injected trace boundary). The invariant: a decorator must not
+  change what its inner node provides/consumes *invisibly* — if it adds
+  payload keys, the contract layer must know (`agent_contract` reads
+  `attach` and drops the `closed` claim). New wrapper = a new class
+  following the same shape, NOT a new config grammar; a generic `wrap:`
+  key is deliberately not built (no stakeholder — deferred with a
+  trigger). Convention + `node_contract.py` tests.
 - **Minimal first.** In-memory before durable, in-process before
   distributed; no premature abstraction. Delete an unused capability
   the day you notice it. Cultural rule; review catches deviations.

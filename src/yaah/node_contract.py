@@ -135,9 +135,12 @@ def meet(a: Flow, b: Flow) -> Flow:
 
 def agent_contract(cfg: Dict[str, Any]) -> Contract:
     carry, cwd = _carry(cfg), _cwd(cfg)
+    # ADR-0010: attachers merge post-invoke keys onto the output payload (unenumerable
+    # here — they're fn: code), so an attach-bearing agent is never runtime-provable.
+    attached = bool(cfg.get("attach"))
     if cfg.get("parse", True) is False:
-        # parse:false → exactly {raw} (+carry +cwd). Provable → closed.
-        return reset({"raw"} | carry | cwd, closed=True)
+        # parse:false → exactly {raw} (+carry +cwd). Provable → closed, unless attached.
+        return reset({"raw"} | carry | cwd, closed=not attached)
     schema = cfg.get("output_schema")
     declared = _as_key_set(cfg.get("provides"))
     if isinstance(schema, dict) or declared:

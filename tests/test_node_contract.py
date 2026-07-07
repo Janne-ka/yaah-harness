@@ -27,6 +27,26 @@ def agent_parse_false_forwards_carry_and_cwd() -> None:
     assert c.provides == frozenset({"raw", "task", "workdir"}), c
     assert c.closed, c
 
+def agent_parse_false_with_attach_is_not_closed() -> None:
+    # ADR-0010's one invariant violation: an attacher merges post-invoke keys (e.g. `usage`)
+    # onto the output payload, so an attach-bearing agent's key set is NOT runtime-provable.
+    # Pre-fix this was closed=True → a `render "{{usage}}"` downstream would hard-ERROR even
+    # though the attacher supplies `usage` at runtime (the latent false-positive).
+    c = agent_contract({"parse": False, "attach": ["fn:transforms:UsageAttacher"]})
+    assert not c.closed, c
+    assert c.complete, c                                  # {raw}+carry are still guaranteed
+    assert c.provides == frozenset({"raw"}), c            # attacher keys stay unenumerated
+
+def agent_attach_empty_list_keeps_closed() -> None:
+    # an EMPTY attach list attaches nothing — the provable-exact claim must survive.
+    c = agent_contract({"parse": False, "attach": []})
+    assert c.closed, c
+
+def agent_parse_true_with_attach_stays_never_closed() -> None:
+    c = agent_contract({"output_schema": {"properties": {"verdict": {}}},
+                        "attach": ["fn:transforms:UsageAttacher"]})
+    assert c.complete and not c.closed, c
+
 def agent_parse_true_no_schema_is_incomplete() -> None:
     c = agent_contract({"type": "agent"})       # parse defaults True
     assert c.mode == "reset" and c.provides == frozenset({"raw"}), c
