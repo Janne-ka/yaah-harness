@@ -370,7 +370,7 @@ _STAGE_KEYS = frozenset({
     "node", "id", "validators", "max_attempts", "error_retries", "feedback",
     "escalate", "then", "fanout", "min_success", "fork", "branch", "fanin",
     "foreach", "wait", "clears", "concerns_from", "concerns_into", "clearable",
-    "on_error", "note",
+    "on_error", "effects_from", "note",
 })
 
 # the keys a `foreach` block may carry (ADR-0007) — a typo'd `max_parallel`
@@ -415,6 +415,46 @@ def _check_on_error(stage: str, oe: Any, errs: List[str]) -> None:
         return
     errs.append("stage {!r}: on_error must be \"clear\", null, or "
                 "{{\"compensate\": target}}, got {!r}".format(stage, oe))
+
+
+def _check_rollback(role: str, rb: Any, errs: List[str]) -> None:
+    """Hard-check the node-level `rollback` capability block (ADR-0008 D1): the
+    author-declared undo the `yaah rollback` verb walks in reverse. Shape:
+    {"target": <fn:/http: call_target>, "cost"?: "cheap"|"costly"}. Mirrors
+    _check_on_error's per-key rejection so a typo can't silently disable the undo
+    (a rollback the author believes is configured must not be a no-op).
+
+    `target` is restricted to fn:/http: in v1: the verb runs OUTSIDE a harness (a
+    CLI reading the trace file), which is comms-free, and a `node:` target
+    hard-requires comms (external_call raises without it). A node: target is
+    REJECTED here rather than left to validate, record, list in the menu, and die
+    at --execute (design-eval #3)."""
+    if not isinstance(rb, dict):
+        errs.append("node {!r}: rollback must be an object {{target, cost?}}, "
+                    "got {!r}".format(role, rb))
+        return
+    target = rb.get("target")
+    if not (isinstance(target, str) and target):
+        errs.append("node {!r}: rollback needs a non-empty `target` call_target "
+                    "string (fn:/http:)".format(role))
+    elif target.startswith("node:"):
+        errs.append("node {!r}: rollback target {!r} is a node: target, but the "
+                    "rollback verb runs OUTSIDE a harness (a CLI reading the trace) "
+                    "with no comms, and a node: target requires comms — use an "
+                    "fn:/http: target".format(role, target))
+    elif not (target.startswith("fn:") or target.startswith("http:")):
+        errs.append("node {!r}: rollback target {!r} must be an fn:/http: "
+                    "call_target".format(role, target))
+    cost = rb.get("cost", "cheap")
+    if cost not in ("cheap", "costly"):
+        errs.append("node {!r}: rollback.cost must be \"cheap\" or \"costly\", "
+                    "got {!r}".format(role, cost))
+    unknown = sorted(k for k in rb
+                     if k not in ("target", "cost", "note")
+                     and not k.startswith("_"))  # note/_* = config comments
+    if unknown:
+        errs.append("node {!r}: unknown rollback key(s) {}; known: target, "
+                    "cost".format(role, unknown))
 
 
 def _successor_edges(stages: Dict[str, Any]) -> Dict[str, set]:
@@ -549,6 +589,12 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
                 errs.append("node {!r}: escalate_model needs parse (the `help` "
                             "trigger is a parsed key) — remove `parse: false` or "
                             "drop escalate_model".format(role))
+        # ADR-0008 D1: the node-level `rollback` capability block (the author's
+        # per-node undo the `yaah rollback` verb runs). Absent = the node is
+        # honestly-unknown/irreversible; present = shape-checked here.
+        rb = n.get("rollback")
+        if rb is not None:
+            _check_rollback(role, rb, errs)
     for k in g:
         if k not in _GRAPH_KEYS and not k.startswith("_"):
             errs.append("graph: unknown key {!r}{}; known: {}".format(
@@ -663,6 +709,23 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
         ci = s.get("concerns_into")
         if ci is not None and not (isinstance(ci, str) and ci):
             errs.append("stage {!r}: concerns_into must be a non-empty payload-key string".format(name))
+        # ADR-0008 D2: effects_from names the payload key whose value the harness
+        # copies onto the completion span (the effect HANDLE the rollback verb
+        # reads). REJECTED on a fork/fanin stage: the fork PARENT's completion span
+        # is emitted on a separate no-output path, so the copy would silently
+        # record nothing (design-eval #6) — forbidden loudly instead. Linear,
+        # branch-child, and foreach stages all complete through the shared seam.
+        ef = s.get("effects_from")
+        if ef is not None:
+            if not (isinstance(ef, str) and ef):
+                errs.append("stage {!r}: effects_from must be a non-empty payload-key "
+                            "string (the effect handle the rollback verb reads)".format(name))
+            elif s.get("fork") or s.get("fanin"):
+                errs.append("stage {!r}: effects_from is not allowed on a fork/fanin "
+                            "stage — the fork parent's completion span is emitted on a "
+                            "separate no-output path, so the effect descriptor would "
+                            "silently record nothing; put effects_from on the stage "
+                            "that actually produces the effect".format(name))
         ms = s.get("min_success")
         if ms is not None:
             fo = s.get("fanout")
@@ -760,6 +823,7 @@ def lint_pipeline(config: Dict[str, Any], base_path: Optional[str] = None,
     sticky = g.get("sticky") or []
     _lint_weak_output_schema(nodes, warnings)
     _lint_gate_ignores_rejection(nodes, stages, warnings)
+    _lint_rollback_without_effects(nodes, stages, warnings)
     _lint_untrusted_unfenced(nodes, stages, base_path, warnings)
     # ADR-0005 slice B: the broad requires↔provides graph analysis (absorbs the 1a
     # single-hop render/branch checks as the 1-length-path case). Lives in its own module
@@ -858,6 +922,32 @@ def _lint_gate_ignores_rejection(nodes: Dict[str, Any], stages: Dict[str, Any],
                 "\"routes\": {{...}}}}` on this gate (or confirm a transform consumes the "
                 "decision). [lint: gate-decision-ignored]".format(
                     name, node.get("form"), outcomes))
+
+
+def _lint_rollback_without_effects(nodes: Dict[str, Any], stages: Dict[str, Any],
+                                   warnings: List[str]) -> None:
+    """Rule `rollback-without-effects` (ADR-0008 D2). A node declares `rollback`
+    but no stage running it declares `effects_from` — the undo target will receive
+    no effect HANDLE (effects=None). Legal (some undos key off the correlation id
+    alone), hence a WARNING not an error: the author should choose it knowingly,
+    not arrive at it by omission. A node with at least one stage carrying
+    effects_from is satisfied; a rollback node never wired into a stage is a
+    different (out-of-scope) smell and is not flagged here."""
+    nodes_with_effects = {s.get("node") for s in stages.values()
+                          if s.get("effects_from") and s.get("node")}
+    for role, node in nodes.items():
+        if role.startswith("_") or not isinstance(node, dict):
+            continue
+        if not isinstance(node.get("rollback"), dict):
+            continue
+        wired = any(s.get("node") == role for s in stages.values())
+        if wired and role not in nodes_with_effects:
+            warnings.append(
+                "node {!r} declares `rollback` but no stage running it declares "
+                "`effects_from` — the undo target will receive no effect handle "
+                "(effects=None). Legal if the undo keys off the correlation id "
+                "alone; otherwise add `effects_from: \"<key>\"` to the stage that "
+                "produces the effect. [lint: rollback-without-effects]".format(role))
 
 
 # Fence-aware placeholder for the untrusted-unfenced lint (M12). The `\w+` KEY group matches
@@ -1082,6 +1172,51 @@ def is_fork_config(stage_config: Dict[str, Any], stage_names: set) -> bool:
 # can never drift — they were hand-copied before, with a "kept in step" comment
 # doing the synchronization.
 
+def check_rollback_trace_sink(root: Dict[str, Any],
+                              pipeline_nodes: Dict[str, Any]) -> List[str]:
+    """ADR-0008 D2 cross-file ERROR: a pipeline in which ANY node declares
+    `rollback` MUST have a persisted JSONL trace sink ({"type": "file"} in
+    trace.sinks — FileTraceSink). The trace record IS the rollback input (the
+    recorded `effects` handle the undo reads), so a rollback declared without a
+    file sink can never run — progress_file/stats_file write human tails/aggregate
+    snapshots and cannot feed the tool, and console/envelope/none persist no file.
+
+    ONE shared helper, called from BOTH the author-time surface (`validate_config`)
+    AND the runtime assembly (`runtime._assemble_harness`), because the check needs
+    root+pipeline in scope and `validate_config` does NOT run on `yaah run` — so a
+    "checked at load" that only lived in validate_config would be a lie
+    (design-eval #2). Returns the error list (empty when satisfied or when no node
+    declares rollback); the caller raises."""
+    declaring = sorted(role for role, n in (pipeline_nodes or {}).items()
+                       if isinstance(n, dict) and isinstance(n.get("rollback"), dict))
+    if not declaring:
+        return []
+    tr = root.get("trace") or {}
+    # A declared file sink only PERSISTS under mode "tracer": _build_tracer
+    # short-circuits on "none" (NullTracer) and "envelope" (spans ride envelope
+    # headers) BEFORE the sink-subscribe loop, so under those modes a file sink
+    # in config is dead weight — checking sink DECLARATION alone false-passed
+    # `mode: "none"` + file sink (adversarial-eval RED, 2026-07-07).
+    mode = tr.get("mode", "tracer")
+    if mode != "tracer":
+        return ["node(s) {} declare `rollback` but trace.mode is {!r} — sinks are "
+                "only wired under mode \"tracer\", so no trace file is persisted, "
+                "and the trace record IS the rollback input. Set trace.mode to "
+                "\"tracer\" with a {{\"type\": \"file\"}} sink.".format(declaring, mode)]
+    sinks = tr.get("sinks")
+    # the factory accepts a single sink dict or a list — check both shapes
+    sink_list = sinks if isinstance(sinks, list) else (
+        [sinks] if isinstance(sinks, dict) else [])
+    has_file = any(isinstance(s, dict) and s.get("type") == "file" for s in sink_list)
+    if has_file:
+        return []
+    return ["node(s) {} declare `rollback` but the root config has no persisted "
+            "JSONL trace sink ({{\"type\": \"file\"}} in trace.sinks) — the trace "
+            "record IS the rollback input (the recorded `effects` handle the undo "
+            "reads), so a declared rollback can never run without it. Add a file "
+            "sink to trace.sinks.".format(declaring)]
+
+
 def validate_config(root: Dict[str, Any], base_path: str,
                     resolve: Optional[Callable[[Any], Optional[List[str]]]] = None) -> List[str]:
     """Validate a loaded root AND the pipeline it references — the full check
@@ -1105,6 +1240,12 @@ def validate_config(root: Dict[str, Any], base_path: str,
     else:
         return []   # no pipeline to check; root validation already vouched for the shape
     validate_pipeline(pipeline_cfg, base_path=base_path)
+    # ADR-0008 D2 cross-file ERROR (root + pipeline in scope): rollback needs a
+    # persisted file trace sink. Also enforced in runtime._assemble_harness so
+    # `yaah run` (which never calls validate_config) refuses too.
+    rb_errs = check_rollback_trace_sink(root, pipeline_cfg.get("nodes") or {})
+    if rb_errs:
+        raise ValueError("invalid config:\n  - " + "\n  - ".join(rb_errs))
     return lint_pipeline(pipeline_cfg, base_path=base_path, resolve=resolve)
 
 

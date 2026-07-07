@@ -59,6 +59,13 @@ Run & inspect:
   baton-schema <root> <id>      print the JSON Schema of decision.json for one parked baton
   clear <root>                  graceful reset: broadcast clear + flush parked + drop batons
   explain <root>                print the EFFECTIVE config (post-_extends/_fake + defaults)
+  rollback <root> [ID]          walk a completed run's declared undo targets (ADR-0008).
+                                no ID lists runs with candidates; with ID prints the undo
+                                MENU (dry run, calls nothing; --json for machines). Add
+                                --execute to run the undos in reverse completion order:
+                                  [--include-costly] run undos the author marked costly
+                                  [--only STAGE]...   restrict to named stage(s) (repeatable)
+                                  [--accept-partial]  continue past a failed undo (else stop)
 
 Debug:
   trace <trace.jsonl> [PRICES]  summarize a run's trace (cost / latency / retries / model mix)
@@ -370,6 +377,57 @@ def _parse_baton_schema(rest: list) -> dict:
             "fake": False, "debug": False}
 
 
+def _parse_rollback(rest: list) -> dict:
+    """`rollback <root> [<corr>] [--json] [--execute --include-costly
+    --only S ... --accept-partial]` — read a run's trace and either SHOW the undo
+    menu (default, a pure dry run) or --EXECUTE the declared undo targets in
+    reverse completion order (ADR-0008). Menu/list default; `--execute` needs a
+    corr; the execute-only flags are rejected without it; `--json` machine-formats
+    whichever output (menu / run-list / report). `--only` is repeatable."""
+    rest = list(rest)
+    only: list = []
+    while "--only" in rest:
+        i = rest.index("--only")
+        if i + 1 >= len(rest) or rest[i + 1].startswith("-"):
+            _usage_exit("--only needs a stage name (yaah rollback <root> <corr> "
+                        "--execute --only STAGE)")
+        only.append(rest[i + 1])
+        del rest[i:i + 2]
+    debug = "--debug" in rest
+    if debug:
+        rest.remove("--debug")
+    execute = "--execute" in rest
+    if execute:
+        rest.remove("--execute")
+    include_costly = "--include-costly" in rest
+    if include_costly:
+        rest.remove("--include-costly")
+    accept_partial = "--accept-partial" in rest
+    if accept_partial:
+        rest.remove("--accept-partial")
+    as_json = "--json" in rest
+    if as_json:
+        rest.remove("--json")
+    unknown = [a for a in rest if a.startswith("-")]
+    if unknown:
+        _usage_exit("rollback: unknown flag(s) {}".format(", ".join(unknown)))
+    pos = [a for a in rest if not a.startswith("-")]
+    if not pos:
+        _usage_exit("rollback needs a root config")
+    if len(pos) > 2:
+        _usage_exit("rollback takes a root config and an optional correlation id")
+    corr = pos[1] if len(pos) == 2 else None
+    if execute and corr is None:
+        _usage_exit("rollback --execute needs a correlation id "
+                    "(yaah rollback <root> <corr> --execute)")
+    if not execute and (include_costly or accept_partial or only):
+        _usage_exit("rollback: --include-costly / --only / --accept-partial only "
+                    "apply with --execute")
+    return {"action": "rollback", "root": pos[0], "corr": corr, "json": as_json,
+            "execute": execute, "include_costly": include_costly, "only": only,
+            "accept_partial": accept_partial, "fake": False, "debug": debug}
+
+
 # Registry of verb -> parser. The dict is the single source of truth for the
 # CLI surface — adding a verb is one entry here + the matching dispatcher.
 _VERB_PARSERS: Dict[str, Callable[[list], dict]] = {
@@ -388,6 +446,7 @@ _VERB_PARSERS: Dict[str, Callable[[list], dict]] = {
     "doctor":        _parse_doctor,
     "completion":    _parse_completion,
     "baton-schema":  _parse_baton_schema,
+    "rollback":      _parse_rollback,
 }
 
 # Tuple form kept for the test in test_shell_completion.py (asserts no drift between
@@ -660,8 +719,45 @@ def _dispatch_scaffold(spec: Dict[str, Any]) -> None:
     print("Then:  open the prompts/ dir and edit; see docs/tutorial.md and docs/archetypes.md")
 
 
+def _dispatch_rollback(spec: Dict[str, Any]) -> None:
+    """`yaah rollback` — read the run's trace + the pipeline's rollback
+    declarations and either print the undo MENU (default / no corr = list runs)
+    or --EXECUTE the undo targets. Self-contained (loads its own root) and does
+    NOT run `validate_root`: rollback is a read/undo tool the operator may need
+    precisely when a run left a config in a rejected state; requiring full
+    validation would block the cleanup. `base` goes on `sys.path` so `fn:` undo
+    targets resolve relative to the config dir (same rule as a running pipeline)."""
+    from . import rollback as rb
+    root = _read_json(spec["root"])
+    base = os.path.dirname(os.path.abspath(spec["root"]))
+    if base not in sys.path:
+        sys.path.insert(0, base)
+    nodes, stages = rb.load_pipeline(root, base)
+    records = rb.read_trace(root, base)
+    corr = spec.get("corr")
+    if spec["execute"]:
+        # the parser rejects --execute without a corr; narrow for the type checker
+        assert isinstance(corr, str) and corr
+        report = asyncio.run(rb.execute(
+            records, stages, nodes, corr,
+            include_costly=spec["include_costly"], only=spec["only"],
+            accept_partial=spec["accept_partial"]))
+        print(json.dumps(report, indent=2) if spec["json"]
+              else rb.render_report(report), end="" if not spec["json"] else "\n")
+        return
+    if corr is None:
+        runs = rb.list_runs(records, stages, nodes)
+        print(json.dumps({"runs": runs}, indent=2) if spec["json"]
+              else rb.render_list(runs), end="" if not spec["json"] else "\n")
+        return
+    menu = rb.build_menu(records, stages, nodes, corr)
+    print(json.dumps(menu, indent=2) if spec["json"]
+          else rb.render_menu(menu), end="" if not spec["json"] else "\n")
+
+
 _SELF_CONTAINED_DISPATCH: Dict[str, Callable[[Dict[str, Any]], None]] = {
     "ab":            _dispatch_ab,
+    "rollback":      _dispatch_rollback,
     "lint-overlay":  _dispatch_lint_overlay,
     "doctor":        _dispatch_doctor,
     "completion":    _dispatch_completion,

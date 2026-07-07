@@ -1,6 +1,6 @@
 # 0007 — `foreach`: dynamic per-item fan-out (bounded map over a runtime list)
 
-**Status:** Proposed (design; implementation to follow in this branch)
+**Status:** Accepted — SHIPPED 2026-07-06/07
 **Date:** 2026-07-06
 
 ## Context

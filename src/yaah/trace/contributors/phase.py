@@ -32,9 +32,12 @@ class PhaseContributor(TraceContributor):
         # these carry payload KEYS only (or an identity), never decision VALUES.
         # These must reach the projected record, not just sit in span.attrs — else
         # the lines are dead in real runs (the sink only sees the record, never the
-        # raw span).
+        # raw span). The `effects`/`effects_truncated`/`effects_head` trio is the
+        # ADR-0008 rollback handle: the author-chosen effect descriptor (bounded)
+        # the `yaah rollback` verb reads back from the persisted record.
         for k in ("stage", "awaiting", "artifact", "ladder_from", "ladder_trigger",
-                  "resumed", "decision_keys", "approver", "decision_diff"):
+                  "resumed", "decision_keys", "approver", "decision_diff",
+                  "effects", "effects_truncated", "effects_head"):
             if k in span.attrs:
                 out[k] = span.attrs[k]
         return out

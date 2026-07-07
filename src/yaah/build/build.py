@@ -53,6 +53,7 @@ def build_graph(g: Dict[str, Any]) -> Graph:
             clears=[s["clears"]] if isinstance(s.get("clears"), str) else s.get("clears"),
             concerns_from=s.get("concerns_from"),  # payload key -> baton.concerns on pass
             concerns_into=s.get("concerns_into"),  # baton.concerns -> payload key pre-run
+            effects_from=s.get("effects_from"),  # ADR-0008 D2: payload key -> completion-span `effects` (rollback handle)
             clearable=bool(s.get("clearable", True)),   # all nodes clearable by default
             on_error=s.get("on_error", "clear"),         # every node error-clears (default), override to compensate/None
         )

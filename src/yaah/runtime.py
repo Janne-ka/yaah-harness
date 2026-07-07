@@ -136,6 +136,13 @@ async def _assemble_harness(root: Dict[str, Any], base: str, *, store: Any) -> A
     # one place the deployment root (transport ceiling) and the pipeline
     # (per-node timeouts, fork waits) meet, so the admission check lives here.
     validate_budgets(root, pipeline)
+    # ADR-0008 D2: refuse to RUN a rollback-declaring pipeline without a persisted
+    # file trace sink — the record is the rollback input, so `yaah run` must fail
+    # BEFORE any effect is committed that it could never record (validate_config,
+    # the author-time surface, never runs on `yaah run`).
+    rb_errs = check_rollback_trace_sink(root, pipeline.get("nodes") or {})
+    if rb_errs:
+        raise ValueError("invalid config:\n  - " + "\n  - ".join(rb_errs))
     # live-vars mechanism (a): `live_config: true` makes every node re-read its
     # MUTABLE leaves (model/knobs/numeric bounds — validate.MUTABLE_LEAF_KEYS
     # line) from the pipeline file per invocation, mtime-cached. Opt-in;
@@ -330,7 +337,12 @@ async def clear_state(root: Dict[str, Any], base: str) -> Any:
 # importers (notably tests). The keys-spec, shape table, enum tables, and
 # documented surface are all in that one module — the AI skill's ground truth.
 from .plugins import load_plugins  # noqa: E402
-from .validate import _DEFAULTS, validate_budgets, validate_root  # noqa: E402  (re-export)
+from .validate import (  # noqa: E402  (re-export)
+    _DEFAULTS,
+    check_rollback_trace_sink,
+    validate_budgets,
+    validate_root,
+)
 _validate_root = validate_root        # back-compat alias for older test imports
 
 

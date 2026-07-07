@@ -17,11 +17,51 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Callable, Dict, Iterable, Optional
 
 from ..core import Envelope
 from ..trace import Span
+
+# effects_from bound (ADR-0008 D2). The effect descriptor is the FIRST payload
+# VALUE ever written to a trace record — concerns only recorded a COUNT, so there
+# is no bounding precedent to copy; the bound is defined here from scratch.
+_EFFECTS_MAX = 2048   # max JSON-serialized length stored verbatim
+_EFFECTS_HEAD = 256   # plain-string head kept when the descriptor is dropped
+
+# sentinel: distinguishes "no effects_from configured" (emit nothing) from an
+# effects_from whose value is genuinely None (record effects: null).
+_NO_EFFECTS = object()
+
+
+def _effects_attrs(value: Any) -> Dict[str, Any]:
+    """Shape the author-chosen effect descriptor into completion-span attrs
+    (ADR-0008 D2). JSON-serialize to MEASURE; a descriptor whose serialization
+    exceeds _EFFECTS_MAX is NOT stored — a mid-string JSON clip is unparseable
+    garbage a consumer would choke on — the record instead carries
+    `effects: null` + `effects_truncated: true` + `effects_head` (a plain-string
+    diagnostic head, never presented as parseable JSON). A NON-serializable
+    descriptor is treated as oversize (never raises); its head is `str(value)`.
+
+    The stored descriptor is the JSON ROUND-TRIP, not the live payload object:
+    the descriptor is COPIED (not popped) off the payload, so a downstream stage
+    mutating it in place must not be able to corrupt the already-emitted record
+    through a shared reference (a lazily-serializing sink would see the mutation).
+
+    Known limit: for a bare NUMBER descriptor whose serialization exceeds the
+    bound (a >2048-digit literal), the head is digits — which happens to parse
+    as JSON. Effect handles are ids/strings/objects in practice; the truncated
+    shape (effects: null + effects_truncated) still marks it unmistakably."""
+    try:
+        serialized = json.dumps(value)
+    except (TypeError, ValueError):
+        return {"effects": None, "effects_truncated": True,
+                "effects_head": str(value)[:_EFFECTS_HEAD]}
+    if len(serialized) > _EFFECTS_MAX:
+        return {"effects": None, "effects_truncated": True,
+                "effects_head": serialized[:_EFFECTS_HEAD]}
+    return {"effects": json.loads(serialized)}
 
 
 class SpanEmitter:
@@ -87,7 +127,8 @@ class SpanEmitter:
     async def stage(self, stage_name: str, input: Envelope, t0: float,
                     *, status: str, concerns: Optional[list] = None,
                     output: Optional[Envelope] = None, route: Any = None,
-                    awaiting: Optional[str] = None) -> None:
+                    awaiting: Optional[str] = None,
+                    effects: Any = _NO_EFFECTS) -> None:
         """Emit a `stage` span for a completed stage. Status reflects the stage
         outcome: 'ok' (passed), 'suspended' (parked at gate), 'cleared'
         (cancelled in-flight). Soft concerns (validators that flagged but
@@ -96,7 +137,12 @@ class SpanEmitter:
         (the shell-node contract), it is recorded too — the error-path
         contract (BUG-662): a subprocess's exit code must be observable in the
         trace even on the pass path (a shell node with `|| true`-style
-        tolerance can pass while the command failed)."""
+        tolerance can pass while the command failed).
+
+        `effects` (ADR-0008 D2): the author-chosen effect handle pulled from
+        payload[stage.effects_from] by the harness. Passed only when the stage
+        declares effects_from (the caller omits it otherwise, so a stage without
+        the key records no `effects` attr). Bounded/shaped by `_effects_attrs`."""
         attrs: Dict[str, Any] = {"stage": stage_name}
         if concerns:
             attrs["concerns"] = len(concerns)
@@ -119,6 +165,9 @@ class SpanEmitter:
         # suspend-at-a-gate UX win (Y2). Generic key, no app concept named.
         if output is not None and output.payload.get("path"):
             attrs["artifact"] = os.path.basename(output.payload["path"])
+        # Effect descriptor (ADR-0008 D2) — the rollback handle, bounded/clipped.
+        if effects is not _NO_EFFECTS:
+            attrs.update(_effects_attrs(effects))
         await self._tracer.emit(Span.timed(
             "stage", corr=input.correlation_id, parent=input.id,
             t0=t0, t1=self._clock(), status=status, attrs=attrs))

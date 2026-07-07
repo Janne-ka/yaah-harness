@@ -17,6 +17,7 @@ For how a stage *uses* a node (validators / retry / branch / fork), see
 | `config` | `NodeConfig.extras` | node-specific settings; agents also resolve prompt `{{placeholders}}` from here (payload wins). |
 | `idempotency_key`, `idempotent: true` | `OnceNode` wrapper | run the node's side effect ONCE per correlation even across retries/replays (needs root `state:`). |
 | `cwd_from` | repo-bound nodes | payload key holding the per-run worktree path (usually `"workdir"`); shell/agent/get run there. |
+| `rollback` | any node type | declares the node's undo capability: `{target, cost}`. See **Rollback** below. |
 | `note`, any `_*` key | nobody | config comments. |
 
 Unknown keys are caught by `validate_pipeline` (the silent-no-op class).
@@ -271,6 +272,133 @@ stages. Tool specs are validated at BUILD time (a missing `dispatch` fails the
 load, not turn N). Reads the task from payload `goal` (or `input`).
 Output: `answer` (the final assistant text), `turns` (the count), and
 `outcome` ∈ {`completed`, `empty_response`, `max_turns_exhausted`}.
+
+---
+
+## Rollback — declared undo capability (node key)
+
+Any node type can declare a `rollback` block naming the function or URL to call
+when an operator triggers `yaah rollback --execute` on a completed run:
+
+```json
+"push_amendment": {
+  "type": "post", "sink": "api:amendments",
+  "rollback": {"target": "fn:undo:delete_amendment", "cost": "cheap"}
+}
+```
+
+- `target` (required): `fn:module:func` or an `http(s)://` URL. **`node:` targets
+  are rejected at validate time.** The rollback tool runs outside a running harness
+  — it reads files, not Comms — so a `node:` target would fail at `--execute` rather
+  than at authoring time. Validate catches it so the author knows before it runs.
+- `cost` (optional, default `"cheap"`): `"cheap"` | `"costly"`. A hint from the
+  author, not a computed truth. `costly` candidates are skipped unless
+  `--include-costly` is passed to `yaah rollback --execute`. The menu also shows
+  which stages ran AFTER each candidate so the operator can judge ordering risk
+  independently of the label.
+- **Absent `rollback`** → the stage is listed under `impossible` in the rollback
+  report: never guessed, never silently skipped, always reported honestly.
+
+The `rollback` block is shape-checked at validate time: unknown sub-keys are
+rejected, `target` must be a non-empty `fn:` or `http:` string, `cost` must be
+`"cheap"` or `"costly"`. A top-level node-key typo (`rollbck:`) is a silent no-op
+— a pre-existing engine gap, noted in ADR-0008 but not fixed there.
+
+**Compensate-context divergence (ADR-0008 D3).** A `compensate` function (the
+`on_error: {compensate: ...}` at-failure undo) receives the FAILING stage's full
+`payload`. A rollback target receives the bounded effect descriptor recorded at
+COMPLETION: `{correlation_id, stage, node, effects, cost}`. These are deliberately
+different contracts. A compensate function is NOT drop-in reusable as a rollback
+target — reusing one silently reads absent `payload` keys. Choose deliberately.
+
+### `effects_from` — stage key (alongside `concerns_from`)
+
+`effects_from: "<payload-key>"` declares which payload key holds the **effect
+descriptor**: the small, bounded handle the undo target needs (an amendment id,
+a file path, an API-returned record id, etc.). On stage COMPLETION the harness
+copies `payload[<key>]` onto the stage's trace span as attr `effects`. That
+value is what `--execute` hands to the rollback target as `ctx["effects"]`.
+
+```json
+"write_alpha": {"node": "write_alpha", "effects_from": "effect", "then": "write_beta"}
+```
+
+Restrictions and bounds:
+- **Rejected on `fork` and `fanin` stages.** The fork parent's completion span is
+  emitted on a no-output path; the copy would silently record nothing — validate
+  rejects it loudly instead. Linear, branch-child, and `foreach` stages record fine.
+- **2048-char bound.** If the JSON-serialized descriptor exceeds 2048 chars it is
+  NOT stored as a mid-string clip (mid-string JSON is unparseable garbage). Instead:
+  `effects: null, effects_truncated: true, effects_head: "<first 256 chars, plain
+  string>"`. The rollback menu shows a loud descriptor-dropped warning; the undo
+  target receives `effects: None` and must handle it (e.g. by keying off
+  `correlation_id` alone).
+
+Lint (WARNING): a node declaring `rollback` whose stage(s) have no `effects_from`
+means the undo target will receive `effects: None`. This is legal (some undos key
+off `correlation_id` alone) but the author should confirm this intentionally rather
+than by omission.
+
+### `yaah rollback` verb
+
+```
+yaah rollback <root> [<corr-id>] [--json]
+yaah rollback <root> <corr-id> --execute [--include-costly] [--only <stage>]... [--accept-partial]
+```
+
+**No corr-id:** lists all runs found in the trace file that have rollback candidates.
+
+**With corr-id, default (menu / dry run, calls nothing):** resolves candidates from the
+trace in **reverse file-append order** — JSONL line index, never by span `t_start`.
+Process-local monotonic times break across a resume (the primary rollback scenario):
+a run resumed in a fresh process emits post-resume spans on a new zero-point, so
+sorting by `t_start` would interleave or invert undo order. File-append position is
+chronological by construction.
+
+Candidate selection: a span must be status `ok` AND not a point-span (`t_start ==
+t_end`) AND not carrying the `resumed` attr. Resume/retry bookkeeping spans carry
+`status ok` too; filtering them prevents a gate's resume note from masquerading as
+a rollback candidate.
+
+Each candidate shows: **stage name, node id, declared cost, the recorded `effects`,
+and the stages that ran after it** (the dependency-visibility the operator needs to
+judge ordering risk without the engine guessing domain semantics). A stage whose
+node declares no `rollback` is listed under `impossible`.
+
+A stage that ran TWICE (a branch-backward loop) yields TWO candidates with their own
+descriptors, keyed by file-append position and shown with occurrence numbers.
+`--only <stage>` addresses ALL occurrences of that name.
+
+**`--execute`:** calls each candidate's `target` in reverse order with
+`ctx = {correlation_id, stage, node, effects, cost}`.
+- `costly` candidates are SKIPPED unless `--include-costly`.
+- Stops on the first FAILED undo unless `--accept-partial` — half-unwound state is
+  never silent; continuing past a failure is an explicit, flag-consented choice.
+- `--only <stage>` (repeatable): restrict to the named stage(s).
+
+**Report shape** (`--json` for machine-readable):
+```json
+{"run": "<corr-id>",
+ "rolled_back":    [...],
+ "skipped_costly": [...],
+ "impossible":     [...],
+ "failed":         [...],
+ "not_attempted":  [...]}
+```
+`impossible` is a first-class outcome, not an error — a rollback that honestly names
+what can't be undone is a success of the function.
+
+### Non-goals (v1, ADR-0008 D4)
+
+- **No automatic saga on failure.** Auto-unwind on a terminal failure is dangerous
+  (a transient blip triggering semi-irreversible undos). A human is already in the
+  loop at failure.
+- **No dependency-aware ordering.** Reverse completion order + the what-ran-after
+  view; the engine does not model domain dependencies.
+- **No rollback-of-rollback tracking.** Undo targets should be idempotent; running
+  the verb twice re-calls them.
+- **No transactional guarantee.** Stop-on-first-failure + explicit `--accept-partial`
+  is the full consistency story.
 
 ---
 

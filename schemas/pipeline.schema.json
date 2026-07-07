@@ -29,6 +29,10 @@
               "clears": {},
               "concerns_from": {},
               "concerns_into": {},
+              "effects_from": {
+                "minLength": 1,
+                "type": "string"
+              },
               "error_retries": {
                 "minimum": 0,
                 "type": "integer"
@@ -141,6 +145,25 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "rollback": {
+            "additionalProperties": false,
+            "properties": {
+              "cost": {
+                "enum": [
+                  "cheap",
+                  "costly"
+                ]
+              },
+              "target": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "target"
+            ],
+            "type": "object"
           },
           "type": {
             "enum": [

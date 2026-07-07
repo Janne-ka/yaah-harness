@@ -68,6 +68,8 @@ This file is the compressed essence, not the source of truth.
         "escalate":     "human" | "fail",
         "clearable":    false,
         "concerns_from":"<payload-key>",
+        "effects_from": "<payload-key>",    // effect descriptor key → recorded on trace span at completion
+                                            // (for rollback); rejected on fork/fanin stages
         "on_error":     "clear" | null | {"compensate": "fn:...", "on_compensate_fail": "error"|"warn"}
       }
     }
@@ -95,7 +97,7 @@ This file is the compressed essence, not the source of truth.
 
 Common keys on EVERY node spec: `model`, `effort`, `temperature`,
 `timeout`, `retries`, `config:`, `idempotency_key:`, `idempotent:`,
-`cwd_from:`, `note:`, `_<anything>:`. Unknown keys are rejected by
+`cwd_from:`, `rollback:`, `note:`, `_<anything>:`. Unknown keys are rejected by
 `validate_pipeline`.
 
 ## Agent node — the extras
@@ -111,6 +113,20 @@ Common keys on EVERY node spec: `model`, `effort`, `temperature`,
 | `attach: ["fn:module:Cls", ...]` | post-invoke wrappers ([ADR-0003](decisions/0003-attacher-port.md)) — each is a subclass of `Attacher`, returns dict merged onto reply |
 | `strict_render: true` | fail the stage (`render_unfilled_placeholders`) on a `{{placeholder}}` with no value in payload ∪ extras, instead of leaving the literal `{{name}}` (default `false`); engine-injected keys + present-but-empty values never trip it |
 | `output_schema: {…}` | the stage's OUTPUT CONTRACT (JSON-Schema subset). Self-validates the parsed reply (`schema_mismatch` on drift) AND its `required` keys guide weak-executor parse recovery; makes a separate `json_schema` validator node redundant on agent outputs. Opt-in (default none) |
+
+## Node `rollback` (all types)
+
+```jsonc
+// Inside any node config — declares the undo capability
+"rollback": {
+  "target": "fn:module:func | http://...",  // required; fn: or http: only (node: rejected)
+  "cost":   "cheap" | "costly"              // optional, default "cheap"
+}
+```
+
+Absent `rollback` → stage listed as `impossible` in the menu (never guessed).
+See [`docs/node-reference.md`](node-reference.md) for the compensate-ctx divergence
+warning and `effects_from` bounds.
 
 ## Trace block
 
@@ -139,6 +155,11 @@ yaah trace <jsonl> [<price-map>]           # post-hoc aggregate over a JSONL tra
   --errors-only     CI-shaped check; exits non-zero if any error spans present
   --cost            compact per-model cost rollup (with PRICES for $)
   --last N          filter to the most recent N runs
+yaah rollback <root> [<corr-id>] [--json]  # list runs / show undo menu for a run (dry run, calls nothing)
+yaah rollback <root> <corr-id> --execute   # execute undos in reverse file-append order (NOT t_start; cheap only)
+  [--include-costly]                       #   also execute costly candidates
+  [--only <stage>]...                      #   restrict to named stage(s); addresses ALL occurrences
+  [--accept-partial]                       #   continue past a failed undo (default: stop on first failure)
 yaah doctor                                # diagnose install: Python, optional deps, packaged bases
 yaah completion <bash|zsh>                 # emit a shell tab-completion script
 yaah --version                             # print the installed yaah version

@@ -438,11 +438,24 @@ class Harness:
                 # misroute is otherwise invisible in the trace.
                 route = ("<absent→default>" if on not in out.payload
                          else _route_key(out.payload.get(on)))
+        # effects_from (ADR-0008 D2): a PASSING stage hands its author-chosen effect
+        # HANDLE (payload[effects_from]) to its completion span so the `yaah
+        # rollback` verb has the context an undo needs. Mirrors the concerns_from
+        # pull above but COPIES (the descriptor stays on the payload for downstream
+        # stages), and only on _Pass — a _Cleared/_Suspend never committed the
+        # effect, and a FAILED attempt raised before reaching here (so a retry's
+        # note/error span never carries effects). The bound (serialize/clip) lives
+        # in the emitter. Passed only when configured so a stage without
+        # effects_from records no `effects` attr (backward compatible).
+        effects_attr: Dict[str, Any] = {}
+        if stage.effects_from and isinstance(result, _Pass):
+            effects_attr["effects"] = result.output.payload.get(stage.effects_from)
         await self._spans.stage(stage.name, input, t0,
                                 status=_status,
                                 concerns=getattr(result, "concerns", None),
                                 output=out, route=route,
-                                awaiting=getattr(result, "awaiting", None))
+                                awaiting=getattr(result, "awaiting", None),
+                                **effects_attr)
         return result
 
     def _fold_sticky(self, stage_input: Envelope, stage_output: Envelope) -> None:

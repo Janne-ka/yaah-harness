@@ -185,6 +185,18 @@ def build_pipeline_schema() -> Dict[str, Any]:
             # ADR-0005: the payload keys this node guarantees (the requires<->provides
             # contract foothold; required to lint across an envelope-transform).
             "provides": {"type": "array", "items": {"type": "string", "minLength": 1}},
+            # ADR-0008 D1: the node's rollback capability (author-declared undo the
+            # `yaah rollback` verb runs); target restricted to fn:/http:. Hard check
+            # in validate.py — _check_rollback.
+            "rollback": {
+                "type": "object",
+                "required": ["target"],
+                "properties": {
+                    "target": {"type": "string", "minLength": 1},
+                    "cost": {"enum": ["cheap", "costly"]},
+                },
+                "additionalProperties": False,
+            },
         },
         "additionalProperties": True,
     }
@@ -197,6 +209,9 @@ def build_pipeline_schema() -> Dict[str, Any]:
         # fanout: additionally ≤ len(fanout); foreach: no static upper bound (the
         # item count is runtime-sized) — both cross-field checks live in validate.py
         "min_success": {"type": "integer", "minimum": 1},
+        # ADR-0008 D2: payload key whose value rides the completion span as the
+        # rollback effect handle. Rejected on fork/fanin stages (check in validate.py).
+        "effects_from": {"type": "string", "minLength": 1},
         "foreach": {  # ADR-0007 dynamic per-item fan-out; hard check in validate.py
             "type": "object",
             "required": ["items"],

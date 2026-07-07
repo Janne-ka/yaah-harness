@@ -143,6 +143,12 @@ call / done — answers "alive or hung?" while a model call runs; sizes and name
 only, never model text). `stats_file` takes a `price_map` (tokens→$).
 Cross-field checks reject silently-dropped config (e.g. `sinks` under
 `mode: none`). `--explain` shows the effective trace block.
+Pipelines in which any node declares `rollback:` require a `{"type": "file", ...}`
+entry in `sinks` (FileTraceSink) UNDER the default `mode: "tracer"` — a file sink
+declared beside `mode: "none"`/`"envelope"` never persists (the tracer builder
+short-circuits before sinks), so those modes are rejected too. The trace record
+IS the rollback input; checked at `yaah validate` time AND at `yaah run` time;
+both refuse without it.
 
 ## Plugins (extension types)
 
