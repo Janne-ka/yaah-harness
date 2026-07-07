@@ -15,7 +15,7 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, List, Optional, Tuple, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
 from ..comms import Comms
 from ..core import Envelope, Failure, Kind, Verdict
@@ -174,7 +174,16 @@ class Harness:
     def _is_transient_verdict(verdict: Verdict) -> bool:
         """A failed verdict whose failure looks like a transient infrastructural
         fault (a node/transport ERROR carrying an overload/timeout/lock message).
-        Gates the separate error-retry budget in _run_attempts."""
+        Gates the separate error-retry budget in _run_attempts.
+
+        A `foreach_error` aggregate is EXEMPT (impl-eval MED): its message embeds
+        each failed ITEM's detail, so one item's 429 read as "the stage is
+        transient" and re-ran the WHOLE swarm on the error_retries budget —
+        15 calls for 5 items at the defaults. The transient-retry rationale
+        ("a fresh request, pre-effect") is false for a swarm: the healthy items'
+        cost already happened. Partial tolerance is `min_success`, not a re-run."""
+        if any(f.code == "foreach_error" for f in verdict.failures):
+            return False
         return any(_is_transient((f.code or "") + " " + (f.message or ""))
                    for f in verdict.failures)
 
@@ -490,11 +499,18 @@ class Harness:
         return routes.get(key, default)
 
     async def _run_stage(self, stage: Stage, input: Envelope) -> Union[_Pass, _Suspend]:
-        """Run one stage to a _Pass or _Suspend. Single-node and fan-out stages
-        share ONE retry/validate/escalate loop (`_run_attempts`); they differ only
-        in how an attempt PRODUCES its output (one request vs a gather+merge), so
-        each just supplies a producer. Keeps the two paths from drifting."""
-        produce = self._produce_fanout if stage.fanout else self._produce_single
+        """Run one stage to a _Pass or _Suspend. Single-node, fan-out and foreach
+        stages share ONE retry/validate/escalate loop (`_run_attempts`); they
+        differ only in how an attempt PRODUCES its output (one request vs a
+        gather+merge), so each just supplies a producer. Keeps the paths from
+        drifting. (validate rejects shape combos, so the order here is not
+        load-bearing — foreach first only because its check is cheapest.)"""
+        if stage.foreach:
+            produce: Any = self._produce_foreach
+        elif stage.fanout:
+            produce = self._produce_fanout
+        else:
+            produce = self._produce_single
         return await self._run_attempts(stage, input, produce)
 
     async def _run_attempts(
@@ -661,26 +677,7 @@ class Harness:
         roles = stage.fanout or []
         results = await asyncio.gather(
             *(self.comms.request(r, input) for r in roles), return_exceptions=True)
-        outs: List[Tuple[str, Envelope]] = []
-        # a failed role's `res` is a local exception OR an envelope (ERROR /
-        # failed VERDICT) — _failed_role_detail renders each shape
-        errors: List[Tuple[str, object]] = []
-        for role, res in zip(roles, results):
-            if isinstance(res, BaseException):
-                errors.append((role, res))
-            elif res.kind == Kind.ERROR:  # remote handler raised (H3) — a failed role,
-                await self._ingest_remote_trace(res)  # not a result to merge
-                errors.append((role, res))
-            elif res.kind == Kind.VERDICT and not Verdict.from_envelope(res).ok:
-                # A member that RETURNED a failed verdict (an agent exhausting
-                # its schema/parse attempts, a guard node's refusal) is a failed
-                # role too — merged as a result it reads as a clean pass
-                # downstream (a dead lens = zero findings, mailbox M8a).
-                await self._ingest_remote_trace(res)
-                errors.append((role, res))
-            else:
-                await self._ingest_remote_trace(res)  # R6 per-branch trace merge
-                outs.append((role, res))
+        outs, errors = await self._classify_parallel(list(zip(roles, results)))
 
         for _, res in outs:  # a fanned-out node that chose to suspend parks the stage
             if res.kind == Kind.AWAIT:
@@ -704,6 +701,115 @@ class Harness:
                     ", ".join(self._failed_role_detail(role, res) for role, res in errors)),
                 "ensure every fan-out node is reachable and succeeds"))
         return merged, None  # validate normally
+
+    async def _classify_parallel(
+        self, tagged: "List[Tuple[Any, Any]]",   # reply is Envelope | BaseException (gather)
+    ) -> "Tuple[List[Tuple[Any, Envelope]], List[Tuple[Any, object]]]":
+        """Split parallel members' replies into (successes, failures) — the ONE
+        classification both fanout and foreach use (ADR-0007 D6: shared machinery
+        so the shapes can't drift). A failure is a local exception, a Kind.ERROR
+        reply (a remote handler raised, H3), or a member-RETURNED failed verdict
+        (an agent exhausting its schema/parse attempts — merged as a result it
+        would read as a clean pass downstream, the dead-lens class, M8a).
+        Ingests every ENVELOPE reply's remote trace (R6), success or failure.
+        `tagged` pairs each reply with its caller-meaningful tag (a role name /
+        an item index) which flows through untouched."""
+        outs: "List[Tuple[Any, Envelope]]" = []
+        errors: "List[Tuple[Any, object]]" = []
+        for tag, res in tagged:
+            if isinstance(res, BaseException):
+                errors.append((tag, res))
+            elif res.kind == Kind.ERROR:
+                await self._ingest_remote_trace(res)
+                errors.append((tag, res))
+            elif res.kind == Kind.VERDICT and not Verdict.from_envelope(res).ok:
+                await self._ingest_remote_trace(res)
+                errors.append((tag, res))
+            else:
+                await self._ingest_remote_trace(res)
+                outs.append((tag, res))
+        return outs, errors
+
+    async def _produce_foreach(self, stage: Stage, input: Envelope) -> "Union[_Suspend, Tuple[Envelope, Optional[Verdict]]]":
+        """One attempt for a foreach stage (ADR-0007): map the stage's node over
+        `payload[items]` (a runtime-sized list), bounded to `max_concurrent` in
+        flight, then merge. Per-item input is REPLACE + named carries + sticky —
+        `{into: element, item_index, carries, sticky}` — never a copy of the
+        whole inbound payload (the visible-cost rule, D1). Each per-item
+        envelope is built with reply_with so corr/baton/clear_id survive and the
+        item's spans stitch into the run's trace (design-eval #3). Merge:
+        inbound payload ∪ {results: [{item_index, payload}] pairs in item order
+        (compaction-safe provenance, design-eval #2), failed_items: [indexes]}.
+        min_success reuses the k-of-n rule; an item replying AWAIT parks the
+        WHOLE stage; a stage retry re-runs ALL items (documented v1 semantics).
+        Used by _run_attempts."""
+        fe = stage.foreach or {}
+        key = str(fe.get("items", ""))
+        items = input.payload.get(key)
+        if not isinstance(items, list):
+            # fail LOUD at run time (validate can't know the runtime payload):
+            # name the key and the actual type, not a downstream KeyError.
+            return input.reply_with(Kind.RESULT, dict(input.payload)), Verdict.failed(Failure(
+                "foreach_input",
+                "foreach.items key {!r} must hold a list on the stage input; got {}".format(
+                    key, type(items).__name__),
+                "produce the list upstream (an agent output_schema / a transform provides)"))
+        into = str(fe.get("into") or "item")
+        carry = [c for c in (fe.get("carry") or []) if isinstance(c, str)]
+        limit = int(fe.get("max_concurrent") or 3)
+        sem = asyncio.Semaphore(max(1, limit))
+
+        def _item_env(i: int, element: object) -> Envelope:
+            payload: Dict[str, Any] = {into: element, "item_index": i}
+            for k in carry:
+                if k in input.payload:
+                    payload[k] = input.payload[k]
+            # sticky keys are the run frame (workdir etc.) — auto-included so a
+            # per-item worker resolves cwd_from exactly like a fanout member
+            # (design-eval #7); REPLACE applies to the bulky domain payload.
+            for k in self.graph.sticky:
+                if k in input.payload and k not in payload:
+                    payload[k] = input.payload[k]
+            return input.reply_with(input.kind, payload)
+
+        async def _one(i: int, element: object) -> Envelope:
+            async with sem:
+                return await self.comms.request(stage.node, _item_env(i, element))
+
+        replies = await asyncio.gather(
+            *(_one(i, el) for i, el in enumerate(items)), return_exceptions=True)
+        outs, errors = await self._classify_parallel(list(enumerate(replies)))
+
+        for _, res in outs:  # an item that chose to suspend parks the whole stage (v1)
+            if res.kind == Kind.AWAIT:
+                return _Suspend(str(res.payload.get("awaiting", "external")))
+
+        merged_payload = dict(input.payload)
+        merged_payload.update(
+            results=[{"item_index": i, "payload": res.payload} for i, res in outs],
+            failed_items=[i for i, _ in errors])
+        merged = input.reply_with(Kind.RESULT, merged_payload)
+        # Default (no min_success): every item must succeed — any failure fails the
+        # stage. With min_success declared, k-of-n TOLERATES failures — but the k
+        # floor holds UNCONDITIONALLY, not only on the errors path: unlike fanout
+        # (where validate bounds min_success ≤ len(roles) statically), the item
+        # count is runtime-sized, so an EMPTY or short list can under-deliver with
+        # zero failures — that must not read as a clean pass.
+        tolerated = stage.min_success is not None and len(outs) >= stage.min_success
+        if errors and not tolerated:
+            return merged, Verdict.failed(Failure(
+                "foreach_error",
+                "foreach item(s) failed: {}".format(
+                    ", ".join(self._failed_role_detail("item {}".format(i), res)
+                              for i, res in errors)),
+                "fix the failing items or declare min_success for partial tolerance"))
+        if stage.min_success is not None and len(outs) < stage.min_success:
+            return merged, Verdict.failed(Failure(
+                "foreach_error",
+                "only {} item(s) succeeded but min_success={} (items list held {})".format(
+                    len(outs), stage.min_success, len(items)),
+                "provide more items upstream or lower min_success"))
+        return merged, None  # validate normally (degrade under k-of-n is visible, not silent)
 
     @staticmethod
     def _failed_role_detail(role: str, res: object) -> str:

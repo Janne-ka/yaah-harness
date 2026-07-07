@@ -1029,6 +1029,210 @@ def render_allow_unfilled_with_stray_consumes_is_not_blocked() -> None:
     validate_pipeline(cfg)   # must NOT raise
 
 
+# ── foreach (ADR-0007): dynamic per-item fan-out — config-shape contract ────────────────────
+
+def _foreach_cfg(**foreach_overrides):
+    """A minimal pipeline whose swarm stage foreaches over an upstream-provided list."""
+    fe = {"items": "requirements"}
+    fe.update(foreach_overrides)
+    return {"nodes": {"extract": {"type": "agent", "provides": ["requirements"]},
+                      "skeptic": {"type": "agent"}},
+            "graph": {"start": "s1", "stages": {
+                "s1": {"node": "extract", "then": "s2"},
+                "s2": {"node": "skeptic", "foreach": fe}}}}
+
+
+def foreach_valid_config_is_accepted() -> None:
+    validate_pipeline(_foreach_cfg())                                    # minimal
+    validate_pipeline(_foreach_cfg(into="req", carry=["doc"], max_concurrent=3))
+
+
+def foreach_items_read_from_a_provably_absent_key_is_a_hard_error() -> None:
+    # design-eval #5: the ENGINE reads payload[items] + carries, not the per-item
+    # worker — so the check is stage-level (like branch.on), against the INBOUND
+    # flow. Upstream is a parse:false agent → a CLOSED {raw} payload that provably
+    # lacks `requirements` → the swarm WILL fail foreach_input every run → ERROR.
+    cfg = {"nodes": {"a": {"type": "agent", "parse": False},
+                     "skeptic": {"type": "agent"}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "a", "then": "s2"},
+               "s2": {"node": "skeptic", "foreach": {"items": "requirements"}}}}}
+    try:
+        validate_pipeline(cfg)
+    except ValueError as e:
+        assert "requirements" in str(e), e
+        return
+    raise AssertionError("foreach over a provably-absent items key must fail loud")
+
+
+def foreach_carry_of_a_provably_absent_key_is_a_hard_error() -> None:
+    cfg = {"nodes": {"a": {"type": "agent", "parse": False},
+                     "skeptic": {"type": "agent"}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "a", "then": "s2"},
+               "s2": {"node": "skeptic",
+                      "foreach": {"items": "raw", "carry": ["doc"]}}}}}
+    # NB items reads `raw` (provided by the parse:false agent); `doc` is absent.
+    try:
+        validate_pipeline(cfg)
+    except ValueError as e:
+        assert "doc" in str(e), e
+        return
+    raise AssertionError("foreach carry of a provably-absent key must fail loud")
+
+
+def foreach_stage_provides_results_to_downstream_reads() -> None:
+    # design-eval #4: without an explicit `_transfer` arm, the else would apply
+    # the per-item WORKER's contract (parse:false agent → closed {raw}) to the
+    # STAGE output — dropping inbound keys and manufacturing a FALSE hard error
+    # on this downstream {{results}} render. The arm must model the merge.
+    cfg = {"nodes": {"extract": {"type": "agent", "provides": ["requirements"]},
+                     "skeptic": {"type": "agent", "parse": False},
+                     "r": {"type": "render",
+                           "template_text": "{{results}} {{failed_items}} {{requirements}}"}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "extract", "then": "s2"},
+               "s2": {"node": "skeptic", "foreach": {"items": "requirements"},
+                      "then": "s3"},
+               "s3": {"node": "r"}}}}
+    validate_pipeline(cfg)   # must NOT raise: results/failed_items provided, inbound kept
+
+
+def foreach_worker_consumes_check_against_the_per_item_payload() -> None:
+    # impl-eval HIGH: the worker's consumes were checked against the STAGE inbound
+    # — but the worker's real input is the engine-made per-item payload
+    # {into, item_index} ∪ carry ∪ sticky. A render worker reading {{item}} was a
+    # FALSE load-blocking positive; one reading an uncarried {{doc}} is a REAL bug
+    # (the per-item payload provably lacks it) and must fail loud naming carry.
+    ok = {"nodes": {"a": {"type": "agent", "parse": False},
+                    "summ": {"type": "render", "template_text": "summary of {{item}}"}},
+          "graph": {"start": "s1", "stages": {
+              "s1": {"node": "a", "then": "s2"},
+              "s2": {"node": "summ", "foreach": {"items": "raw"}}}}}
+    validate_pipeline(ok)   # must NOT raise: {{item}} fills per item at runtime
+
+    carried = {"nodes": {"a": {"type": "agent", "parse": False, "provides": ["doc"]},
+                         "summ": {"type": "render",
+                                  "template_text": "{{item}} against {{doc}}"}},
+               "graph": {"start": "s1", "stages": {
+                   "s1": {"node": "a", "then": "s2"},
+                   "s2": {"node": "summ",
+                          "foreach": {"items": "raw", "carry": ["doc"]}}}}}
+    validate_pipeline(carried)   # must NOT raise: doc is carried into each item
+
+    uncarried = {"nodes": {"a": {"type": "agent", "parse": False, "provides": ["doc"]},
+                           "summ": {"type": "render",
+                                    "template_text": "{{item}} against {{doc}}"}},
+                 "graph": {"start": "s1", "stages": {
+                     "s1": {"node": "a", "then": "s2"},
+                     "s2": {"node": "summ", "foreach": {"items": "raw"}}}}}
+    try:
+        validate_pipeline(uncarried)
+    except ValueError as e:
+        assert "doc" in str(e) and "carry" in str(e), e
+        return
+    raise AssertionError("a worker reading an uncarried key must fail loud")
+
+
+def foreach_closed_drops_when_the_item_node_may_suspend() -> None:
+    # the one-node analog of fanout's any-role rule: a human_gate item worker may
+    # AWAIT → the resume merge makes the runtime set unprovable → `closed` must
+    # not survive, so a downstream read of an absent key is NOT a hard error.
+    from yaah.dataflow import analyze_dataflow
+    nodes = {"a": {"type": "agent", "parse": False, "provides": ["reqs"]},
+             "gate": {"type": "human_gate"},
+             "r": {"type": "render", "template_text": "{{never_provided}}"}}
+    stages = {"s1": {"node": "a", "then": "s2"},
+              "s2": {"node": "gate", "foreach": {"items": "reqs"}, "then": "s3"},
+              "s3": {"node": "r"}}
+    errors, _ = analyze_dataflow(nodes, stages, [], "s1", None)
+    assert not any("render-key-absent" in e for e in errors), errors
+    # contrast: an agent item worker (never suspends) keeps closed → hard error
+    nodes2 = dict(nodes, a2={"type": "agent"})
+    stages2 = {"s1": {"node": "a", "then": "s2"},
+               "s2": {"node": "a2", "foreach": {"items": "reqs"}, "then": "s3"},
+               "s3": {"node": "r"}}
+    errors2, _ = analyze_dataflow(nodes2, stages2, [], "s1", None)
+    assert any("render-key-absent" in e for e in errors2), errors2
+
+
+def foreach_structural_shapes_are_rejected() -> None:
+    cases = [
+        ("not-a-dict", {"nodes": {"a": {"type": "agent"}},
+                        "graph": {"start": "s", "stages": {
+                            "s": {"node": "a", "foreach": ["x"]}}}}),
+        ("items missing", {"nodes": {"a": {"type": "agent"}},
+                           "graph": {"start": "s", "stages": {
+                               "s": {"node": "a", "foreach": {"max_concurrent": 2}}}}}),
+        ("items empty", _foreach_cfg(items="")),
+        ("items not str", _foreach_cfg(items=7)),
+        ("max_concurrent zero", _foreach_cfg(max_concurrent=0)),
+        ("max_concurrent bool", _foreach_cfg(max_concurrent=True)),
+        ("max_concurrent str", _foreach_cfg(max_concurrent="3")),
+        ("carry not list", _foreach_cfg(carry="doc")),
+        ("carry non-str member", _foreach_cfg(carry=["doc", 3])),
+        ("into not str", _foreach_cfg(into=5)),
+        ("unknown foreach key", _foreach_cfg(max_parallel=3)),
+    ]
+    for label, cfg in cases:
+        try:
+            validate_pipeline(cfg)
+        except ValueError as e:
+            assert "foreach" in str(e), (label, e)
+            continue
+        raise AssertionError("foreach shape must be rejected: {}".format(label))
+
+
+def foreach_is_exclusive_with_other_parallel_shapes() -> None:
+    # one stage, one parallel shape — foreach joins the fanout/fork/fanin rejects.
+    for extra in ({"fanout": ["skeptic"]}, {"fork": ["s1"]}, {"fanin": {"expect": ["x"]}}):
+        cfg = _foreach_cfg()
+        cfg["graph"]["stages"]["s2"].update(extra)
+        try:
+            validate_pipeline(cfg)
+        except ValueError as e:
+            assert "foreach" in str(e), (extra, e)
+            continue
+        raise AssertionError("foreach + {} must be rejected".format(list(extra)))
+
+
+def foreach_requires_a_node() -> None:
+    cfg = _foreach_cfg()
+    del cfg["graph"]["stages"]["s2"]["node"]
+    try:
+        validate_pipeline(cfg)
+    except ValueError as e:
+        assert "node" in str(e), e
+        return
+    raise AssertionError("a foreach stage without a node must be rejected")
+
+
+def min_success_is_accepted_on_a_foreach_stage() -> None:
+    # design-eval finding #1: the old guard demanded `fanout` be a list, so the
+    # ADR's own example config failed to load. With foreach the item count is
+    # runtime-sized — the only static bound is >= 1.
+    cfg = _foreach_cfg()
+    cfg["graph"]["stages"]["s2"]["min_success"] = 5
+    validate_pipeline(cfg)                                   # must NOT raise
+    cfg["graph"]["stages"]["s2"]["min_success"] = 0          # still bounded below
+    try:
+        validate_pipeline(cfg)
+    except ValueError as e:
+        assert "min_success" in str(e), e
+    else:
+        raise AssertionError("min_success 0 must be rejected on foreach too")
+    # and the fanout upper-bound rule is unchanged
+    bad = {"nodes": {"a": {"type": "agent"}, "b": {"type": "agent"}},
+           "graph": {"start": "s", "stages": {
+               "s": {"node": "a", "fanout": ["a", "b"], "min_success": 3}}}}
+    try:
+        validate_pipeline(bad)
+    except ValueError as e:
+        assert "min_success" in str(e), e
+    else:
+        raise AssertionError("min_success > len(fanout) must still be rejected")
+
+
 def fanin_combined_with_a_parallel_source_is_rejected() -> None:
     # A `fanin` is a parallel JOIN; `fanout`/`fork` is a parallel SOURCE. One stage
     # that is BOTH is a walker-dependent trap: `_drive` treats it fork-first, the
@@ -1374,6 +1578,16 @@ def main() -> None:
     fanin_reduce_union_not_provably_absent()
     wrong_typed_parallel_shape_is_a_clean_error_not_a_crash()
     fanin_combined_with_a_parallel_source_is_rejected()
+    foreach_valid_config_is_accepted()
+    foreach_items_read_from_a_provably_absent_key_is_a_hard_error()
+    foreach_carry_of_a_provably_absent_key_is_a_hard_error()
+    foreach_stage_provides_results_to_downstream_reads()
+    foreach_worker_consumes_check_against_the_per_item_payload()
+    foreach_closed_drops_when_the_item_node_may_suspend()
+    foreach_structural_shapes_are_rejected()
+    foreach_is_exclusive_with_other_parallel_shapes()
+    foreach_requires_a_node()
+    min_success_is_accepted_on_a_foreach_stage()
     custom_node_consumes_declared_input_is_checked()
     custom_node_consumes_present_key_is_quiet()
     custom_node_without_consumes_reads_nothing_checkable()

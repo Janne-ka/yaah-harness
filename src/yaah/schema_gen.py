@@ -194,7 +194,20 @@ def build_pipeline_schema() -> Dict[str, Any]:
     typed_stage_keys: Dict[str, Any] = {
         "max_attempts": {"type": "integer", "minimum": 1},
         "error_retries": {"type": "integer", "minimum": 0},
-        "min_success": {"type": "integer", "minimum": 1},  # ≤ len(fanout): cross-field, validate.py
+        # fanout: additionally ≤ len(fanout); foreach: no static upper bound (the
+        # item count is runtime-sized) — both cross-field checks live in validate.py
+        "min_success": {"type": "integer", "minimum": 1},
+        "foreach": {  # ADR-0007 dynamic per-item fan-out; hard check in validate.py
+            "type": "object",
+            "required": ["items"],
+            "properties": {
+                "items": {"type": "string", "minLength": 1},
+                "into": {"type": "string", "minLength": 1},
+                "carry": {"type": "array", "items": {"type": "string", "minLength": 1}},
+                "max_concurrent": {"type": "integer", "minimum": 1},
+            },
+            "additionalProperties": False,
+        },
         "on_error": {"oneOf": [
             {"type": "null"},
             {"const": "clear"},

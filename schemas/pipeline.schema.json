@@ -37,6 +37,34 @@
               "fanin": {},
               "fanout": {},
               "feedback": {},
+              "foreach": {
+                "additionalProperties": false,
+                "properties": {
+                  "carry": {
+                    "items": {
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "into": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "max_concurrent": {
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "items"
+                ],
+                "type": "object"
+              },
               "fork": {},
               "id": {},
               "max_attempts": {

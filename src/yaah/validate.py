@@ -369,9 +369,14 @@ def _is_fork(stage_config: Dict[str, Any], stage_names: set) -> bool:
 _STAGE_KEYS = frozenset({
     "node", "id", "validators", "max_attempts", "error_retries", "feedback",
     "escalate", "then", "fanout", "min_success", "fork", "branch", "fanin",
-    "wait", "clears", "concerns_from", "concerns_into", "clearable",
+    "foreach", "wait", "clears", "concerns_from", "concerns_into", "clearable",
     "on_error", "note",
 })
+
+# the keys a `foreach` block may carry (ADR-0007) — a typo'd `max_parallel`
+# would otherwise silently run unbounded, the same silent-no-op class as
+# _STAGE_KEYS itself.
+_FOREACH_KEYS = frozenset({"items", "into", "carry", "max_concurrent"})
 
 # Every key build_graph reads off the graph object itself. Same silent-no-op
 # class as stage keys: a typo'd `stiky` would quietly change nothing.
@@ -582,6 +587,43 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
             errs.append("stage {!r}: has both 'fanin' (a parallel JOIN) and {!r} (a "
                         "parallel SOURCE) — one stage cannot be both; split the join and "
                         "the {} into separate stages".format(name, src, src))
+        # foreach (ADR-0007): dynamic per-item fan-out — one stage, one parallel shape,
+        # so it excludes every other shape; then the block's own structure is checked
+        # (a malformed foreach that slipped to the harness would fail at RUN time on
+        # the first swarm, the exact late-discovery class validate exists to kill).
+        fe = s.get("foreach")
+        if fe is not None:
+            for other in ("fanout", "fork", "fanin"):
+                if s.get(other):
+                    errs.append("stage {!r}: has both 'foreach' and {!r} — one stage, "
+                                "one parallel shape".format(name, other))
+            if not isinstance(fe, dict):
+                errs.append("stage {!r}: foreach must be an object "
+                            "{{items, into?, carry?, max_concurrent?}}, got {}".format(
+                                name, type(fe).__name__))
+            else:
+                for k in fe:
+                    if k not in _FOREACH_KEYS:
+                        errs.append("stage {!r}: unknown foreach key {!r}; known: {}".format(
+                            name, k, ", ".join(sorted(_FOREACH_KEYS))))
+                items = fe.get("items")
+                if not (isinstance(items, str) and items):
+                    errs.append("stage {!r}: foreach.items must be a non-empty payload-key "
+                                "string (the upstream-provided list), got {!r}".format(
+                                    name, items))
+                into = fe.get("into")
+                if into is not None and not (isinstance(into, str) and into):
+                    errs.append("stage {!r}: foreach.into must be a non-empty string".format(name))
+                carry = fe.get("carry")
+                if carry is not None and (not isinstance(carry, list)
+                                          or not all(isinstance(c, str) and c for c in carry)):
+                    errs.append("stage {!r}: foreach.carry must be a list of payload-key "
+                                "strings".format(name))
+                mc = fe.get("max_concurrent")
+                if mc is not None and (not isinstance(mc, int) or isinstance(mc, bool)
+                                       or mc < 1):
+                    errs.append("stage {!r}: foreach.max_concurrent must be a positive "
+                                "int, got {!r}".format(name, mc))
         node = s.get("node")
         if not node:
             if not is_fork and not s.get("fanin"):
@@ -624,9 +666,18 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
         ms = s.get("min_success")
         if ms is not None:
             fo = s.get("fanout")
-            if not isinstance(fo, list):
-                errs.append("stage {!r}: min_success only applies to a fanout stage "
-                            "(set `fanout: [roles...]`, or remove it)".format(name))
+            fe = s.get("foreach")
+            if isinstance(fe, dict):
+                # foreach's item count is RUNTIME-sized (ADR-0007, design-eval #1):
+                # the only static bound is >= 1 — a compile-time upper bound would
+                # need the list length, which doesn't exist yet.
+                if not (isinstance(ms, int) and not isinstance(ms, bool) and ms >= 1):
+                    errs.append("stage {!r}: min_success must be a positive int "
+                                "(got {!r})".format(name, ms))
+            elif not isinstance(fo, list):
+                errs.append("stage {!r}: min_success only applies to a fanout or "
+                            "foreach stage (set `fanout: [roles...]` / `foreach: "
+                            "{{...}}`, or remove it)".format(name))
             elif not (isinstance(ms, int) and not isinstance(ms, bool)
                       and 1 <= ms <= len(fo)):
                 errs.append("stage {!r}: min_success must be an int between 1 and "
@@ -921,6 +972,13 @@ def _lint_untrusted_unfenced(nodes: Dict[str, Any], stages: Dict[str, Any],
         ref = s.get("node") if isinstance(s, dict) else None
         node = nodes.get(ref) if isinstance(ref, str) else None
         if isinstance(node, dict) and node.get("type") == "agent":
+            if isinstance(s, dict) and isinstance(s.get("foreach"), dict):
+                # ADR-0007: a foreach stage's agent output lands NESTED under
+                # `results[i].payload`, never at the top level — attributing its
+                # authored keys here would flag downstream reads of keys that
+                # aren't actually there (design-eval nit #9). The nested content
+                # is untrusted too, but a top-level {{key}} can't read it.
+                continue
             authored_by[s_name] = _agent_authored_keys(node)
     if not authored_by:
         return

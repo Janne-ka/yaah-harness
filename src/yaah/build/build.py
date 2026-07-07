@@ -48,6 +48,7 @@ def build_graph(g: Dict[str, Any]) -> Graph:
             branch=s.get("branch"),
             fork=s.get("fork"),      # branch CHAINS: spread to N stages, fanin rejoins
             fanin=s.get("fanin"),
+            foreach=s.get("foreach"),  # ADR-0007: bounded map of `node` over payload[items]
             wait=s.get("wait"),
             clears=[s["clears"]] if isinstance(s.get("clears"), str) else s.get("clears"),
             concerns_from=s.get("concerns_from"),  # payload key -> baton.concerns on pass

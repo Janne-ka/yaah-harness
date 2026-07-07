@@ -56,6 +56,7 @@ def _undeclared_envelope_transform(node: Dict[str, Any]) -> bool:
 # outputs stay NESTED under `results` (never top-level). A k-of-n pass
 # (`min_success`) hands forward the same shape.
 _FANOUT_MERGE_KEYS = frozenset({"results", "roles", "failed_roles"})
+_FOREACH_MERGE_KEYS = frozenset({"results", "failed_items"})  # ADR-0007 merge (harness._produce_foreach)
 
 
 def _fanout_role_may_suspend(role: Any, nodes: Dict[str, Any]) -> bool:
@@ -139,6 +140,17 @@ def _transfer(stage: Any, node: Optional[Dict[str, Any]], pin: Provides, sticky:
             _fanout_role_may_suspend(r, nodes or {}) for r in roles))
         flow = Flow(pin.known | _FANOUT_MERGE_KEYS | sticky_fs, pin.complete,
                     pin.closed and not role_suspends)
+    elif stage_d.get("foreach"):
+        # ADR-0007: the merge is inbound ∪ {results, failed_items}. This arm MUST
+        # exist (design-eval #4): the `else` would apply the per-item WORKER's
+        # contract to the STAGE output — a parse:false worker would model the
+        # stage as closed {raw}, dropping every inbound key the merge preserves
+        # and manufacturing false hard errors on {{results}} reads downstream.
+        # `closed` survives only if the one item node provably cannot suspend
+        # (the one-node analog of fanout's any-role rule).
+        item_type = node.get("type") if isinstance(node, dict) else None
+        flow = Flow(pin.known | _FOREACH_MERGE_KEYS | sticky_fs, pin.complete,
+                    pin.closed and not may_suspend(item_type))
     elif node is None:
         # a pure routing stage (no node) passes the payload through
         flow = Flow(pin.known | sticky_fs, pin.complete, pin.closed)
@@ -382,11 +394,56 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
                     warnings.append(branch_msg(s_name, on, flow.known, hard=False))
             else:
                 note_blocked(s_name)
+        # foreach reads payload[items] + each carry key from the stage's INBOUND flow
+        # (ADR-0007 D5, design-eval #5). This is a STAGE-level read like branch.on —
+        # the ENGINE fans out, not the per-item worker, so the node-consumes resolver
+        # below (keyed on the WORKER's type) cannot see it.
+        fe = s.get("foreach")
+        if isinstance(fe, dict):
+            fe_reads = [k for k in [fe.get("items")] + list(fe.get("carry") or [])
+                        if isinstance(k, str) and k]
+            missing = [k for k in fe_reads if k not in pin_here.known]
+            if missing and pin_here.closed:
+                errors.append(
+                    "stage {!r}: foreach reads {} which is provably ABSENT here — the "
+                    "payload is a fixed set providing {}. The swarm FAILS with "
+                    "foreach_input (or fans out without its carry) EVERY run. Provide "
+                    "them upstream (an agent output_schema, a transform `provides`, or "
+                    "graph `sticky`). [dataflow: foreach-key-absent]".format(
+                        s_name, missing, sorted(pin_here.known - {"raw"})))
+            elif missing and pin_here.complete:
+                warnings.append(
+                    "stage {!r}: foreach reads {} which nothing on the path to it "
+                    "provides (provides {}). Declare an upstream provider. "
+                    "[lint: foreach-key-unprovided]".format(
+                        s_name, missing, sorted(pin_here.known - {"raw"})))
+            elif missing:
+                note_blocked(s_name)
         # a node's CONSUMES: keys it reads from the payload flowing INTO it (ADR-0006
         # symmetry — the node reports this, the checker holds no per-type knowledge). render
         # parses its `{{...}}`; a custom node declares `consumes: [...]`; others read nothing.
         needs = sorted(resolve_consumes(node.get("type"), node, base_path))
-        if needs:
+        if needs and isinstance(fe, dict):
+            # a foreach WORKER's input is not the stage inbound — it is the
+            # engine-made per-item payload {into, item_index} ∪ carry ∪ sticky
+            # (harness._produce_foreach). Checking against pin_here was a FALSE
+            # load-blocker for a worker reading {{item}} (impl-eval HIGH); checking
+            # against the per-item set instead is also STRONGER: the set is
+            # engine-exact, so a worker reading an uncarried key is a provable
+            # every-run failure, and the remedy is named (add it to foreach.carry).
+            per_item = (frozenset({str(fe.get("into") or "item"), "item_index"})
+                        | frozenset(k for k in (fe.get("carry") or [])
+                                    if isinstance(k, str))
+                        | frozenset(sticky))
+            missing = [k for k in needs if k not in per_item]
+            if missing:
+                errors.append(
+                    "stage {!r}: the foreach worker reads {} but each per-item input "
+                    "holds exactly {} — the read fails EVERY item. Add the key(s) to "
+                    "foreach.carry (copied from the stage input into every item), or "
+                    "fix the template/consumes. [dataflow: foreach-worker-key-absent]"
+                    .format(s_name, missing, sorted(per_item)))
+        elif needs:
             # message SELECTION only (not contract logic): render keeps its established
             # wording + tag; a declared-`consumes` node gets the generic one.
             msg = render_msg if node.get("type") == "render" else consumes_msg

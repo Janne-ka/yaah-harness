@@ -34,6 +34,7 @@ class Stage:
     branch: Optional[Dict[str, Any]] = None  # conditional next: {on, routes:{val:stage}, default}
     fork: Optional[List[str]] = None  # FORK: spread the envelope to these successor STAGES, each runs independently
     fanin: Optional[Dict[str, Any]] = None  # JOIN: {expect, wait, timeout, on_timeout, reduce} — wait for branches, reduce, continue
+    foreach: Optional[Dict[str, Any]] = None  # ADR-0007 dynamic per-item fan-out: {items, into?, carry?, max_concurrent?} — run this stage's `node` once per element of payload[items] (a runtime-sized list), bounded concurrency; merge {results: [{item_index, payload}...], failed_items: [idx...]}. Third parallel shape, exclusive with fanout/fork/fanin (validate rejects the combos).
     wait: Optional[Dict[str, Any]] = None  # FORK wait-for-clear: {timeout, on_timeout} — bound how long the fork waits for the fan-in
     clears: Optional[List[str]] = None  # node-ids this stage CLEARS on completion (publishes clear "<id>:<corr>") — reusable by any node, not just fan-in
     concerns_from: Optional[str] = None  # payload key holding a LIST of soft concerns this stage produced (e.g. a parsed sceptic report). On pass, the harness POPS the key and routes the items into baton.concerns — same channel as soft validators — so they surface at the NEXT human gate and in the final output without payload-threading through every stage in between (one missing carry would silently drop them).

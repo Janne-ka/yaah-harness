@@ -61,6 +61,8 @@ This file is the compressed essence, not the source of truth.
         "fork":         ["<branch-stage>", ...],
         "fanin":        {"expect": ["<branch-stage>", ...], "wait": "all" | "any",
                           "reduce": "fn:module:func"},
+        "foreach":      {"items": "<payload-key>", "into": "item",   // dynamic per-item fan-out
+                          "carry": ["<payload-key>", ...], "max_concurrent": 3},  // (ADR-0007)
         "escalate":     "human" | "fail",
         "clearable":    false,
         "concerns_from":"<payload-key>",
@@ -143,13 +145,15 @@ yaah --version                             # print the installed yaah version
 All verbs also accept the legacy flag form: `yaah <root> --list`,
 `yaah <root> --resume <id> <file>`, etc.
 
-## Five pipeline shapes (everything's one of these)
+## Six pipeline shapes (everything's one of these)
 
 See [`docs/archetypes.md`](archetypes.md). Quick:
 
 - **`linear`** — sequence of stages, no branches, no gates. (hello-yaah)
 - **`branch-with-gate`** — produce → human review → decision routes to one of N. (review-pipeline)
 - **`fork-fanin`** — N parallel branches → reduce. (fork-join)
+- **`swarm`** — one worker per element of a RUNTIME list, bounded concurrency
+  → merge. `foreach`, the dynamic sibling of the static shapes above. (ADR-0007)
 - **`instrumented`** — production-shape with attacher + optional A/B + optional gate. (arch-drift)
 - **`meta-tool`** — pipeline whose input is another YAAH config. (config-flow)
 

@@ -1,0 +1,33 @@
+{
+  "$schema": "../../schemas/pipeline.schema.json",
+  "nodes": {
+    "extract": {
+      "type": "agent",
+      "template": "Extract the individual requirements from this document:\n\n{{doc}}",
+      "model": "fake:extract",
+      "output_schema": {"properties": {"requirements": {"type": "array"}},
+                        "required": ["requirements"]}
+    },
+    "skeptic": {
+      "type": "agent",
+      "template": "You are a cold-read skeptic. Try to REFUTE requirement #{{item_index}}: {{item}}",
+      "model": "fake:skeptic",
+      "parse": false
+    },
+    "report": {
+      "type": "render",
+      "template_text": "# Refute-swarm report\n\nfindings: {{results}}\n\nfailed items: {{failed_items}}\n",
+      "allow_unfilled": false
+    }
+  },
+  "graph": {
+    "start": "extract",
+    "stages": {
+      "extract": {"node": "extract", "then": "swarm"},
+      "swarm": {"node": "skeptic",
+                "foreach": {"items": "requirements", "max_concurrent": 2},
+                "then": "report"},
+      "report": {"node": "report"}
+    }
+  }
+}
