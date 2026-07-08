@@ -135,9 +135,16 @@ def meet(a: Flow, b: Flow) -> Flow:
 
 def agent_contract(cfg: Dict[str, Any]) -> Contract:
     carry, cwd = _carry(cfg), _cwd(cfg)
-    # ADR-0010: attachers merge post-invoke keys onto the output payload (unenumerable
-    # here — they're fn: code), so an attach-bearing agent is never runtime-provable.
-    attached = bool(cfg.get("attach"))
+    # ADR-0010: a non-empty `attach:` merges post-invoke keys (e.g. `usage`) onto the output
+    # payload — fn: code, unenumerable here — so an attach-bearing agent is never runtime-
+    # provable (drops `closed`). Detect a VALID non-empty list only (via `_as_key_set`): a
+    # malformed `attach` (bare string / non-string items) is a validate-time hard ERROR, so it
+    # never loads — and treating it as "no attach" here avoids the pre-fix `bool(cfg.get(...))`
+    # bug where `bool("fn:x")` silently dropped `closed` while NOTHING linted the bad shape.
+    # The declared attacher keys reach the contract via `resolve_contract` (which augments any
+    # known node's `provides`), NOT here: with `closed` dropped they land as `complete`, so a
+    # downstream read of a DECLARED key is clean and a typo is a WARNING, never a false ERROR.
+    attached = bool(_as_key_set(cfg.get("attach")))
     if cfg.get("parse", True) is False:
         # parse:false → exactly {raw} (+carry +cwd). Provable → closed, unless attached.
         return reset({"raw"} | carry | cwd, closed=not attached)

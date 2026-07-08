@@ -711,6 +711,147 @@ def escalate_human_stage_does_not_prove_absence_downstream() -> None:
         assert "render-key-absent" in str(e), str(e)
 
 
+# ── ADR-0010 attach: contract semantics through the REAL validate/lint path ──────────────
+# A parse:false agent is CLOSED {raw} — but `attach: [fn:…]` merges attacher-supplied keys
+# (fn: code, unenumerable statically) onto the output, so the set is no longer runtime-exact:
+# the contract drops `closed` (complete=True). Declaring the keys in the agent's `provides:`
+# makes them visible to the data-flow lint (resolve_contract augments provides uniformly).
+# These drive the WHOLE pipeline through validate_pipeline/lint_pipeline, not a unit contract.
+
+
+def _attach_pipeline(render_key, *, provides=None, attach=("fn:m:U",), parse=False):
+    agent = {"type": "agent", "parse": parse}
+    if attach is not None:
+        agent["attach"] = list(attach) if isinstance(attach, (list, tuple)) else attach
+    if provides is not None:
+        agent["provides"] = provides
+    return {"nodes": {"a": agent, "r": {"type": "render",
+                                        "template_text": "Report: {{" + render_key + "}}"}},
+            "graph": {"start": "s1", "stages": {"s1": {"node": "a", "then": "s2"},
+                                                "s2": {"node": "r"}}}}
+
+
+def _validate_exit(pipeline, strict):
+    """Drive `yaah validate [--strict]` on an inline pipeline; return (exit_code, out, err).
+    Mirrors _run_validate but takes an arbitrary pipeline so the attach cases run the same
+    CLI teeth the CI gate uses (a warning under --strict must be exit 2)."""
+    old_err, old_out = sys.stderr, sys.stdout
+    sys.stderr, sys.stdout = io.StringIO(), io.StringIO()
+    code = 0
+    try:
+        _dispatch_validate({"root": "t", "strict": strict}, {"pipeline": pipeline}, ".")
+    except SystemExit as e:
+        code = 0 if e.code is None else int(e.code)
+    finally:
+        err, out = sys.stderr.getvalue(), sys.stdout.getvalue()
+        sys.stderr, sys.stdout = old_err, old_out
+    return code, out, err
+
+
+def attach_declared_provides_render_on_declared_key_validates_clean() -> None:
+    # (a) parse:false + attach + provides:[usage], render {{usage}} → NO warnings, validates
+    # clean, and --strict PASSES (exit 0). The declared attacher key is visible to the lint.
+    cfg = _attach_pipeline("usage", provides=["usage"])
+    validate_pipeline(cfg)                                    # must NOT raise
+    assert not _has(cfg, "render-key-unprovided"), lint_pipeline(cfg)
+    assert not _has(cfg, "attach-undeclared-keys"), lint_pipeline(cfg)
+    code, out, _ = _validate_exit(cfg, strict=True)
+    assert code == 0 and "ok:" in out, (code, out)
+
+
+def attach_declared_provides_render_typo_warns_and_blocks_strict() -> None:
+    # (b) same, but render reads {{usgae}} (a typo) → a WARNING (not a hard error — an attacher
+    # COULD emit any key, so absence is unprovable), and --strict FAILS with exit 2.
+    cfg = _attach_pipeline("usgae", provides=["usage"])
+    validate_pipeline(cfg)                                    # must NOT raise (no hard error)
+    w = [m for m in lint_pipeline(cfg) if "render-key-unprovided" in m]
+    assert w and "usgae" in w[0], lint_pipeline(cfg)
+    code, _, err = _validate_exit(cfg, strict=True)
+    assert code == 2, code                                   # warning ⇒ CI gate fails
+    assert "render-key-unprovided" in err, err
+
+
+def attach_without_provides_fires_nudge_lint() -> None:
+    # (c) attach present, NO provides declared → the new proactive nudge fires on the NODE
+    # (fires even with no downstream consumer): attacher keys are invisible to the lint.
+    cfg = _attach_pipeline("raw")   # render reads {{raw}} (provided) so no render warning
+    validate_pipeline(cfg)
+    w = [m for m in lint_pipeline(cfg) if "attach-undeclared-keys" in m]
+    assert w and "'a'" in w[0], lint_pipeline(cfg)
+
+
+def attach_with_provides_silences_the_nudge() -> None:
+    # declaring the keys silences the nudge (the whole point of the remedy it names).
+    cfg = _attach_pipeline("raw", provides=["usage"])
+    assert not _has(cfg, "attach-undeclared-keys"), lint_pipeline(cfg)
+
+
+def attach_empty_provides_is_the_explicit_optout() -> None:
+    # the contrarian's "intentionally open-ended attach" author: `provides: []` declares "I add
+    # no lint-visible keys" and silences the nudge (any declared provides list opts out).
+    cfg = _attach_pipeline("raw", provides=[])
+    assert not _has(cfg, "attach-undeclared-keys"), lint_pipeline(cfg)
+
+
+def malformed_attach_non_list_is_hard_error() -> None:
+    # (d) a bare-string attach is a validate-time hard ERROR (pre-fix it silently dropped
+    # `closed` and NOTHING linted it — it exploded later at build after paid model calls).
+    cfg = _attach_pipeline("raw", attach="fn:m:U")
+    try:
+        validate_pipeline(cfg)
+    except ValueError as e:
+        assert "'a'" in str(e) and "attach" in str(e), str(e)
+        return
+    raise AssertionError("a non-list attach must be rejected at validate")
+
+
+def malformed_attach_non_string_item_is_hard_error() -> None:
+    cfg = _attach_pipeline("raw", attach=[123])
+    try:
+        validate_pipeline(cfg)
+    except ValueError as e:
+        assert "'a'" in str(e) and "attach" in str(e), str(e)
+        return
+    raise AssertionError("a non-string attach item must be rejected at validate")
+
+
+def empty_attach_list_preserves_closed_hard_error() -> None:
+    # (e) attach:[] attaches nothing → the parse:false agent stays CLOSED {raw}, so a render of
+    # a provably-absent key is still a hard ERROR (the fail-loud floor must not erode).
+    cfg = _attach_pipeline("verdict", attach=[])
+    try:
+        validate_pipeline(cfg)
+    except ValueError as e:
+        assert "verdict" in str(e) and "render-key-absent" in str(e), str(e)
+        return
+    raise AssertionError("empty attach must keep the closed-path hard error")
+
+
+def parse_true_attach_behavior_unchanged() -> None:
+    # (f) parse:true + attach + output_schema: render on a SCHEMA key is clean; render on an
+    # attach key warns (complete, not closed) — unchanged by this fix, and NO nudge (nudge is
+    # parse:false-scoped: parse:true is never closed, so attach isn't the sole loosener).
+    clean = _attach_pipeline("verdict", provides=None, parse=True)
+    clean["nodes"]["a"]["output_schema"] = {"properties": {"verdict": {"type": "string"}}}
+    validate_pipeline(clean)
+    assert not _has(clean, "render-key-unprovided"), lint_pipeline(clean)
+    assert not _has(clean, "attach-undeclared-keys"), lint_pipeline(clean)
+    warn = _attach_pipeline("usage", provides=None, parse=True)
+    warn["nodes"]["a"]["output_schema"] = {"properties": {"verdict": {"type": "string"}}}
+    validate_pipeline(warn)                                   # complete, not closed → no error
+    assert _has(warn, "render-key-unprovided"), lint_pipeline(warn)
+
+
+def attach_remedy_text_names_provides_first() -> None:
+    # finding #3: the soft render remedy must lead with inline `provides:` (works for BOTH parse
+    # modes — the attach case has no output_schema to point at), while still naming output_schema
+    # (for parsed keys) and sticky. Guards the remedy stays accurate for attach agents.
+    cfg = _attach_pipeline("usgae", provides=["usage"])
+    w = [m for m in lint_pipeline(cfg) if "render-key-unprovided" in m][0]
+    assert "provides" in w and "output_schema" in w and "sticky" in w, w
+    assert w.index("provides") < w.index("output_schema"), w   # provides FIRST
+
+
 # ── #5: a >=2-outcome gate whose decision nothing branches on (silently ignores rejection) ──
 
 def _gate_cfg(gate_node, *, branch_on_decision=False):
@@ -1803,6 +1944,16 @@ def main() -> None:
     quiet_render_parse_false_agent_forwards_cwd_from()
     lint_never_raises_on_malformed_output_schema()
     placeholder_regex_is_single_source()
+    attach_declared_provides_render_on_declared_key_validates_clean()
+    attach_declared_provides_render_typo_warns_and_blocks_strict()
+    attach_without_provides_fires_nudge_lint()
+    attach_with_provides_silences_the_nudge()
+    attach_empty_provides_is_the_explicit_optout()
+    malformed_attach_non_list_is_hard_error()
+    malformed_attach_non_string_item_is_hard_error()
+    empty_attach_list_preserves_closed_hard_error()
+    parse_true_attach_behavior_unchanged()
+    attach_remedy_text_names_provides_first()
     warns_gate_two_outcomes_no_branch()
     quiet_gate_two_outcomes_with_branch_on_decision()
     quiet_gate_single_outcome_approve()

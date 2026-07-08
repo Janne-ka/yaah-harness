@@ -73,13 +73,38 @@ payload keys). For `AttachingAgent` it is a **latent soundness gap**:
   ERROR** (`validate` fail-loud) even though the attacher supplies `usage` at runtime. **No
   such config exists in the repo** — so this is latent, not a live bug.
 
-> **FIXED 2026-07-07** (same branch, on this ADR's recommendation): `agent_contract` now
-> reads `attach` — a non-empty attach list drops `closed` (attacher keys are fn: code,
-> unenumerable statically). A/B-verified: `parse:false` + `attach:` + `render "{{usage}}"`
-> no longer hard-errors at validate, while `--strict` still advises
-> `[lint: render-key-unprovided]` with the declare-it remedy. Without `attach:` the honest
-> hard error is unchanged. Tests: `test_node_contract.py` (attach ×3, incl. empty-list
-> keeps closed).
+> **FIXED 2026-07-07** (same branch, on this ADR's recommendation) — **note amended after a
+> verified code review that found the first cut defective; the text below describes what NOW
+> ships.** Four moves, each honest about its ceiling:
+>
+> 1. **Contract.** `agent_contract` detects a *valid non-empty* `attach` list (via
+>    `_as_key_set`, not `bool(cfg.get("attach"))` — the old truthiness read let a bare-string
+>    `attach: "fn:x"` silently drop `closed`). A real attach list drops `closed`
+>    (`complete=True`): attacher keys are fn: code, unenumerable statically, so the set is a
+>    *declared* contract, not a runtime proof.
+> 2. **Declare-to-see.** The declared attacher keys reach the contract through
+>    `resolve_contract`, which augments *any* known node's `provides` (it does **not** live in
+>    `agent_contract`'s parse:false branch — verified). So `parse:false` + `attach:` +
+>    `provides: ["usage"]` + `render "{{usage}}"` validates **clean** (the key is `complete` →
+>    no warning); an *undeclared* read or a typo `{{usgae}}` is a `[lint: render-key-unprovided]`
+>    **WARNING**. That warning **fails `--strict` (exit 2)** — the honest ceiling, not merely
+>    "advises": an attacher can emit *any* key at runtime, so a hard ERROR would be a
+>    false-positive and the typo is genuinely only warnable, but it does still block the CI gate.
+> 3. **Malformed attach** (`attach:` a non-list, or a non-string/empty item) is now a
+>    **validate-time hard ERROR** — it used to slip past load (the schema's
+>    `additionalProperties`) and explode in `_build_agent` only after paid model calls.
+>    `attach` is pinned array-of-strings in `schema_gen.py` too.
+> 4. **Proactive nudge.** A `parse:false` agent with `attach:` but no `provides:` earns a
+>    `[lint: attach-undeclared-keys]` warning on the node itself (attacher keys are invisible
+>    to the data-flow lint until declared). Scoped to parse:false — a parse:true agent is
+>    never `closed`, so its undeclared attach key is already caught by the ordinary downstream
+>    `-unprovided` warning, and nudging there would newly flag the shipped parse:true+attach
+>    examples (which route attach keys into opaque transforms). Empty `attach: []` attaches
+>    nothing → stays `closed` → the honest hard error for a provably-absent key is preserved.
+>
+> Tests: `test_node_contract.py` (attach detection incl. malformed→no-attach and the
+> declared-provides augment) and `test_lint_pipeline.py` (the whole set end-to-end through
+> `validate_pipeline`/`lint_pipeline` + the `--strict` exit-2 teeth).
 
 This is exactly the false-positive class ADR-0006 worked to design out for custom nodes,
 re-opened by a wrapper that changes the payload behind `describe()`'s back. It is the single

@@ -146,8 +146,14 @@ which is which.
   data like token usage), `OnceNode` (at-most-once), `CarriageBoundaryNode`
   (engine-injected trace boundary). The invariant: a decorator must not
   change what its inner node provides/consumes *invisibly* — if it adds
-  payload keys, the contract layer must know (`agent_contract` reads
-  `attach` and drops the `closed` claim). New wrapper = a new class
+  payload keys, the contract layer must know. For `attach:` that means:
+  `agent_contract` drops the `closed` claim (attacher keys are fn: code,
+  unenumerable — so the set is `complete`, not runtime-provable), and the
+  keys become *visible* to the data-flow lint only when declared in the
+  agent's `provides:` (which `resolve_contract` augments); undeclared, a
+  downstream read is a WARNING (blocks `--strict`), never a false hard
+  error — plus a `[lint: attach-undeclared-keys]` nudge on a parse:false
+  agent. A malformed `attach:` is a validate-time hard error. New wrapper = a new class
   following the same shape, NOT a new config grammar; a generic `wrap:`
   key is deliberately not built (no stakeholder — deferred with a
   trigger). Convention + `node_contract.py` tests.

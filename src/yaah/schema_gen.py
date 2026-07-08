@@ -185,6 +185,10 @@ def build_pipeline_schema() -> Dict[str, Any]:
             # ADR-0005: the payload keys this node guarantees (the requires<->provides
             # contract foothold; required to lint across an envelope-transform).
             "provides": {"type": "array", "items": {"type": "string", "minLength": 1}},
+            # ADR-0010: `attach` — a list of `fn:` attachers merged onto an agent's output
+            # payload. Hard shape check in validate.py; the fn:-target grammar + Attacher
+            # subclass check live in the builder (they import consumer code).
+            "attach": {"type": "array", "items": {"type": "string", "minLength": 1}},
             # ADR-0008 D1: the node's rollback capability (author-declared undo the
             # `yaah rollback` verb runs); target restricted to fn:/http:. Hard check
             # in validate.py — _check_rollback.

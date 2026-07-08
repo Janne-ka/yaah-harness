@@ -42,6 +42,25 @@ def agent_attach_empty_list_keeps_closed() -> None:
     c = agent_contract({"parse": False, "attach": []})
     assert c.closed, c
 
+def agent_malformed_attach_is_treated_as_no_attach() -> None:
+    # a non-list `attach` (bare string) is a validate-time hard ERROR (config won't load);
+    # the never-raising contract treats the malformed shape as "no provable attach" — it must
+    # NOT drop `closed` off a truthiness read of a bare string (the pre-fix bug: bool("fn:x")
+    # is True → closed silently dropped while NOTHING linted the malformed attach).
+    assert agent_contract({"parse": False, "attach": "fn:m:U"}).closed
+    assert agent_contract({"parse": False, "attach": [123]}).closed   # non-string items → none
+
+def agent_parse_false_attach_with_declared_provides_augments_via_resolver() -> None:
+    # THE declared-attach path (source-verified): agent_contract's parse:false branch does NOT
+    # read `provides` — `resolve_contract` augments it uniformly (node_contract.py, the same seam
+    # that grows any known node's provides). attach drops `closed`, so the declared attacher keys
+    # land as `complete` (a contract, not a proof): a downstream read of a DECLARED key is clean,
+    # an undeclared read (typo) is a WARNING. Never `closed` here → never a false hard error.
+    c = resolve_contract("agent", {"type": "agent", "parse": False,
+                                   "attach": ["fn:m:U"], "provides": ["usage"]})
+    assert c.mode == "reset" and c.provides == frozenset({"raw", "usage"}), c
+    assert c.complete and not c.closed, c
+
 def agent_parse_true_with_attach_stays_never_closed() -> None:
     c = agent_contract({"output_schema": {"properties": {"verdict": {}}},
                         "attach": ["fn:transforms:UsageAttacher"]})

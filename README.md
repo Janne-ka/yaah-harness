@@ -41,6 +41,8 @@ Because the whole workflow is a data file, the same config a machine runs is one
 
 LangGraph covers most agentic-workflow needs; if you're already in that ecosystem, staying there is usually the right call. yaah is a deliberately **smaller subset** with one different bet: the graph is **config (JSON), not Python**. So the shape above — branches, loops, gates, and their decision forms — is *data*: legible to your diff tool, to a reviewer, and to an AI assistant that reads a run's trace and delivers a gate decision through the declared JSON (an operator surface that doesn't assume a human). It's a narrower surface than LangGraph, not a wider one.
 
+Where that bet pays off measurably: an AI operator improved an extraction pipeline **33% → 96% on its 24-point eval in two gated, config-only iterations** — every proposal schema-validated, diffed, and archived; every model call traced. The recipe (and its safety envelope) is a cookbook page: **[the operator loop](docs/cookbook/operator-loop.md)**.
+
 - **Reach for yaah** when you want the workflow shape as reviewable, machine-operable config, durable human gates, and a tiny zero-dependency footprint.
 - **Stay with LangGraph** for ecosystem breadth, streaming, LangSmith, and best-in-class durability/replay.
 - **Compose, don't replace** — let yaah own the graph while your platform keeps what it's good at (e.g. emit yaah's trace into LangSmith or MLflow).
