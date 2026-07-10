@@ -53,11 +53,20 @@ def _walk(node: "ir.abc.Traversable", rel: str, out: Dict[str, str]) -> None:
     (a package marker so `importlib.resources.files()` resolves the dir),
     `__pycache__/` (bytecode cache created on first import — `.pyc` files
     aren't UTF-8 and shouldn't land in a scaffolded user dir), and `.pyc`
-    leftovers anywhere."""
+    leftovers anywhere.
+
+    A template's gitignore ships as `_gitignore` and is RENAMED to `.gitignore`
+    here. It cannot live as a literal `.gitignore` in the source tree: git
+    honors it for OUR repo too, so it silently un-tracks sibling template files
+    matching its own patterns (branch-with-gate's `published.html` rule
+    swallowed the template's `templates/published.html` — present on authors'
+    disks, absent from every fresh checkout, caught only by CI)."""
     for child in node.iterdir():
         name = child.name
         if name == "__init__.py" or name == "__pycache__" or name.endswith(".pyc"):
             continue
+        if name == "_gitignore":
+            name = ".gitignore"
         child_rel = "{}/{}".format(rel, name) if rel else name
         if child.is_dir():
             _walk(child, child_rel, out)
