@@ -53,8 +53,11 @@ where = ["src"]
 # plain data directories (hyphens like `branch-with-gate` aren't valid
 # Python module names, and the py39 import guard would trip on them).
 # Setuptools accepts the wildcard entries below as package-data for the
-# parent package and ships the subdirs intact.  Wildcards cover dotfiles
-# (.gitignore) and nested dirs (prompts/, fixtures/).
+# parent package and ships the subdirs intact.  Wildcards cover nested dirs
+# (prompts/, fixtures/). NOTE: a template's gitignore ships as `_gitignore`
+# (scaffold renames it to `.gitignore` at write time) — a literal `.gitignore`
+# in a template dir is LIVE for our own repo and silently un-tracks sibling
+# template files; test_init_template guards against reintroducing one.
 "yaah.templates.linear" = ["*", ".*", "**/*"]
 "yaah.templates.branch-with-gate" = ["*", ".*", "**/*"]
 "yaah.templates.fork-fanin" = ["*", ".*", "**/*"]
