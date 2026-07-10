@@ -198,3 +198,9 @@ Built-in tools bound per-invocation to the Agent — referenced from `agents/` m
 |---|---|---|
 | `src/yaah/agents/context_broker_tool.py` | `make_context_broker_tool` | Build a `context_broker` Tool bound to `envelope` and `comms`. |
 | `src/yaah/agents/envelope_tool.py` | `make_envelope_get_tool` | Build an `envelope_get` Tool bound to `envelope`. |
+
+## Terminology
+
+| Term | Expansion | Note |
+|---|---|---|
+| `corr` | `Envelope.correlation_id` | Short key the trace layer uses in every JSONL span. Same value as the Envelope field `correlation_id` — kept short deliberately for the hot log path. Do NOT mass-rename spans or the `Tracer.drain(corr=...)` signature; if you need the full name in a consumer, map `record["corr"]` → `correlation_id` at read time. |

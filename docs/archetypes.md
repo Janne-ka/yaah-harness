@@ -18,6 +18,9 @@ domain-free precisely so the *shapes* can carry the meaning. Picking
 the closest archetype and adapting is the workflow — not designing
 from scratch.
 
+For the full machine-readable index of node types, ports, adapters, and
+terminology, see [module-catalog.md](module-catalog.md).
+
 ---
 
 ## 1. linear
@@ -50,6 +53,12 @@ Two stages. Read the whole thing in one sitting.
   right runtime for the trace + retry + suspend story.
 
 **Known footguns:**
+- **Agents REPLACE the payload too** (parse-by-default, ADR-0004): the
+  reply payload is `raw` + the parsed JSON keys + the node's `carry:`
+  keys, nothing else. An `input` key (say `topic`) read by any stage
+  after the agent needs `"carry": ["topic"]` on the agent, or that
+  stage fails with `render_unfilled_placeholders` — and `validate
+  --strict` can't pre-catch it (a parsing agent may provide anything).
 - Transforms with `call: "envelope"` REPLACE the payload by default.
   Use `return {**envelope.payload, ...new_keys}` to enrich rather than
   overwrite. See [`docs/node-reference.md`](node-reference.md).
@@ -202,7 +211,7 @@ fake-provider overlay AND an unattended auto-approve overlay.
   key inherited from the parent. Otherwise typed-block overrides
   merge with the parent and surprise you. See
   [`docs/root-config-reference.md`](root-config-reference.md).
-- `MERMAID_RENDERER=:canned` returns a FIXED placeholder SVG, not a
+- `MERMAID_RENDERER=:fixed_test_svg` returns a FIXED placeholder SVG, not a
   real render — useful for offline overlays, misleading if you forget
   you set it. The transform prints a stderr warning when canned;
   silence with `YAAH_CANNED_QUIET=1`.

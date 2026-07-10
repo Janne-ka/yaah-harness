@@ -99,21 +99,28 @@ present, names the change to make.
 ### `error: pipeline failed: stage 'X' failed: render_unfilled_placeholders`
 
 A `{{key}}` placeholder had no value in the payload (∪ the node's `config`
-extras). Two sources:
+extras). Three sources:
 
-- A `render` node. The common cause: an `agent` upstream uses `"parse":
-  false` (ADR-0004 opt-out) without a `transform` between to merge the parsed
-  JSON onto the payload.
+- **A `render`/`agent` reading a key from BEFORE an upstream agent** — the
+  most common in multi-stage pipelines. An agent's reply REPLACES the
+  payload (ADR-0004): only `raw` + the parsed JSON keys + the agent's
+  `carry:` list survive it, so an `input` key like `topic` used after the
+  agent is gone unless the agent declares `"carry": ["topic"]`. NOTE:
+  `yaah validate --strict` does NOT catch this form — a parsing agent
+  counts as "could provide anything" — it surfaces only at run time.
+- A `render` node after an agent with `"parse": false` (ADR-0004 opt-out)
+  and no `transform` between to merge the parsed JSON onto the payload.
 - An `agent` node with `"strict_render": true` — its prompt referenced a
   `{{key}}` not reachable at that stage (the message names the key + the stage).
   This is the opt-in guard for the stage-local unfilled-placeholder case.
 
-**Fix**: for the render case, remove the `"parse": false` to let parse-by-default
-merge the JSON, OR insert a transform stage between the agent and the render. For
-the agent `strict_render` case, `carry:` the key from an upstream stage, set it in
-a prior transform, give it an `extras` default, or fix/remove the placeholder.
-`yaah validate` catches the load-time form of the render case; the run-time form
-fires if the agent's reply isn't the shape the renderer expected.
+**Fix**: for the missing-carry case, add the named key to the upstream agent's
+`"carry": [...]` (repeat at every agent/`call:"envelope"` hop between producer
+and reader). For the `"parse": false` case, remove it to let parse-by-default
+merge the JSON, OR insert a transform stage between the agent and the render
+(`yaah validate` catches this form at load time). For the agent `strict_render`
+case, `carry:` the key from an upstream stage, set it in a prior transform, give
+it an `extras` default, or fix/remove the placeholder.
 
 ### `error: node 'X' uses 'prompt' but no prompt_source passed to build()`
 

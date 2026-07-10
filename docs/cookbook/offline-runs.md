@@ -152,7 +152,8 @@ The canned-reply backend the patterns above bind to:
 - Each key's value is a list of replies; calls consume them in order. Lists
   cycle, so one entry suffices for stages called once.
 - The reply is just a string. For agent stages with parse-by-default, that
-  string should be valid JSON — the agent self-parses it onto the payload
+  string should be valid JSON — the parsed keys become the agent's NEW
+  payload, alongside `raw` and the node's `carry:` keys
   (see [decisions/0004-parse-by-default.md](../decisions/0004-parse-by-default.md)).
 
 For non-deterministic scenarios (test that retry works, simulate a failure

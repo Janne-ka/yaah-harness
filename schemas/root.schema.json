@@ -219,7 +219,8 @@
         "type": {
           "enum": [
             "file",
-            "memory"
+            "memory",
+            "postgres"
           ],
           "type": "string"
         }
@@ -240,6 +241,7 @@
           "items": {
             "enum": [
               "cost",
+              "live",
               "phase",
               "tools"
             ],

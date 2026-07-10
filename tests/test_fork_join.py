@@ -522,6 +522,87 @@ async def scenario_branch_soft_concerns_surface() -> None:
     assert concerns[0]["stage"] == "a", concerns
 
 
+async def scenario_sticky_folds_inside_fork_branch() -> None:
+    """Pre-existing harness gap (runtime-probed 2026-07): `graph.sticky` keys were
+    re-folded after every LINEAR stage (harness._drive) and after a fork's reduced
+    join, but NOT between chained stages INSIDE a fork branch (`_walk` never called
+    `_fold_sticky`) — contradicting Graph.sticky's "after every passing stage". A
+    payload-replacing stage in a branch silently dropped a sticky key a downstream
+    branch stage needed: the SAME chain that works linearly lost data in a branch.
+    The fix folds sticky in `_walk` exactly as `_drive` does, so a branch and the
+    linear path agree. Asserted side-by-side to pin that equivalence."""
+    # s1 REPLACES the payload (drops the sticky key k); s2 records what it sees.
+    seen_linear, seen_fork = [], []
+    lc = InProcessComms()
+    lc.register("role:drop", Emit("DROP", []))          # reply drops k (findings-only)
+    lc.register("role:cap", Capture(seen_linear))
+    lgraph = Graph(stages={
+        "s1": Stage("s1", node="role:drop", then="s2"),
+        "s2": Stage("s2", node="role:cap", then=None),
+    }, start="s1", sticky=["k"])
+    lout = await Harness(lc, lgraph).run(Envelope(Kind.TASK, {"k": "V"}))
+    assert isinstance(lout, Done) and seen_linear and seen_linear[0].get("k") == "V", \
+        ("linear chain must re-fold sticky k", seen_linear)
+
+    fc = InProcessComms()
+    fc.register("role:drop", Emit("DROP", []))
+    fc.register("role:cap", Capture(seen_fork))
+    fgraph = Graph(stages={
+        "spread": Stage("spread", node="", fork=["s1"], then=None),
+        "s1": Stage("s1", node="role:drop", then="s2"),
+        "s2": Stage("s2", node="role:cap", then=None),
+    }, start="spread", sticky=["k"])
+    fout = await Harness(fc, fgraph).run(Envelope(Kind.TASK, {"k": "V"}))
+    assert isinstance(fout, Done), fout
+    assert seen_fork and seen_fork[0].get("k") == "V", (
+        "sticky key k must re-fold BETWEEN branch stages like the linear chain "
+        "(was dropped by the payload-replacing s1): " + repr(seen_fork))
+
+
+async def scenario_sticky_fill_if_missing_inside_branch() -> None:
+    """The re-fold is FILL-IF-MISSING inside a branch too (never CLOBBER a fresher
+    same-key value), matching _drive/_fold_sticky. A branch stage that deliberately
+    SETS the sticky key must win over the folded original."""
+    seen = []
+    comms = InProcessComms()
+
+    class _SetK:
+        async def invoke(self, env, config):
+            return env.reply_with(Kind.RESULT, {"k": "FRESH"})  # sets k itself
+    comms.register("role:setk", _SetK())
+    comms.register("role:cap", Capture(seen))
+    graph = Graph(stages={
+        "spread": Stage("spread", node="", fork=["s1"], then=None),
+        "s1": Stage("s1", node="role:setk", then="s2"),
+        "s2": Stage("s2", node="role:cap", then=None),
+    }, start="spread", sticky=["k"])
+    out = await Harness(comms, graph).run(Envelope(Kind.TASK, {"k": "ORIG"}))
+    assert isinstance(out, Done) and seen and seen[0].get("k") == "FRESH", \
+        ("stage-set sticky value must win over the folded original", seen)
+
+
+async def scenario_sticky_reduce_sees_folded_branch_values() -> None:
+    """Edge: sticky folded inside branches must reach the fan-in reduce. Each branch
+    drops k at s1 (re-folded), then arrives at the fanin; the default reduce unions
+    the arrivals, so the joined payload carries k downstream to `summary`."""
+    seen = []
+    comms = InProcessComms()
+    comms.register("role:a", Emit("A", []))   # both branch heads drop k
+    comms.register("role:b", Emit("B", []))
+    comms.register("role:summary", Capture(seen))
+    graph = Graph(stages={
+        "spread": Stage("spread", node="", fork=["a", "b"], then="summary"),
+        "a": Stage("a", node="role:a", then="join"),
+        "b": Stage("b", node="role:b", then="join"),
+        "join": Stage("join", node="", fanin={"expect": ["a", "b"], "wait": "all"}, then=None),
+        "summary": Stage("summary", node="role:summary", then=None),
+    }, start="spread", sticky=["k"])
+    out = await Harness(comms, graph).run(Envelope(Kind.TASK, {"k": "V"}))
+    assert isinstance(out, Done) and len(seen) == 1, seen
+    assert seen[0].get("k") == "V", (
+        "fan-in reduce must see the sticky key re-folded inside the branches", seen[0])
+
+
 async def main() -> None:
     await scenario_abcd_example()
     await scenario_wait_any()
@@ -541,6 +622,9 @@ async def main() -> None:
     await scenario_branch_failure_fails_fork_instead_of_hanging()
     await scenario_terminal_fork_branch_failure_surfaces()
     await scenario_branch_soft_concerns_surface()
+    await scenario_sticky_folds_inside_fork_branch()
+    await scenario_sticky_fill_if_missing_inside_branch()
+    await scenario_sticky_reduce_sees_folded_branch_values()
     await scenario_build_classifies_fanout_as_fork()
     scenario_default_reduce_unit()
     print("ok")

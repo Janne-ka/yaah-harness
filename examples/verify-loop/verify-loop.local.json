@@ -1,0 +1,20 @@
+{
+  "transport": {"type": "inproc"},
+  "providers": {"fake": {"type": "fake_scripted", "by_model": {
+    "produce": [
+      "{\"artifact\": \"The sun dropped low, bleeding orange across the horizon.\"}",
+      "{\"artifact\": \"A gilded crown of fire sank behind the hills, washing the world in amber.\"}",
+      "{\"artifact\": \"Evening stole the light, leaving only embers scattered across the clouds.\"}"
+    ],
+    "judge": [
+      "{\"score\": 3, \"notes\": \"Competent but clich\\u00e9d; needs a fresher image.\"}",
+      "{\"score\": 7, \"notes\": \"Vivid imagery and strong verbs; a touch long.\"}",
+      "{\"score\": 5, \"notes\": \"Atmospheric but vague; missing a concrete anchor.\"}"
+    ]
+  }}},
+  "default_provider": "fake",
+  "state": {"type": "memory"},
+  "pipeline": "verify-loop-pipeline.json",
+  "input": "input.json",
+  "run": true
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "../../schemas/pipeline.schema.json",
+  "_doc": "Preflight-guard — cheap-composition. A DETERMINISTIC transform validates + normalizes the input BEFORE any model call: required-field check, size/limit guard, whitespace normalize. `branch` routes valid input to the (paid) `summarize` agent and garbage to `reject`, which terminates with a clear error and NEVER touches a model. The 'don't pay for a model call on garbage input' pattern — pure wiring, no engine code. The guard is a `transform` (call:envelope) so its result SPREADS onto the payload; it carries `title`/`text` forward so the summarize agent can read them after the guard's payload-replace.",
+  "nodes": {
+    "role:guard": {
+      "type": "transform",
+      "call": "envelope",
+      "target": "fn:transforms:guard",
+      "config": {"required": ["title", "text"], "max_chars": 280},
+      "provides": ["input_ok", "error", "title", "text"]
+    },
+    "role:summarize": {
+      "type": "agent",
+      "prompt": "file:summarize",
+      "model": "claude:claude-haiku-4-5",
+      "stage": "summarize",
+      "output_schema": {
+        "properties": {"summary": {"type": "string"}},
+        "required": ["summary"]
+      }
+    },
+    "role:reject": {
+      "type": "transform",
+      "call": "envelope",
+      "target": "fn:transforms:reject",
+      "provides": ["status", "error"]
+    }
+  },
+  "graph": {
+    "start": "guard",
+    "stages": {
+      "guard": {
+        "node": "role:guard",
+        "branch": {"on": "input_ok", "routes": {"yes": "summarize"}, "default": "reject"}
+      },
+      "summarize": {"node": "role:summarize", "then": null, "final": true},
+      "reject": {"node": "role:reject", "then": null, "final": true}
+    }
+  }
+}

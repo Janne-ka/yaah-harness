@@ -1,0 +1,13 @@
+{
+  "_doc": "Offline demo (no API key). DEFAULT input is oversized, so the guard rejects it BEFORE any model call — the summarize agent is never reached and the fake provider's script is never consumed. This is the pattern's whole point: garbage in, no model spend. Run preflight-valid.local.json for the pass path.",
+  "transport": {"type": "inproc"},
+  "providers": {"claude": {"type": "fake_scripted",
+                           "by_model": {"claude-haiku-4-5": ["{\"summary\": \"A 14:02 UTC config push dropped the cache tier, spiking p99 latency for 18 minutes until rollback.\"}"]}}},
+  "default_provider": "claude",
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "memory"},
+  "pipeline": "guard-pipeline.json",
+  "input": "fixtures/oversized.json",
+  "run": true
+}

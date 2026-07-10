@@ -58,7 +58,9 @@ We do not pick a database. We define a **base store contract**; every concrete
 store (memory, file, blob/object, sqlite, mongo, redis, nats_kv, …) is an
 **extender** of it, selected by config from a registry — exactly like
 `ApiProvider`, `DataSource`/`DataSink`, and `PrefixRouter` already work. None is
-privileged; none is baked in beyond the in-memory default.
+privileged. (Status 2026-07: three extenders ship — `memory` the default,
+`file` single-host durable, `postgres` shared-database durable with an
+optional psycopg dependency; further ones register through the plugins seam.)
 
 Backends differ in what they can do (a blob/object store can't compare-and-set or
 prefix-scan; a KV store can), so the contract is **capability-tiered** rather than
@@ -83,6 +85,21 @@ Each facade (§5–§7) declares the tier it needs; the runtime validates the ch
 extender supplies it and **fails fast** otherwise ("baton store needs a Scannable
 store; backend 'blob' only provides core") instead of breaking mid-run. Values are
 bytes; facades JSON-encode.
+
+**Lifecycle — `close()` is an optional capability, not a tier.** An extender that
+holds a long-lived resource (postgres: a DB connection) exposes `async def
+close()`; memory and file hold none (a dict; a per-op file open+close) and define
+none. The runtime builds one backend per action from the `state:` block and
+RELEASES it on exit — `runtime.run_root`/`list_gates`/`resume_gate`/`clear_state`/
+`baton_schema` build under `runtime_factories.opened_store`, which `getattr`-probes
+`close` and awaits it (normal, suspend, or error exit). An INJECTED backend is
+caller-owned and left open — the same ownership-aware stance as
+`experiment.store_factory.opened_store`. `close()` is deliberately off the port:
+adding it to the core tier would force every extender (including future blob
+stores) to stub a no-op, contradicting "an extender implements only what it can."
+Crucially, `close()` releases the CONNECTION, never the durable state — a parked
+baton persists (§5), so a fresh backend instance in another process (or a later
+resume in this one) still finds and drives it.
 
 **Possible extenders (add on need — this is a menu, not a decision):**
 
@@ -233,7 +250,7 @@ The decision *source* is plumbing; the decision *contract* is fixed.
 Root config gains one block (absent → in-memory, today's behavior):
 
 ```jsonc
-"state": { "type": "memory" }            // default; a durable extender (file / nats_kv / …) is dropped in per-deployment
+"state": { "type": "memory" }            // default; durable: {"type":"file","dir":...} or {"type":"postgres","dsn":...}
 ```
 
 - `runtime` builds one store from `state` (via the backend registry), then derives `BatonStore` +
@@ -287,8 +304,9 @@ arrives only when a deployment actually needs to survive a restart.
 - **L1 vs L2 now.** L1 (gate durability) is cheap and covers the stated need;
   full crash-resume (L2) is a bigger commitment with a write per stage. Recommend
   L1 first, L2 only on a measured need.
-- **Which durable extender first — DEFERRED, not a current concern.** The base +
-  `memory` ship now; a concrete extender (file / nats_kv / other) is written when a
-  deployment needs durability, against the unchanged base.
+- **Which durable extender first — RESOLVED by need (status 2026-07):** `file`
+  shipped first (cross-process gates), `postgres` followed (shared-database
+  durability for multi-host + experiment campaigns) — both written against the
+  unchanged base, as designed.
 - **Idempotency key ownership.** App-set per side effect vs harness-derived
   (`correlation_id` + role + attempt-independent). Start app-set; it's explicit.

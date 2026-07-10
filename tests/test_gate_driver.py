@@ -23,6 +23,7 @@ from yaah import (
     Verdict,
     drive,
 )
+from yaah.harness import build_decider
 
 
 class Stubborn:
@@ -134,6 +135,89 @@ async def scenario_concerns_reach_decider() -> None:
     assert grabbed["concerns"] and grabbed["concerns"][0]["code"] == "nit", grabbed
 
 
+async def scenario_fault_park_exact_key_only() -> None:
+    """M13: a FAULT park (escalate lane) is tagged 'human:<stage>'. A decisions
+    map keyed by the BARE stage name must NOT auto-resume it (that suffix match
+    silently auto-approved a parked FAILURE); only an EXACT 'human:<stage>' key
+    may. Driven end-to-end through build_decider + drive."""
+    def fresh_harness():
+        comms = InProcessComms()
+        comms.register("role:stubborn", Stubborn())
+        comms.register("role:check", OkValidator())
+        return Harness(comms, Graph.of(_gate_stage("merge")))
+
+    # (a) bare 'merge' key must NOT match the fault park 'human:merge' -> walk away PARKED
+    h = fresh_harness()
+    decide = build_decider({"decisions": {"merge": {"ok": True}}})
+    out = await drive(h, Envelope("task", {}), decide)
+    assert isinstance(out, Suspended), "human:merge must not suffix-match decisions['merge']; got {}".format(out)
+    assert out.awaiting == "human:merge", out.awaiting
+    assert await h.batons.list_suspended(), "the unresumed fault must stay a parked baton"
+
+    # (b) exact 'human:merge' key DOES resume the fault park to completion
+    h2 = fresh_harness()
+    decide2 = build_decider({"decisions": {"human:merge": {"ok": True}}})
+    out2 = await drive(h2, Envelope("task", {}), decide2)
+    assert isinstance(out2, Done), out2
+    assert not await h2.batons.list_suspended(), "baton evicted after the exact-key resume finishes"
+
+
+async def scenario_auto_decision_carries_namespaced_approver() -> None:
+    """Audit clarity (approver wiring): a config-`decisions` auto-answer is not a
+    person — its resume envelope carries the RESERVED, namespaced approver
+    'config:decisions' so the trace distinguishes 'automated by declared config'
+    from 'resumed by an unknown path'. Header, never payload (the lane-A trap:
+    a payload key would become a decision key and flow downstream)."""
+    decide = build_decider({"decisions": {"merge": {"ok": True}}})
+    env = await decide(_FakeSuspended("merge"))
+    assert env is not None
+    assert env.headers.get("approver") == "config:decisions", env.headers
+    assert "approver" not in env.payload, "approver must be a header, not a decision key"
+
+
+async def scenario_stdin_decision_carries_terminal_approver(monkey_stdin=None) -> None:
+    """The interactive stdin fallback IS a human — record best-effort identity as
+    'terminal:<os-user>': the prefix honestly discloses OS-level attribution
+    (who was logged in), not authenticated identity."""
+    import io
+    import sys as _sys
+    from yaah.harness.gate_driver import _stdin_decision
+    old = _sys.stdin
+    _sys.stdin = io.StringIO('{"ok": true}\n')
+    try:
+        env = _stdin_decision(_FakeSuspended("merge"))
+    finally:
+        _sys.stdin = old
+    approver = env.headers.get("approver", "")
+    assert approver.startswith("terminal:") and len(approver) > len("terminal:"), env.headers
+    assert env.payload == {"ok": True}, env.payload
+
+
+class _FakeSuspended:
+    """Just enough Suspended surface for the decider paths (awaiting + ask/concerns)."""
+    def __init__(self, awaiting: str) -> None:
+        self.awaiting = awaiting
+        self.ask = ""
+        self.concerns = []
+
+
+async def scenario_driven_walkaway_is_graceful() -> None:
+    """A decisions-driven run that reaches a gate it has no answer for must end
+    as a parked baton, NOT a traceback: drive() returns the Suspended outcome
+    (previously build_decider raised RuntimeError inside the loop)."""
+    comms = InProcessComms()
+    comms.register("role:stubborn", Stubborn())
+    comms.register("role:check", OkValidator())
+    h = Harness(comms, Graph.of(_gate_stage("gate")))
+
+    decide = build_decider({"decisions": {"something-else": {"ok": True}}})
+    out = await drive(h, Envelope("task", {}), decide)  # must not raise
+    assert isinstance(out, Suspended), out
+    assert out.awaiting == "human:gate", out.awaiting
+    parked = await h.batons.list_suspended()
+    assert parked and parked[0].id == out.baton_id, "walk-away leaves a resumable baton"
+
+
 async def scenario_max_gates_guard() -> None:
     """A graph that routes back to its own gate (here: a branch that always
     defaults to itself) re-suspends forever — the guard makes drive() raise,
@@ -159,6 +243,10 @@ async def main() -> None:
     await scenario_single_gate_to_done()
     await scenario_multi_gate_async_decider()
     await scenario_concerns_reach_decider()
+    await scenario_auto_decision_carries_namespaced_approver()
+    await scenario_stdin_decision_carries_terminal_approver()
+    await scenario_fault_park_exact_key_only()
+    await scenario_driven_walkaway_is_graceful()
     await scenario_max_gates_guard()
     print("ok")
 

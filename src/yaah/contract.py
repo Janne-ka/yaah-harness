@@ -69,17 +69,17 @@ def fn_provides_resolver(base_dir: Optional[str] = None) -> Callable[[Any], Opti
     sys.path (not prepended like the runtime's `insert(0)`) so a name-colliding app module can
     never shadow a stdlib/3rd-party one during the import — if it doesn't resolve, the transform
     just stays undeclared (a safe false-negative on this opt-in path)."""
-    from .external_call import import_callable
+    from .external_call import FN_PREFIX, import_callable
 
     def resolve(target: Any) -> Optional[List[str]]:
-        if not isinstance(target, str) or not target.startswith("fn:"):
+        if not isinstance(target, str) or not target.startswith(FN_PREFIX):
             return None
         added = False
         if base_dir and base_dir not in sys.path:
             sys.path.append(base_dir)   # APPEND, not insert(0): never shadow a stdlib/3rd-party
             added = True                # module a transitively-imported module needs
         try:
-            fn = import_callable(target[len("fn:"):])
+            fn = import_callable(target[len(FN_PREFIX):])
         except (Exception, SystemExit):
             # unimportable / not 'module:func' / a module that sys.exit()s at import → can't
             # resolve, stay undeclared. Catch SystemExit too (a BaseException) so the lint NEVER

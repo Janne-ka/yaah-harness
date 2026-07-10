@@ -1,5 +1,9 @@
 # A/B experiments — measure config variants, promote the winner
 
+**Runnable example:** [`examples/hello-yaah/experiment.json`](../examples/hello-yaah/README.md)
+— two summarizer variants, offline on fakes: campaign → matrix → rescore in
+three commands.
+
 The product loop `yaah ab` serves: you need to balance **cost vs performance**
 (model choice, prompts, retry knobs, topology) with data, not opinion. Run
 variants — on real providers when the campaign says so — while the engine
@@ -37,13 +41,25 @@ The experiment names the variants and the campaign matrix:
 }
 ```
 
+The `store` block selects the row substrate:
+
+| `store.type` | Required keys | Effect |
+|---|---|---|
+| `"jsonl"` (default) | `dir` (optional, default `".ab"`) | One `.rows.jsonl` file per experiment under `store.dir` — zero-dep, inspectable, CI-friendly. |
+| `"postgres"` | `dsn` (required), `table` (optional) | INSERT-only rows table in Postgres (`pip install "psycopg[binary]"`); `store.dir` still sets the trace-file directory. |
+
+Example for production campaigns:
+```json
+"store": { "type": "postgres", "dsn": "postgresql://user:pass@host/db", "dir": ".ab" }
+```
+
 `price_map` uses the SAME rate-card shape as `yaah trace` (`{model:
 {input, output}}` in $ per 1k tokens) — one dialect everywhere, so the same
 map prices both the campaign report and ad-hoc trace inspection.
 
 `yaah ab judge-experiment.json` runs variants × inputs × repetitions and
-appends one row per run to the experiment store (JSONL per experiment under
-`store.dir`; a database adapter is the planned production substrate).
+appends one row per run to the experiment store (JSONL by default; set
+`store.type: "postgres"` with a DSN for production campaigns).
 
 Fingerprint honesty: the row fingerprint hashes the effective configs plus
 file-sourced prompt/template BYTES. It does NOT hash remote prompt contents
@@ -67,6 +83,16 @@ Pre-flight aborts before any model call: variants must validate, must not use
 every model-calling node needs an explicit `model`, and every model (including
 `escalate_model` rungs) must be in `price_map` — a matrix that silently reads
 $0.00 is worse than no matrix.
+
+Pre-flight also runs the experiment-level CONTRACT checks, with the engine's
+two-severity honesty split: a knowable input that PROVABLY can't drive a
+variant (a render key certain to be absent) or a metric path provably never
+produced ABORTS, naming variant + key — money never burns on garbage; a
+declared-but-unproven metric prints `[ab: metric-unproven]` to stderr and an
+input that provably forces a branch to its default prints
+`[ab: branch-default-only]` — both warnings, not failures (declare the metric
+key in the producing agent's `output_schema` to silence the former). The
+hello-yaah example deliberately shows two such warnings.
 
 Cost capture is FORCED during a campaign: the variant's own `trace` config is
 replaced with a cost-capturing file sink into the campaign's trace file
@@ -108,6 +134,53 @@ flag yet). Tier shifts vs collection time measure the CONTRACT's effect on
 old outputs, not the model's quality — recovery is deliberately anchored on
 the CANDIDATE schema's required keys, exactly as the runtime would anchor it
 once that schema ships.
+
+## Golden diff — regress collected outputs against a pinned artifact
+
+`yaah ab judge-experiment.json --golden expected.json` (add `--json` for
+machines) diffs every collected run's output payload against a **golden** — a
+plain JSON file you pin by copying a known-good run's output. It closes the
+"no expected artifact to diff a run against" gap: per (variant, fingerprint)
+population you get `n_match` / `n_differ` and, for the runs that drifted, a
+compact deduplicated diff (`added` / `removed` / `changed` keys, identical
+drift shapes collapsed with a count).
+
+Like `--report` and `--rescore` it is a **pure read, zero model calls, safe
+mid-campaign** — and a **report, not a gate**: `n_differ == 0` is your green,
+but the read never fails on drift (a caller that wants CI enforcement keys off
+`n_differ` itself). The diff direction is golden → actual: `removed` is an
+expected key the run didn't produce, `added` is a key the run produced beyond
+the golden, `changed` carries a bounded `{golden, actual}` pair. Objects are
+recursed (drift lands on a dotted path like `meta.score`); values are
+**bounded** — a long string is previewed with its length, a list/object becomes
+a shape token (`{"array": N}` / `{"object": N}`), and a blown-up path list is
+capped with a `__truncated__` sentinel — so a multi-KB payload can never flood
+the report.
+
+### Scrub — declare volatile keys so the golden doesn't churn
+
+Timestamps, ids, correlation ids and run paths differ every run; left in, they
+make a golden mismatch on every diff. Declare them as data in the experiment
+config and they're removed from **both** the golden and every output before
+diffing:
+
+```json
+"scrub": ["ts", "corr", "meta.run_id"]
+```
+
+Each entry is a dotted key **path**. v1 is meant for **top-level keys and one
+nesting level** (`"ts"`, `"meta.run_id"`) — that shallow shape is the intended
+simplicity; deeper paths work but aren't the design point. A scrub key present
+**nowhere** (golden or any output) is warned, not silently ignored — a
+misdeclared volatile key would otherwise churn the diff and get blamed on the
+pipeline.
+
+Two honest limits: values are compared with `==` (no float-epsilon tolerance —
+diff FAKE/deterministic campaigns, or `scrub` the volatile keys you can name; a
+stochastic model will drift every leaf), and **lists are compared as whole
+values**, not recursed by index, so a single element change reads as a
+whole-array change. One golden is diffed against every row, so a cell spanning
+multiple inputs is warned (pin a single-input experiment for a clean golden).
 
 ## Promotion
 

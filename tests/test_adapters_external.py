@@ -338,11 +338,225 @@ async def nats_serve_lets_cancellation_through() -> None:
     assert comms._nc.published == [], comms._nc.published
 
 
+# ---- LiteLLMProvider: real chunk streaming (`stream: true`) -------------------
+# The SSE chunk contract these encode (OpenAI/litellm convention): each chunk is
+# {"choices": [{"delta": {content?, tool_calls?}, "finish_reason": None|"stop"|
+# "tool_calls"}], "usage"?: {...}}; tool_calls arrive as INDEXED FRAGMENTS whose
+# function.arguments accumulate across chunks; usage rides the final chunk only
+# when stream_options include_usage is honored.
+
+def _chunks(*chunks):
+    """An async-iterator the stub returns when called with stream=True."""
+    async def _iter():
+        for c in chunks:
+            yield c
+    return _iter()
+
+
+async def litellm_stream_true_yields_incremental_deltas() -> None:
+    # THE monitoring case: text arrives as multiple deltas (the live bridge's
+    # heartbeat needs >1 pulse opportunity), usage arrives on the final chunk.
+    seen = {}
+
+    async def stub(**kwargs):
+        seen.update(kwargs)
+        return _chunks(
+            {"choices": [{"delta": {"content": "Hel"}, "finish_reason": None}]},
+            {"choices": [{"delta": {"content": "lo"}, "finish_reason": None}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}],
+             "usage": {"prompt_tokens": 7, "completion_tokens": 2}},
+        )
+
+    be = LiteLLMProvider(acompletion=stub, stream=True)
+    events = [ev async for ev in be.stream({"messages": [{"role": "user", "content": "p"}]})]
+    assert seen["stream"] is True, seen
+    assert seen["stream_options"] == {"include_usage": True}, seen
+    types = [e["type"] for e in events]
+    assert types == ["start", "text_delta", "text_delta", "done"], events
+    assert [e.get("delta") for e in events[1:3]] == ["Hel", "lo"], events
+    assert events[-1]["stop_reason"] == "end_turn", events[-1]
+    assert events[-1]["usage"] == {"prompt_tokens": 7, "completion_tokens": 2}, events[-1]
+
+
+async def litellm_stream_reports_usage_to_cost_bridge() -> None:
+    # R4: on the streaming path the cost callback fires from the final chunk's usage.
+    got = {}
+
+    async def stub(**kwargs):
+        return _chunks(
+            {"choices": [{"delta": {"content": "x"}, "finish_reason": "stop"}],
+             "usage": {"prompt_tokens": 3, "completion_tokens": 1}})
+
+    be = LiteLLMProvider(acompletion=stub, stream=True)
+    async for _ in be.stream({"messages": [], "model": "gpt-4o"},
+                             on_usage=lambda u: got.update(u)):
+        pass
+    assert got == {"tokens_in": 3, "tokens_out": 1, "model": "gpt-4o"}, got
+
+
+async def litellm_stream_assembles_chunked_tool_calls() -> None:
+    # tool_calls arrive as indexed fragments: id+name on the first fragment, the
+    # arguments JSON split across chunks. One assembled toolcall_end must come out —
+    # NOT a silent single-shot fallback (the claude_cli underdelivery lesson: a
+    # tools call with stream:true keeps streaming, no hidden downgrade).
+    async def stub(**kwargs):
+        assert kwargs.get("stream") is True, "tools must NOT silently disable streaming"
+        return _chunks(
+            {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "c1", "function": {"name": "grep", "arguments": '{"q":'}}]},
+                "finish_reason": None}]},
+            {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"arguments": '"x"}'}}]},
+                "finish_reason": None}]},
+            {"choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
+        )
+
+    be = LiteLLMProvider(acompletion=stub, stream=True)
+    events = [ev async for ev in be.stream(
+        {"messages": [], "tools": [{"name": "grep"}]})]
+    calls = [e for e in events if e["type"] == "toolcall_end"]
+    assert len(calls) == 1, events
+    assert calls[0]["id"] == "c1" and calls[0]["name"] == "grep", calls
+    assert calls[0]["args"] == {"q": "x"}, calls
+    assert events[-1] == {"type": "done", "stop_reason": "tool_use"}, events[-1]
+
+
+async def litellm_stream_tolerates_malformed_chunks() -> None:
+    # defensive parity with the single-shot path: junk chunks are skipped, bad
+    # accumulated arguments degrade to {}, the stream still finishes with done.
+    async def stub(**kwargs):
+        return _chunks(
+            "not-a-dict",
+            {"choices": []},
+            {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "c1", "function": {"name": "t", "arguments": "{broken"}}]},
+                "finish_reason": None}]},
+            {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+        )
+
+    be = LiteLLMProvider(acompletion=stub, stream=True)
+    events = [ev async for ev in be.stream({"messages": []})]
+    # deltas arrive mid-stream; assembled calls flush AFTER the stream ends
+    # (fragments may accumulate until the last chunk), hence this order:
+    types = [e["type"] for e in events]
+    assert types == ["start", "text_delta", "toolcall_end", "done"], events
+    call = next(e for e in events if e["type"] == "toolcall_end")
+    assert call["args"] == {}, call        # unparseable accumulated JSON degrades
+
+
+class _PydanticishChunk:
+    """A ModelResponseStream stand-in: the REAL SDK yields pydantic objects, not
+    dicts — the provider must go through `_as_dict` (model_dump) per chunk. The
+    dict-stub tests alone would miss an object-path regression (eval finding)."""
+    def __init__(self, d):
+        self._d = d
+
+    def model_dump(self):
+        return dict(self._d)
+
+
+async def litellm_stream_reports_resolved_model_like_single_shot() -> None:
+    # eval finding: the single-shot path labels cost with the PROVIDER-RESOLVED
+    # model (resp.model, e.g. "gpt-4o-2024-08-06"); the chunked path must do the
+    # same — real chunks carry `model` in model_dump() — not silently fall back
+    # to the requested name. Divergence skews the per-model mix + fallback pricing.
+    got = {}
+
+    async def stub(**kwargs):
+        return _chunks(
+            _PydanticishChunk({"model": "gpt-4o-2024-08-06",
+                               "choices": [{"delta": {"content": "x"},
+                                            "finish_reason": None}]}),
+            _PydanticishChunk({"model": "gpt-4o-2024-08-06", "choices": [],
+                               "usage": {"prompt_tokens": 3, "completion_tokens": 1}}),
+        )
+
+    be = LiteLLMProvider(acompletion=stub, stream=True)
+    events = [ev async for ev in be.stream({"messages": [], "model": "gpt-4o"},
+                                           on_usage=lambda u: got.update(u))]
+    assert got.get("model") == "gpt-4o-2024-08-06", got   # resolved, not requested
+    # and the object path works end-to-end: delta extracted through model_dump,
+    # the empty-choices usage-only final chunk tolerated
+    assert [e["type"] for e in events] == ["start", "text_delta", "done"], events
+
+
+async def litellm_stream_merges_author_stream_options() -> None:
+    # eval finding: the hardcoded stream_options CLOBBERED an author's value —
+    # no way to opt out of the usage chunk (or dodge a provider that rejects the
+    # field's contents). The author's dict must win on conflicts.
+    seen = {}
+
+    async def stub(**kwargs):
+        seen.update(kwargs)
+        return _chunks({"choices": [{"delta": {"content": "x"},
+                                     "finish_reason": "stop"}]})
+
+    be = LiteLLMProvider(acompletion=stub, stream=True,
+                         stream_options={"include_usage": False, "custom": 1})
+    async for _ in be.stream({"messages": []}):
+        pass
+    assert seen["stream_options"] == {"include_usage": False, "custom": 1}, seen
+
+
+async def litellm_stream_missing_usage_is_tolerated() -> None:
+    # a provider that ignores include_usage: done simply has no usage (the cost
+    # report shows a zero-token call — the documented forensic signal, not a crash).
+    async def stub(**kwargs):
+        return _chunks({"choices": [{"delta": {"content": "x"}, "finish_reason": "stop"}]})
+
+    be = LiteLLMProvider(acompletion=stub, stream=True)
+    events = [ev async for ev in be.stream({"messages": []})]
+    assert events[-1]["type"] == "done" and "usage" not in events[-1], events[-1]
+
+
+async def litellm_default_stays_single_shot() -> None:
+    # no `stream: true` → the legacy single-shot call, byte-identical: the SDK
+    # must NOT receive a stream kwarg (the battle-tested path stays the default).
+    seen = {}
+
+    async def stub(**kwargs):
+        seen.update(kwargs)
+        return _resp({"content": "hello"})
+
+    out = await _ap.complete(LiteLLMProvider(acompletion=stub), "p")
+    assert out == "hello"
+    assert "stream" not in seen and "stream_options" not in seen, seen
+
+
+async def litellm_stream_midstream_raise_propagates() -> None:
+    # a mid-stream failure (network drop) must PROPAGATE, not be swallowed into a
+    # silent half-reply: the engine's consumers keep partial state local, so a
+    # raise fails the call cleanly (same failure surface as the single-shot path).
+    async def stub(**kwargs):
+        async def _iter():
+            yield {"choices": [{"delta": {"content": "par"}, "finish_reason": None}]}
+            raise RuntimeError("connection dropped")
+        return _iter()
+
+    be = LiteLLMProvider(acompletion=stub, stream=True)
+    try:
+        async for _ in be.stream({"messages": []}):
+            pass
+    except RuntimeError as e:
+        assert "connection dropped" in str(e)
+        return
+    raise AssertionError("mid-stream raise must propagate, not be swallowed")
+
+
 async def main() -> None:
     for fn in [
         litellm_complete_shapes_request_and_returns_content,
         litellm_defaults_model_when_unset,
         litellm_strips_agent_only_opts,
+        litellm_stream_true_yields_incremental_deltas,
+        litellm_stream_reports_usage_to_cost_bridge,
+        litellm_stream_reports_resolved_model_like_single_shot,
+        litellm_stream_merges_author_stream_options,
+        litellm_stream_assembles_chunked_tool_calls,
+        litellm_stream_tolerates_malformed_chunks,
+        litellm_stream_missing_usage_is_tolerated,
+        litellm_default_stays_single_shot,
+        litellm_stream_midstream_raise_propagates,
         litellm_turn_parses_tool_calls,
         litellm_turn_returns_text_when_no_calls,
         langfuse_passes_label_and_version_and_returns_text,

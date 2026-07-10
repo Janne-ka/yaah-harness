@@ -28,6 +28,12 @@ Event types (tagged via "type" field):
 - start         : the response has begun                {"type": "start"}
 - text_delta    : a chunk of assistant text             {"type": "text_delta", "delta": str}
 - toolcall_end  : a tool call has been fully assembled  {"type": "toolcall_end", "id", "name", "args"}
+- notice        : PASSIVE observation of the provider's {"type": "notice", "kind": str, "tool"?: str}
+                  own internal activity (e.g. claude_cli's in-CLI tool loop).
+                  NEVER a call the engine executes — collectors MUST ignore it
+                  (they ignore any unknown type); only the live-monitoring
+                  bridge gives it meaning. Additive: consumers switch on known
+                  types, so new passive kinds cannot break assembly.
 - done          : the turn ended cleanly                {"type": "done", "stop_reason": str, "usage"?: dict}
 - error         : the provider raised                   {"type": "error", "message": str}
 
@@ -40,6 +46,7 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
+import inspect
 from abc import abstractmethod
 from typing import Any, AsyncIterator, Dict, List, Optional, Protocol, runtime_checkable
 
@@ -71,6 +78,12 @@ class _DoneEvent(TypedDict, total=False):
     type: Literal["done"]
     stop_reason: str       # "end_turn" | "tool_use" | "max_tokens" | "error" | ...
     usage: Dict[str, Any]  # provider-native usage record, opaque to consumers
+
+
+class _NoticeEvent(TypedDict, total=False):
+    type: Literal["notice"]
+    kind: str               # "tool_use" | "tool_result" (open set — passive kinds may grow)
+    tool: str
 
 
 class _ErrorEvent(TypedDict):
@@ -263,18 +276,36 @@ async def stream_of(provider: Any, context: Context, **opts: Any) -> AsyncIterat
 
 async def complete(provider: Any, prompt: str, *,
                    model: Optional[str] = None, system: Optional[str] = None,
+                   on_event: Optional[Any] = None,
                    **opts: Any) -> str:
     """Collect a model reply into a single string (the `complete()` shape).
 
     Routes through `stream_of`, so a collected-only provider (a test double or
-    an external legacy backend) works too — that fallback lives in ONE place."""
+    an external legacy backend) works too — that fallback lives in ONE place.
+    `on_event` (optional, may be async) sees each StreamEvent BEFORE assembly —
+    the same live-monitoring seam run_tool_loop exposes (MED-002); None = off."""
     ctx: Context = {"messages": [{"role": "user", "content": prompt}]}
     if system is not None:
         ctx["system"] = system
     if model is not None:
         ctx["model"] = model
-    msg = await assemble_message(stream_of(provider, ctx, **opts))
+    events = stream_of(provider, ctx, **opts)
+    if on_event is not None:
+        events = _tee_events(events, on_event)
+    msg = await assemble_message(events)
     return "".join(b.get("text", "") for b in msg.get("content", []) if b.get("type") == "text")
+
+
+async def _tee_events(events: AsyncIterator[StreamEvent],
+                      on_event: Any) -> AsyncIterator[StreamEvent]:
+    """Forward each event to `on_event` (awaited when awaitable), then yield it
+    through unchanged — the observation point complete() threads for a live
+    bridge. Mirrors run_tool_loop's forwarding contract exactly."""
+    async for ev in events:
+        r = on_event(ev)
+        if inspect.isawaitable(r):
+            await r
+        yield ev
 
 
 async def turn(provider: Any, messages: List[Dict[str, Any]],

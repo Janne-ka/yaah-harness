@@ -15,7 +15,11 @@ The reliability stance (each point test-pinned):
   validate_config, `live_config` rejection (per-invocation mutable re-reads
   would make the fingerprint a lie), explicit `model` on every model-calling
   node + full price_map coverage (a silent $0.00 in the matrix is the failure
-  mode that kills trust in the data).
+  mode that kills trust in the data), and the experiment-level CONTRACT checks
+  (contracts.py): an input that provably breaks a variant's render, or a
+  metric path provably never produced, aborts; an input that only forces a
+  branch to its default, and a declared-but-unproven metric, warn on stderr
+  (the ADR-0005/0006 two-severity split).
 - EVERY run lands a row — done, suspended (parked at a gate), failed (the
   verdict codes travel), errored — and the campaign continues; failures are
   data. Rows carry the variant's config FINGERPRINT (root + pipeline + prompt
@@ -50,7 +54,10 @@ _MODEL_NODE_TYPES = ("agent", "agent_loop")
 # (eval catch R2). `note`/`_*` are the config-comment conventions.
 _EXPERIMENT_KEYS = frozenset({
     "id", "variants", "inputs", "repetitions", "price_map", "store", "note",
-    "metrics",   # report-side: {name: dotted payload path} — validated in _check
+    "metrics",   # {name: dotted payload path} — read by the report AND by the
+                 # pre-flight plausibility check (contracts.py); validated in _check
+    "scrub",     # [dotted key path] — volatile keys removed from both sides by
+                 # the golden diff (golden.py); validated in _check
 })
 
 
@@ -89,12 +96,38 @@ def _check_experiment(cfg: Dict[str, Any]) -> None:
     store = cfg.get("store", {})
     if not isinstance(store, dict):
         errs.append("`store` must be an object (e.g. {\"dir\": \".ab\"})")
+    else:
+        # STORE_TYPES/STORE_KEYS live in store_factory — the construction site —
+        # so validation here can never drift from what the factory accepts.
+        from .store_factory import STORE_KEYS, STORE_TYPES
+        stype = store.get("type", "jsonl")
+        if stype not in STORE_TYPES:
+            errs.append(
+                "`store.type` {!r} is unknown — known: {}".format(
+                    stype, ", ".join(repr(t) for t in sorted(STORE_TYPES))))
+        else:
+            unknown_store = [k for k in store if k not in STORE_KEYS[stype]]
+            if unknown_store:
+                errs.append(
+                    "unknown key(s) in `store` for type {!r}: {} — "
+                    "known: {}".format(
+                        stype,
+                        ", ".join(repr(k) for k in unknown_store),
+                        ", ".join(repr(k) for k in sorted(STORE_KEYS[stype]))))
+            if stype == "postgres" and not store.get("dsn"):
+                errs.append(
+                    '`store.dsn` is required for type "postgres" — '
+                    'add {"dsn": "postgresql://user:pass@host/db"}')
     metrics = cfg.get("metrics", {})
     if not (isinstance(metrics, dict)
             and all(isinstance(k, str) and k and isinstance(v, str) and v
+                    and all(v.split("."))   # no empty segment: ".score"/"a..b" are typos
                     for k, v in metrics.items())):
-        errs.append("`metrics` must map metric name -> dotted payload path "
-                    "(e.g. {\"score\": \"review.score\"})")
+        errs.append("`metrics` must map metric name -> dotted payload path with "
+                    "non-empty segments (e.g. {\"score\": \"review.score\"}; "
+                    "\".score\" or \"a..b\" is a typo)")
+    from .golden import _validate_scrub
+    errs.extend(_validate_scrub(cfg.get("scrub")))
     if errs:
         raise ValueError("invalid experiment config:\n  - " + "\n  - ".join(errs))
 
@@ -120,9 +153,14 @@ def _model_refs(pipeline: Dict[str, Any]) -> List[str]:
 
 
 def _preflight_variant(name: str, path: str, exp_base: str,
-                       price_map: Dict[str, Any]) -> Tuple[Dict[str, Any], str, str]:
+                       price_map: Dict[str, Any], entries: List[Any],
+                       metrics: Dict[str, str]) -> Tuple[Dict[str, Any], str, str]:
     """Load + validate one variant; returns (effective_root, variant_base,
-    fingerprint). Raises ValueError naming the variant on any problem."""
+    fingerprint). Raises ValueError naming the variant on any problem.
+    `entries` are the experiment inputs' (id, key-set) pairs and `metrics` the
+    declared metric paths — the experiment-level contract checks (contracts.py)
+    run here because inputs are SHARED across variants by design (the run loop
+    overrides each variant's `input` with them)."""
     from ..runtime_factories import _read_json, _rel
     from ..validate import validate_config
     root_path = _rel(exp_base, path)
@@ -152,6 +190,9 @@ def _preflight_variant(name: str, path: str, exp_base: str,
             "axis would silently read $0.00; add them ({{\"input\": $, "
             "\"output\": $}} per 1k tokens; an explicit 0 rate for free/fake "
             "models)".format(name, ", ".join(missing)))
+    from .contracts import check_variant_contracts
+    for warning in check_variant_contracts(name, pipeline, base, entries, metrics):
+        print(warning, file=sys.stderr)
     return root, base, config_fingerprint(root, base)
 
 
@@ -180,10 +221,9 @@ async def run_experiment(cfg: Dict[str, Any], base: str, *,
     _check_experiment(cfg)
     exp_id = cfg["id"]
     price_map = cfg["price_map"]
+    # store.dir is always the campaign directory regardless of row-store type —
+    # the trace file (cost sink) always lands on the local filesystem.
     store_dir = _rel(base, (cfg.get("store") or {}).get("dir", ".ab"))
-    if store is None:
-        from ..adapters.experiment_stores import JsonlExperimentStore
-        store = JsonlExperimentStore(store_dir)
     trace_path = os.path.join(store_dir, "{}.trace.jsonl".format(exp_id))
 
     # PRE-FLIGHT: every variant loads, validates, prices — and every fixture
@@ -194,49 +234,56 @@ async def run_experiment(cfg: Dict[str, Any], base: str, *,
     if missing_inputs:
         raise ValueError("input fixture(s) not found: {}".format(
             ", ".join(repr(p) for p in missing_inputs)))
+    from .contracts import entry_key_sets
+    entries = entry_key_sets(cfg["inputs"], base)
     variants: Dict[str, Tuple[Dict[str, Any], str, str]] = {}
     for name, path in cfg["variants"].items():
-        variants[name] = _preflight_variant(name, path, base, price_map)
+        variants[name] = _preflight_variant(name, path, base, price_map,
+                                            entries, cfg.get("metrics") or {})
 
     by_variant: Dict[str, Dict[str, int]] = {}
     total = 0
-    for name, (root, vbase, fingerprint) in variants.items():
-        counts = by_variant.setdefault(
-            name, {"done": 0, "suspended": 0, "failed": 0, "error": 0})
-        for i, inp in enumerate(cfg["inputs"]):
-            if isinstance(inp, str):
-                input_id, input_val = inp, _rel(base, inp)  # fixture: experiment-relative
-            else:
-                input_id, input_val = "inline-{}".format(i), inp
-            for rep in range(cfg.get("repetitions", 1)):
-                effective = dict(root)
-                effective["input"] = input_val
-                effective["run"] = True   # a campaign run is always a one-shot run
-                # the experiment owns observability: force cost capture into
-                # the campaign's trace file (report joins by corr)
-                effective["trace"] = {
-                    "mode": "tracer", "capture": ["phase", "cost"],
-                    "sinks": [{"type": "file", "path": trace_path}],
-                }
-                t0 = time.time()
-                try:
-                    out = await run_root(effective, vbase)
-                    fields = _outcome_row(out)
-                except StageFailed as e:
-                    failed_env = e.output
-                    fields = {"outcome": "failed",
-                              "corr": (failed_env.correlation_id
-                                       if failed_env is not None else None),
-                              "baton_id": None, "output": None,
-                              "failure": [f.code for f in e.verdict.failures] or [str(e)]}
-                except Exception as e:  # a campaign survives one bad run; the row says why
-                    fields = {"outcome": "error", "corr": None, "baton_id": None,
-                              "output": None, "error": repr(e)}
-                row = {"experiment_id": exp_id, "variant": name,
-                       "fingerprint": fingerprint, "input_id": input_id,
-                       "rep": rep, "t_start": t0, "t_end": time.time(), **fields}
-                await store.append_row(exp_id, row)
-                counts[fields["outcome"]] = counts.get(fields["outcome"], 0) + 1
-                total += 1
+    # store built AFTER pre-flight: a config that aborts above never opens a
+    # DB connection; opened_store closes on exit only what it built.
+    from .store_factory import opened_store
+    async with opened_store(cfg, base, store) as st:
+        for name, (root, vbase, fingerprint) in variants.items():
+            counts = by_variant.setdefault(
+                name, {"done": 0, "suspended": 0, "failed": 0, "error": 0})
+            for i, inp in enumerate(cfg["inputs"]):
+                if isinstance(inp, str):
+                    input_id, input_val = inp, _rel(base, inp)  # fixture: experiment-relative
+                else:
+                    input_id, input_val = "inline-{}".format(i), inp
+                for rep in range(cfg.get("repetitions", 1)):
+                    effective = dict(root)
+                    effective["input"] = input_val
+                    effective["run"] = True   # a campaign run is always a one-shot run
+                    # the experiment owns observability: force cost capture into
+                    # the campaign's trace file (report joins by corr)
+                    effective["trace"] = {
+                        "mode": "tracer", "capture": ["phase", "cost"],
+                        "sinks": [{"type": "file", "path": trace_path}],
+                    }
+                    t0 = time.time()
+                    try:
+                        out = await run_root(effective, vbase)
+                        fields = _outcome_row(out)
+                    except StageFailed as e:
+                        failed_env = e.output
+                        fields = {"outcome": "failed",
+                                  "corr": (failed_env.correlation_id
+                                           if failed_env is not None else None),
+                                  "baton_id": None, "output": None,
+                                  "failure": [f.code for f in e.verdict.failures] or [str(e)]}
+                    except Exception as e:  # a campaign survives one bad run; the row says why
+                        fields = {"outcome": "error", "corr": None, "baton_id": None,
+                                  "output": None, "error": repr(e)}
+                    row = {"experiment_id": exp_id, "variant": name,
+                           "fingerprint": fingerprint, "input_id": input_id,
+                           "rep": rep, "t_start": t0, "t_end": time.time(), **fields}
+                    await st.append_row(exp_id, row)
+                    counts[fields["outcome"]] = counts.get(fields["outcome"], 0) + 1
+                    total += 1
     return {"experiment": exp_id, "rows": total, "trace": trace_path,
             "by_variant": by_variant}

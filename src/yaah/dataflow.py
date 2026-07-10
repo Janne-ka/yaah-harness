@@ -30,11 +30,10 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from .node_contract import Flow, apply, meet, resolve_contract
-from .templating import PLACEHOLDER as _PLACEHOLDER   # the {{mustache}} a render fills — one copy
+from .node_contract import (ConsumesFor, ContractFor, Flow, apply, may_suspend, meet,
+                            resolve_consumes, resolve_contract)
 
 # A provides value on an edge is None (the fixpoint identity — "not yet reached") or a
 # concrete Flow (known keys + how exact the set is). This module holds NO per-node key
@@ -51,22 +50,119 @@ def _undeclared_envelope_transform(node: Dict[str, Any]) -> bool:
             and not isinstance(node.get("provides"), list))
 
 
-def _transfer(node: Optional[Dict[str, Any]], pin: Provides, sticky: Set[str],
-              tainted: List[str], stage_name: str) -> Flow:
-    """How this stage's node rewrites the incoming flow. A routing stage (no node) passes the
+# The ENGINE-set keys of a fanout stage's merged payload (harness._produce_fanout):
+# the merge is `dict(input.payload)` updated with exactly `results=`, `roles=`,
+# `failed_roles=` — inbound keys survive, these three are always added, and role
+# outputs stay NESTED under `results` (never top-level). A k-of-n pass
+# (`min_success`) hands forward the same shape.
+_FANOUT_MERGE_KEYS = frozenset({"results", "roles", "failed_roles"})
+_FOREACH_MERGE_KEYS = frozenset({"results", "failed_items"})  # ADR-0007 merge (harness._produce_foreach)
+
+
+def _fanout_role_may_suspend(role: Any, nodes: Dict[str, Any]) -> bool:
+    """Whether a fanout ROLE could reply AWAIT and park its stage. If one does, the
+    harness parks with NO artifact (`_Suspend(last_output=None)`), so resume's
+    `_merge_decision` hands the human's response ALONE to the next stage — the merged
+    payload never happens on that lane. A role that isn't a declared node (or isn't
+    a string) widens to True; never raises."""
+    cfg = nodes.get(role) if isinstance(role, str) else None
+    return may_suspend(cfg.get("type") if isinstance(cfg, dict) else None)
+
+
+def _transfer(stage: Any, node: Optional[Dict[str, Any]], pin: Provides, sticky: Set[str],
+              tainted: List[str], stage_name: str,
+              nodes: Optional[Dict[str, Any]] = None, *,
+              contract_for: Optional[ContractFor] = None) -> Flow:
+    """How this stage rewrites the incoming flow. A routing stage (no node) passes the
     payload through; every real node's effect comes from its resolved contract — the module
     has no per-type key table. An undeclared envelope-transform resolves to `opaque` (nothing
-    checkable downstream) AND records a taint so its consumers get a companion nudge."""
+    checkable downstream) AND records a taint so its consumers get a companion nudge.
+
+    A PARALLEL-SHAPE stage (`fork` / `fanout` / `fanin`) is modeled by what the ENGINE
+    hands forward, NOT its `node` (the runtime never runs a fanout/fork stage's node —
+    harness._run_stage / _drive; `nodes` is only read here, to resolve fanout roles).
+    Validate rejects only fanout+fork; a `fanin` COMBINED with either still loads, and
+    the two runtime walkers disagree on such a stage (`_drive` runs `fork` first, the
+    branch walker `_walk` runs `fanin` first) — so the order below IS load-bearing:
+    the JOIN shapes come first because their transfer is the widest (no flag
+    survives), which stays sound whichever walker hits the stage.
+      - fork / fanin: what flows onward is a fan-in REDUCE output (a fork's rejoin
+        `then` carries the clear; a fanin's continuation carries the reduce directly)
+        — or, for a fork, an exact input copy on the branch-head lane / a wait
+        degrade. The default reduce UNIONS the arrivals (a superset of the lattice's
+        intersection-`known`, so keeping `known` is sound) and an app `reduce` target
+        is arbitrary, so NEITHER `complete` NOR `closed` survives: downstream of a
+        join is unchecked rather than wrongly flagged (keeping `complete` here
+        manufactured `render-key-unprovided` warnings — `--strict` failures — on keys
+        the reduce provably delivers; runtime-probed 2026-07).
+      - fanout: the merged payload is inbound + exactly `results`/`roles`/`failed_roles`
+        (role outputs stay nested under `results`), so `known` grows by the engine keys
+        and `complete` survives. `closed` survives ONLY if no role can reply AWAIT
+        (node_contract.may_suspend): a suspended fanout resumes with the human's
+        response ALONE (the merge lane never ran), so the set isn't runtime-exact.
+
+    One STAGE-level widening on top of the node's contract: `escalate: "human"` resumes
+    through the same open merge as a human_gate (harness._merge_decision folds the human's
+    whole reply onto the failed artifact — arbitrary keys), so `closed` cannot survive the
+    stage: on the escalation lane a key only the human supplies is NOT provably absent.
+    `known`/`complete` are kept from the node's own contract — OPTIMISTIC on the
+    escalation lane (the merge base is the FAILED artifact, e.g. an error payload, which
+    may lack happy-path keys), an accepted blind spot: it can only mute warnings, never
+    manufacture a hard error (errors need `closed`, which is dropped here). The fanout
+    suspend lane and the join lanes keep `known` under the same accepted mute-only
+    optimism.
+
+    STILL NOT MODELED (each can only mute findings, never manufacture a hard error):
+    a fanned-out gate role's own `provides` (human-supplied keys there warn until the
+    author declares them somewhere on the path); which keys a specific fan-in reduce
+    yields; and the feedback-retry keys (`feedback`/`priorAttempt`) the harness folds
+    onto a retried stage's INPUT (a lattice-wide pre-existing blind spot, not fanout's).
+
+    The lattice applies `sticky` on EVERY transfer (`sticky_fs` below), which the
+    harness now honours everywhere it walks: `_drive` folds sticky after each linear
+    stage + each fork join, and — since the 2026-07 fix, runtime-probed — so does
+    ForkCoordinator._walk BETWEEN branch stages (it calls the same _fold_sticky helper).
+    Before that fix the harness skipped the in-branch fold, so this sticky-everywhere
+    assumption over-claimed on in-branch closed lanes; it is now sound there too."""
     if pin is None:
         pin = Flow()   # unreachable-safe; reachable stages get a concrete pin
     sticky_fs = frozenset(sticky)
-    if node is None:
-        # a pure routing stage (fork/fanin with no node) passes the payload through
-        return Flow(pin.known | sticky_fs, pin.complete, pin.closed)
-    contract = resolve_contract(node.get("type"), node)
-    if contract.mode == "opaque" and _undeclared_envelope_transform(node):
-        tainted.append(stage_name)
-    return apply(contract, pin, sticky_fs)
+    stage_d = stage if isinstance(stage, dict) else {}
+    fanout = stage_d.get("fanout")
+    fanin = stage_d.get("fanin")
+    if stage_d.get("fork") or (isinstance(fanin, dict) and fanin):
+        # a JOIN shape (fork rejoin / fan-in continuation): reduce output flows on —
+        # checked FIRST so an accepted fanin+fanout combo widens instead of keeping
+        # the fanout arm's flags on a stage the branch walker treats as a fanin
+        flow = Flow(pin.known | sticky_fs, False, False)
+    elif fanout:
+        roles = fanout if isinstance(fanout, list) else []   # malformed → no proof
+        role_suspends = (not roles or any(
+            _fanout_role_may_suspend(r, nodes or {}) for r in roles))
+        flow = Flow(pin.known | _FANOUT_MERGE_KEYS | sticky_fs, pin.complete,
+                    pin.closed and not role_suspends)
+    elif stage_d.get("foreach"):
+        # ADR-0007: the merge is inbound ∪ {results, failed_items}. This arm MUST
+        # exist (design-eval #4): the `else` would apply the per-item WORKER's
+        # contract to the STAGE output — a parse:false worker would model the
+        # stage as closed {raw}, dropping every inbound key the merge preserves
+        # and manufacturing false hard errors on {{results}} reads downstream.
+        # `closed` survives only if the one item node provably cannot suspend
+        # (the one-node analog of fanout's any-role rule).
+        item_type = node.get("type") if isinstance(node, dict) else None
+        flow = Flow(pin.known | _FOREACH_MERGE_KEYS | sticky_fs, pin.complete,
+                    pin.closed and not may_suspend(item_type))
+    elif node is None:
+        # a pure routing stage (no node) passes the payload through
+        flow = Flow(pin.known | sticky_fs, pin.complete, pin.closed)
+    else:
+        contract = resolve_contract(node.get("type"), node, contract_for=contract_for)
+        if contract.mode == "opaque" and _undeclared_envelope_transform(node):
+            tainted.append(stage_name)
+        flow = apply(contract, pin, sticky_fs)
+    if stage_d.get("escalate") == "human":
+        flow = flow._replace(closed=False)
+    return flow
 
 
 def _edges(stages: Dict[str, Any]) -> Dict[str, List[str]]:
@@ -97,15 +193,22 @@ def _edges(stages: Dict[str, Any]) -> Dict[str, List[str]]:
 
 
 def compute_provides(nodes: Dict[str, Any], stages: Dict[str, Any], sticky: Set[str],
-                     start: Optional[str], tainted: List[str]) -> "Tuple[Dict[str, Provides], Dict[str, List[str]]]":
+                     start: Optional[str], tainted: List[str],
+                     entry: Optional[Flow] = None, *,
+                     contract_for: Optional[ContractFor] = None) -> "Tuple[Dict[str, Provides], Dict[str, List[str]]]":
     """Forward dataflow to a least fixpoint: provides_in(stage) = meet over predecessors
     of provides_out(pred). Monotone (sets only shrink from TOP), so it converges; loops
     (retry/`then` cycles) are handled by the fixpoint, not a special case. Unreached
     stages stay TOP. Returns ({stage: provides_in}, predecessor-map) — the caller reuses
-    the predecessor map rather than recomputing it."""
+    the predecessor map rather than recomputing it.
+
+    `entry` seeds the start stage with what the ENTRY PAYLOAD is known to provide.
+    Default None = Flow() — the unknowable input of the load-time lint. A caller that
+    KNOWS the entry keys (e.g. the `yaah ab` pre-flight, which holds the experiment's
+    concrete inputs) passes a closed Flow to make entry-key mismatches provable."""
     pin: Dict[str, Provides] = {s: None for s in stages}
     if start in stages:
-        pin[start] = Flow()   # the entry payload is the unknowable INPUT (incomplete)
+        pin[start] = entry if entry is not None else Flow()
     preds = _edges(stages)
     # Iterate to convergence. The meet is monotone (preserve-transfers only grow `known`
     # as TOP collapses; reset-transfers are constant), so it descends from TOP to a least
@@ -118,17 +221,18 @@ def compute_provides(nodes: Dict[str, Any], stages: Dict[str, Any], sticky: Set[
             # Only REACHABLE predecessors contribute — one still at TOP hasn't been reached
             # from `start`, so it never runs and must not taint the merge (a real path that
             # provides the key would otherwise be intersected away → false warning).
-            incoming = [_transfer(nodes.get(stages[p].get("node")), pin[p], sticky,
-                                  tainted, p) for p in preds[s] if pin[p] is not None]
+            incoming = [_transfer(stages[p], nodes.get(stages[p].get("node")), pin[p],
+                                  sticky, tainted, p, nodes, contract_for=contract_for)
+                        for p in preds[s] if pin[p] is not None]
             if not incoming:
                 continue  # no reachable predecessors: keep the seed (start) or TOP (unreached)
             merged: Flow = incoming[0]
             for nxt in incoming[1:]:
                 merged = meet(merged, nxt)          # all incoming are concrete Flows
             if s == start:
-                entry = pin.get(s)                  # == pin[start]; s is the narrowed str
-                if entry is not None:
-                    merged = meet(merged, entry)    # entry payload always joins the start
+                at_start = pin.get(s)               # == pin[start], which DESCENDS from the
+                if at_start is not None:            # `entry` seed (don't shadow the param);
+                    merged = meet(merged, at_start)  # the entry payload always joins the start
             if merged != pin[s]:
                 pin[s] = merged
                 changed = True
@@ -140,30 +244,51 @@ def compute_provides(nodes: Dict[str, Any], stages: Dict[str, Any], sticky: Set[
     return pin, preds
 
 
-def _render_template_text(rnode: Dict[str, Any], base_path: Optional[str]) -> Optional[str]:
-    """The render's template source, or None when it can't be read statically (skip — not
-    the linter's job to report a missing file). Inline `template_text` is always available;
-    a `template_file` is read relative to `base_path` (the root config's dir, matching
-    `_build_render`) when known, else by absolute path."""
-    inline = rnode.get("template_text")
-    if isinstance(inline, str):
-        return inline
-    tfile = rnode.get("template_file")
-    if not isinstance(tfile, str) or not tfile:
-        return None
-    path = tfile if os.path.isabs(tfile) else (
-        os.path.join(base_path, tfile) if base_path else None)
-    if path is None:
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return f.read()
-    except OSError:
-        return None
+def stage_outflows(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list: Any,
+                   start: Optional[str], *,
+                   entry: Optional[Flow] = None,
+                   contract_for: Optional[ContractFor] = None) -> "Dict[str, Provides]":
+    """Provides-OUT per stage: the Flow LEAVING each reachable stage (None = unreachable).
+    The read surface for callers reasoning about what a stage HANDS FORWARD — e.g. the
+    `yaah ab` pre-flight checking terminal payloads against declared metric paths — so
+    they consume the same lattice `analyze_dataflow` walks instead of re-deriving it."""
+    sticky = set(k for k in sticky_list if isinstance(k, str)) if isinstance(sticky_list, list) else set()
+    pin, _ = compute_provides(nodes, stages, sticky, start, [], entry=entry,
+                              contract_for=contract_for)
+    out: Dict[str, Provides] = {}
+    for s_name, s in stages.items():
+        p = pin.get(s_name)
+        out[s_name] = None if p is None else _transfer(
+            s, nodes.get(s.get("node")), p, sticky, [], s_name, nodes,
+            contract_for=contract_for)
+    return out
+
+
+def terminal_stages(stages: Dict[str, Any]) -> List[str]:
+    """Stages where a run can END — the harness walk stops when no next stage resolves
+    (mirror of harness._next_stage returning None): no branch and no `then`; or a branch
+    whose effective default (its `default`, else the stage's `then`) is null, or any
+    explicit null route. Graph math only, exposed so callers reasoning about the FINAL
+    payload (e.g. metric plausibility in `yaah ab`) don't re-derive routing."""
+    out: List[str] = []
+    for name, s in stages.items():
+        if not isinstance(s, dict):
+            continue
+        b = s.get("branch")
+        if not b:
+            if not s.get("then"):
+                out.append(name)
+        elif (b.get("default", s.get("then")) is None
+              or any(v is None for v in (b.get("routes") or {}).values())):
+            out.append(name)
+    return out
 
 
 def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list: Any,
-                     start: Optional[str], base_path: Optional[str]) -> "Tuple[List[str], List[str]]":
+                     start: Optional[str], base_path: Optional[str], *,
+                     entry: Optional[Flow] = None,
+                     contract_for: Optional[ContractFor] = None,
+                     consumes_for: Optional[ConsumesFor] = None) -> "Tuple[List[str], List[str]]":
     """The requires↔provides graph analysis (ADR-0005 slice B + ADR-0006 §D5). ONE pass, two
     severities, split by how exact the provided set is where a consumer reads it:
 
@@ -176,12 +301,22 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
         keys → one consolidated WARNING naming the transform(s) to fix.
 
     Returns (errors, warnings). Never raises. `validate_pipeline` consumes the errors,
-    `lint_pipeline` the warnings (it runs on an already-valid config, so it sees only warnings)."""
+    `lint_pipeline` the warnings (it runs on an already-valid config, so it sees only
+    warnings). `entry` (see compute_provides) lets a caller that KNOWS the entry payload's
+    keys seed the start stage — entry-key mismatches then surface as errors/warnings under
+    the same two-severity rules.
+
+    `contract_for` / `consumes_for` (ADR-0006 D7.2) inject a caller-composed contract/consumes
+    SOURCE — the seam an embedding app uses to reach its CUSTOM node types' contracts (built via
+    `Registry.contract_source()` / `consumes_source()`, which chain the registered custom slot
+    onto the built-ins). Default `None` = the built-in sources only, byte-for-byte today's
+    behaviour: a custom type stays opaque unless it declares inline `provides:`/`consumes:`."""
     errors: List[str] = []
     warnings: List[str] = []
     sticky = set(k for k in sticky_list if isinstance(k, str)) if isinstance(sticky_list, list) else set()
     tainted: List[str] = []
-    pin, preds = compute_provides(nodes, stages, sticky, start, tainted)
+    pin, preds = compute_provides(nodes, stages, sticky, start, tainted, entry=entry,
+                                  contract_for=contract_for)
     tainted_set = set(tainted)
 
     def tainted_ancestors(stage: str) -> List[str]:
@@ -241,6 +376,21 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
             "allow_unfilled:true if intentionally literal. [lint: render-key-unprovided]".format(
                 s_name, missing, sorted(known - {"raw"})))
 
+    def consumes_msg(s_name: str, missing: List[str], known: "frozenset", hard: bool) -> str:
+        # a declared-`consumes` (custom) node reading an absent key — the render wording
+        # (render_unfilled_placeholders / allow_unfilled) would be wrong for it.
+        if hard:
+            return (
+                "stage {!r}: node reads {} (its `consumes`) which is provably ABSENT here — the "
+                "payload is a fixed set providing {}. Provide them upstream (an agent "
+                "output_schema, a transform `provides`, or graph `sticky`) or drop them from "
+                "`consumes`. [dataflow: input-key-absent]".format(
+                    s_name, missing, sorted(known - {"raw"})))
+        return (
+            "stage {!r}: node reads {} (its `consumes`) which nothing on the path to it "
+            "provides (provides {}). Declare an upstream provider or drop them from `consumes`. "
+            "[lint: input-key-unprovided]".format(s_name, missing, sorted(known - {"raw"})))
+
     for s_name, s in stages.items():
         node = nodes.get(s.get("node")) or {}
         pin_here = pin.get(s_name)
@@ -249,7 +399,8 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
         # branch.on reads the payload AFTER this stage's node runs (the node's OUTPUT).
         on = (s.get("branch") or {}).get("on")
         if isinstance(on, str) and on:
-            flow = _transfer(node, pin_here, sticky, [], s_name)
+            flow = _transfer(s, node, pin_here, sticky, [], s_name, nodes,
+                             contract_for=contract_for)
             if flow.closed:
                 if on not in flow.known:
                     errors.append(branch_msg(s_name, on, flow.known, hard=True))
@@ -258,20 +409,68 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
                     warnings.append(branch_msg(s_name, on, flow.known, hard=False))
             else:
                 note_blocked(s_name)
-        # a render reads the payload that flows INTO it (provides_in).
-        if node.get("type") == "render" and not node.get("allow_unfilled"):
-            text = _render_template_text(node, base_path)
-            needs = sorted(set(_PLACEHOLDER.findall(text))) if text is not None else []
-            if not needs:
-                continue  # nothing read (no template / no placeholders) — nothing to check
+        # foreach reads payload[items] + each carry key from the stage's INBOUND flow
+        # (ADR-0007 D5, design-eval #5). This is a STAGE-level read like branch.on —
+        # the ENGINE fans out, not the per-item worker, so the node-consumes resolver
+        # below (keyed on the WORKER's type) cannot see it.
+        fe = s.get("foreach")
+        if isinstance(fe, dict):
+            fe_reads = [k for k in [fe.get("items")] + list(fe.get("carry") or [])
+                        if isinstance(k, str) and k]
+            missing = [k for k in fe_reads if k not in pin_here.known]
+            if missing and pin_here.closed:
+                errors.append(
+                    "stage {!r}: foreach reads {} which is provably ABSENT here — the "
+                    "payload is a fixed set providing {}. The swarm FAILS with "
+                    "foreach_input (or fans out without its carry) EVERY run. Provide "
+                    "them upstream (an agent output_schema, a transform `provides`, or "
+                    "graph `sticky`). [dataflow: foreach-key-absent]".format(
+                        s_name, missing, sorted(pin_here.known - {"raw"})))
+            elif missing and pin_here.complete:
+                warnings.append(
+                    "stage {!r}: foreach reads {} which nothing on the path to it "
+                    "provides (provides {}). Declare an upstream provider. "
+                    "[lint: foreach-key-unprovided]".format(
+                        s_name, missing, sorted(pin_here.known - {"raw"})))
+            elif missing:
+                note_blocked(s_name)
+        # a node's CONSUMES: keys it reads from the payload flowing INTO it (ADR-0006
+        # symmetry — the node reports this, the checker holds no per-type knowledge). render
+        # parses its `{{...}}`; a custom node declares `consumes: [...]`; others read nothing.
+        needs = sorted(resolve_consumes(node.get("type"), node, base_path,
+                                        consumes_for=consumes_for))
+        if needs and isinstance(fe, dict):
+            # a foreach WORKER's input is not the stage inbound — it is the
+            # engine-made per-item payload {into, item_index} ∪ carry ∪ sticky
+            # (harness._produce_foreach). Checking against pin_here was a FALSE
+            # load-blocker for a worker reading {{item}} (impl-eval HIGH); checking
+            # against the per-item set instead is also STRONGER: the set is
+            # engine-exact, so a worker reading an uncarried key is a provable
+            # every-run failure, and the remedy is named (add it to foreach.carry).
+            per_item = (frozenset({str(fe.get("into") or "item"), "item_index"})
+                        | frozenset(k for k in (fe.get("carry") or [])
+                                    if isinstance(k, str))
+                        | frozenset(sticky))
+            missing = [k for k in needs if k not in per_item]
+            if missing:
+                errors.append(
+                    "stage {!r}: the foreach worker reads {} but each per-item input "
+                    "holds exactly {} — the read fails EVERY item. Add the key(s) to "
+                    "foreach.carry (copied from the stage input into every item), or "
+                    "fix the template/consumes. [dataflow: foreach-worker-key-absent]"
+                    .format(s_name, missing, sorted(per_item)))
+        elif needs:
+            # message SELECTION only (not contract logic): render keeps its established
+            # wording + tag; a declared-`consumes` node gets the generic one.
+            msg = render_msg if node.get("type") == "render" else consumes_msg
             if pin_here.closed:
-                missing = [ph for ph in needs if ph not in pin_here.known]
+                missing = [k for k in needs if k not in pin_here.known]
                 if missing:
-                    errors.append(render_msg(s_name, missing, pin_here.known, hard=True))
+                    errors.append(msg(s_name, missing, pin_here.known, hard=True))
             elif pin_here.complete:
-                missing = [ph for ph in needs if ph not in pin_here.known]
+                missing = [k for k in needs if k not in pin_here.known]
                 if missing:
-                    warnings.append(render_msg(s_name, missing, pin_here.known, hard=False))
+                    warnings.append(msg(s_name, missing, pin_here.known, hard=False))
             else:
                 note_blocked(s_name)
 

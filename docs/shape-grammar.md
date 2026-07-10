@@ -51,19 +51,32 @@ This file is the compressed essence, not the source of truth.
   },
   "graph": {
     "start": "<stage-name>",
-    "sticky": ["<payload-key>", ...],   // optional: re-fold across stages
+    "on_failure": "rollback",           // opt-in AUTO-SAGA (ADR-0009): on terminal
+                                        // StageFailed, auto-run `yaah rollback` over
+                                        // completed stages (cheap-only; object form
+                                        // {"mode":"rollback","include_costly":true});
+                                        // always re-raises the failure + reports
+    "sticky": ["<payload-key>", ...],   // fill-if-missing after EVERY stage: a reset
+                                        // node can't wipe these (workdir, run frame);
+                                        // also auto-included in foreach per-item inputs
     "stages": {
       "<stage-name>": {
         "node":         "<node-id>"  | "",  // "" for pure control stages (fork/fanin)
         "then":         "<next-stage>" | null,
+        "final":        true,               // TERMINAL only: skip the graph.sticky re-fold on
+                                            // this stage's output (its payload is the final word)
         "validators":   ["<node-id>", ...], "max_attempts": 1, "feedback": false,
         "branch":       {"on": "<payload-key>", "routes": {"<value>": "<stage>"}},
         "fork":         ["<branch-stage>", ...],
         "fanin":        {"expect": ["<branch-stage>", ...], "wait": "all" | "any",
                           "reduce": "fn:module:func"},
+        "foreach":      {"items": "<payload-key>", "into": "item",   // dynamic per-item fan-out
+                          "carry": ["<payload-key>", ...], "max_concurrent": 3},  // (ADR-0007)
         "escalate":     "human" | "fail",
         "clearable":    false,
         "concerns_from":"<payload-key>",
+        "effects_from": "<payload-key>",    // effect descriptor key → recorded on trace span at completion
+                                            // (for rollback); rejected on fork/fanin stages
         "on_error":     "clear" | null | {"compensate": "fn:...", "on_compensate_fail": "error"|"warn"}
       }
     }
@@ -91,7 +104,7 @@ This file is the compressed essence, not the source of truth.
 
 Common keys on EVERY node spec: `model`, `effort`, `temperature`,
 `timeout`, `retries`, `config:`, `idempotency_key:`, `idempotent:`,
-`cwd_from:`, `note:`, `_<anything>:`. Unknown keys are rejected by
+`cwd_from:`, `rollback:`, `note:`, `_<anything>:`. Unknown keys are rejected by
 `validate_pipeline`.
 
 ## Agent node — the extras
@@ -107,6 +120,20 @@ Common keys on EVERY node spec: `model`, `effort`, `temperature`,
 | `attach: ["fn:module:Cls", ...]` | post-invoke wrappers ([ADR-0003](decisions/0003-attacher-port.md)) — each is a subclass of `Attacher`, returns dict merged onto reply |
 | `strict_render: true` | fail the stage (`render_unfilled_placeholders`) on a `{{placeholder}}` with no value in payload ∪ extras, instead of leaving the literal `{{name}}` (default `false`); engine-injected keys + present-but-empty values never trip it |
 | `output_schema: {…}` | the stage's OUTPUT CONTRACT (JSON-Schema subset). Self-validates the parsed reply (`schema_mismatch` on drift) AND its `required` keys guide weak-executor parse recovery; makes a separate `json_schema` validator node redundant on agent outputs. Opt-in (default none) |
+
+## Node `rollback` (all types)
+
+```jsonc
+// Inside any node config — declares the undo capability
+"rollback": {
+  "target": "fn:module:func | http://...",  // required; fn: or http: only (node: rejected)
+  "cost":   "cheap" | "costly"              // optional, default "cheap"
+}
+```
+
+Absent `rollback` → stage listed as `impossible` in the menu (never guessed).
+See [`docs/node-reference.md`](node-reference.md) for the compensate-ctx divergence
+warning and `effects_from` bounds.
 
 ## Trace block
 
@@ -135,6 +162,11 @@ yaah trace <jsonl> [<price-map>]           # post-hoc aggregate over a JSONL tra
   --errors-only     CI-shaped check; exits non-zero if any error spans present
   --cost            compact per-model cost rollup (with PRICES for $)
   --last N          filter to the most recent N runs
+yaah rollback <root> [<corr-id>] [--json]  # list runs / show undo menu for a run (dry run, calls nothing)
+yaah rollback <root> <corr-id> --execute   # execute undos in reverse file-append order (NOT t_start; cheap only)
+  [--include-costly]                       #   also execute costly candidates
+  [--only <stage>]...                      #   restrict to named stage(s); addresses ALL occurrences
+  [--accept-partial]                       #   continue past a failed undo (default: stop on first failure)
 yaah doctor                                # diagnose install: Python, optional deps, packaged bases
 yaah completion <bash|zsh>                 # emit a shell tab-completion script
 yaah --version                             # print the installed yaah version
@@ -143,13 +175,15 @@ yaah --version                             # print the installed yaah version
 All verbs also accept the legacy flag form: `yaah <root> --list`,
 `yaah <root> --resume <id> <file>`, etc.
 
-## Five pipeline shapes (everything's one of these)
+## Six pipeline shapes (everything's one of these)
 
 See [`docs/archetypes.md`](archetypes.md). Quick:
 
 - **`linear`** — sequence of stages, no branches, no gates. (hello-yaah)
 - **`branch-with-gate`** — produce → human review → decision routes to one of N. (review-pipeline)
 - **`fork-fanin`** — N parallel branches → reduce. (fork-join)
+- **`swarm`** — one worker per element of a RUNTIME list, bounded concurrency
+  → merge. `foreach`, the dynamic sibling of the static shapes above. (ADR-0007)
 - **`instrumented`** — production-shape with attacher + optional A/B + optional gate. (arch-drift)
 - **`meta-tool`** — pipeline whose input is another YAAH config. (config-flow)
 
@@ -229,5 +263,6 @@ autocomplete lies.
 - Every key in detail → [`docs/root-config-reference.md`](root-config-reference.md)
 - Every node in detail → [`docs/node-reference.md`](node-reference.md)
 - Copy-paste recipes → [`docs/cookbook/`](cookbook/)
+  - Bounded cross-stage loop + best-of-N → [`docs/cookbook/bounded-loop-best-of-n.md`](cookbook/bounded-loop-best-of-n.md)
 - Generated catalog (always current) → [`docs/module-catalog.md`](module-catalog.md)
 - IDE-ready JSON Schemas → [`schemas/`](../schemas/)

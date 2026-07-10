@@ -52,17 +52,27 @@ Run & inspect:
                                 add --report [--json] for the comparison matrix
                                 add --rescore SCHEMA to re-score stored raw outputs
                                 against a changed contract (zero model calls)
+                                add --golden FILE to diff collected outputs against
+                                a pinned expected artifact (zero model calls)
   list <root> [--json]          show parked gates (the mailbox view; --json for a parseable shape)
   resume <root> ID [FILE]       deliver a decision (optionally from FILE) to a parked gate
   baton-schema <root> <id>      print the JSON Schema of decision.json for one parked baton
   clear <root>                  graceful reset: broadcast clear + flush parked + drop batons
   explain <root>                print the EFFECTIVE config (post-_extends/_fake + defaults)
+  rollback <root> [ID]          walk a completed run's declared undo targets (ADR-0008).
+                                no ID lists runs with candidates; with ID prints the undo
+                                MENU (dry run, calls nothing; --json for machines). Add
+                                --execute to run the undos in reverse completion order:
+                                  [--include-costly] run undos the author marked costly
+                                  [--only STAGE]...   restrict to named stage(s) (repeatable)
+                                  [--accept-partial]  continue past a failed undo (else stop)
 
 Debug:
   trace <trace.jsonl> [PRICES]  summarize a run's trace (cost / latency / retries / model mix)
                                 add --pretty for a per-run tree (stages, calls, errors)
                                 add --errors-only for the CI-shaped check (exits non-zero on errors)
                                 add --cost for a compact human cost rollup (with PRICES for $)
+                                add --counts for the per-(stage, model, ladder rung) invocation report (--json for machine output)
                                 add --last N to filter to the most recent N runs
                                 add --corr ID to zoom in on one specific run
 
@@ -145,12 +155,23 @@ def _parse_cli(argv: list) -> dict:
             _usage_exit("--lint-overlay takes no extra arguments")
         return {"action": "lint-overlay", "root": root, "fake": fake, "debug": debug}
     if cmd == "--resume":
+        rest = list(rest)
+        approver = None
+        if "--approver" in rest:
+            # WHO is delivering this decision — lands on the resume audit span as
+            # identity metadata (a reserved HEADER, never a decision key; putting
+            # it in the decision file would flow it downstream as payload).
+            i = rest.index("--approver")
+            if i + 1 >= len(rest):
+                _usage_exit("--approver needs a value (who is approving)")
+            approver = rest[i + 1]
+            del rest[i:i + 2]
         if len(rest) < 2:
             _usage_exit("--resume needs a baton id")
         if len(rest) > 3:
             _usage_exit("--resume takes a baton id and an optional decision file")
         return {"action": "resume", "root": root, "fake": fake, "debug": debug,
-                "baton_id": rest[1],
+                "baton_id": rest[1], "approver": approver,
                 "decision_file": rest[2] if len(rest) == 3 else None}
     _usage_exit("unknown argument {!r}".format(cmd))
     return {}  # unreachable; satisfies type checkers
@@ -187,34 +208,46 @@ def _parse_manual(rest: list) -> dict:
 
 
 def _parse_ab(rest: list) -> dict:
-    """`ab <experiment.json> [--report [--json]] [--rescore <schema.json>]` —
-    run an A/B campaign (one durable row per run); --report reduces collected
-    rows + trace into the comparison matrix; --rescore re-scores the stored
-    raw outputs against a (changed) contract — both pure reads, zero model
-    calls, safe mid-campaign."""
+    """`ab <experiment.json> [--report [--json]] [--rescore <schema.json>]
+    [--golden <expected.json>]` — run an A/B campaign (one durable row per run);
+    --report reduces collected rows + trace into the comparison matrix; --rescore
+    re-scores the stored raw outputs against a (changed) contract; --golden diffs
+    the collected outputs against a pinned expected artifact — all three pure
+    reads, zero model calls, safe mid-campaign, and mutually exclusive."""
     rescore: Any = None
+    golden: Any = None
     rest = list(rest)
-    if "--rescore" in rest:
-        i = rest.index("--rescore")
-        if i + 1 >= len(rest) or rest[i + 1].startswith("-"):
-            _usage_exit("--rescore needs a schema file "
-                        "(yaah ab exp.json --rescore new-contract.json)")
-        rescore = rest[i + 1]
-        del rest[i:i + 2]
+    for flag, attr in (("--rescore", "rescore"), ("--golden", "golden")):
+        if flag in rest:
+            i = rest.index(flag)
+            if i + 1 >= len(rest) or rest[i + 1].startswith("-"):
+                _usage_exit("{} needs a file argument "
+                            "(yaah ab exp.json {} FILE)".format(flag, flag))
+            if attr == "rescore":
+                rescore = rest[i + 1]
+            else:
+                golden = rest[i + 1]
+            del rest[i:i + 2]
     args = [a for a in rest if not a.startswith("-")]
     flags = set(rest) - set(args)
     unknown = flags - {"--report", "--json"}
     if unknown:
         _usage_exit("ab: unknown flag(s) {}".format(", ".join(sorted(unknown))))
-    if "--json" in flags and not ("--report" in flags or rescore):
-        _usage_exit("ab: --json applies to --report / --rescore")
-    if "--report" in flags and rescore:
-        _usage_exit("ab: --report and --rescore are separate reads — pick one")
+    reads = [name for name, on in (("--report", "--report" in flags),
+                                   ("--rescore", bool(rescore)),
+                                   ("--golden", bool(golden))) if on]
+    if "--json" in flags and not reads:
+        _usage_exit("ab: --json applies to --report / --rescore / --golden")
+    if len(reads) > 1:
+        _usage_exit("ab: {} are separate reads — pick one".format(
+            " and ".join(reads)))
     if len(args) != 1:
-        _usage_exit("ab needs exactly one experiment config "
-                    "(yaah ab my-experiment.json [--report|--rescore SCHEMA] [--json])")
+        _usage_exit("ab needs exactly one experiment config (yaah ab "
+                    "my-experiment.json [--report|--rescore SCHEMA|--golden FILE] "
+                    "[--json])")
     return {"action": "ab", "experiment": args[0], "rescore": rescore,
-            "report": "--report" in flags, "json": "--json" in flags}
+            "golden": golden, "report": "--report" in flags,
+            "json": "--json" in flags}
 
 
 def _parse_scaffold(rest: list) -> dict:
@@ -302,11 +335,13 @@ def _parse_trace(rest: list) -> dict:
             _usage_exit("--corr needs a correlation id")
         corr = rest_clean[i + 1]
         del rest_clean[i:i + 2]
-    flags = {"--debug", "--pretty", "--errors-only", "--cost"}  # bare flags
+    flags = {"--debug", "--pretty", "--errors-only", "--cost", "--counts",
+             "--json"}  # bare flags
     files = [a for a in rest_clean if a not in flags]
     if not files:
         _usage_exit("trace needs a trace.jsonl path")
-    view_flags = [f for f in ("--pretty", "--errors-only", "--cost") if f in rest_clean]
+    view_flags = [f for f in ("--pretty", "--errors-only", "--cost", "--counts")
+                  if f in rest_clean]
     if len(view_flags) > 1:
         _usage_exit("{} are mutually exclusive".format(" and ".join(view_flags)))
     return {"action": "trace", "trace_path": files[0],
@@ -314,6 +349,8 @@ def _parse_trace(rest: list) -> dict:
             "pretty": "--pretty" in rest_clean,
             "errors_only": "--errors-only" in rest_clean,
             "cost": "--cost" in rest_clean,
+            "counts": "--counts" in rest_clean,
+            "json": "--json" in rest_clean,
             "last_n": last_n,
             "corr": corr,
             "debug": "--debug" in rest_clean}
@@ -340,6 +377,57 @@ def _parse_baton_schema(rest: list) -> dict:
             "fake": False, "debug": False}
 
 
+def _parse_rollback(rest: list) -> dict:
+    """`rollback <root> [<corr>] [--json] [--execute --include-costly
+    --only S ... --accept-partial]` — read a run's trace and either SHOW the undo
+    menu (default, a pure dry run) or --EXECUTE the declared undo targets in
+    reverse completion order (ADR-0008). Menu/list default; `--execute` needs a
+    corr; the execute-only flags are rejected without it; `--json` machine-formats
+    whichever output (menu / run-list / report). `--only` is repeatable."""
+    rest = list(rest)
+    only: list = []
+    while "--only" in rest:
+        i = rest.index("--only")
+        if i + 1 >= len(rest) or rest[i + 1].startswith("-"):
+            _usage_exit("--only needs a stage name (yaah rollback <root> <corr> "
+                        "--execute --only STAGE)")
+        only.append(rest[i + 1])
+        del rest[i:i + 2]
+    debug = "--debug" in rest
+    if debug:
+        rest.remove("--debug")
+    execute = "--execute" in rest
+    if execute:
+        rest.remove("--execute")
+    include_costly = "--include-costly" in rest
+    if include_costly:
+        rest.remove("--include-costly")
+    accept_partial = "--accept-partial" in rest
+    if accept_partial:
+        rest.remove("--accept-partial")
+    as_json = "--json" in rest
+    if as_json:
+        rest.remove("--json")
+    unknown = [a for a in rest if a.startswith("-")]
+    if unknown:
+        _usage_exit("rollback: unknown flag(s) {}".format(", ".join(unknown)))
+    pos = [a for a in rest if not a.startswith("-")]
+    if not pos:
+        _usage_exit("rollback needs a root config")
+    if len(pos) > 2:
+        _usage_exit("rollback takes a root config and an optional correlation id")
+    corr = pos[1] if len(pos) == 2 else None
+    if execute and corr is None:
+        _usage_exit("rollback --execute needs a correlation id "
+                    "(yaah rollback <root> <corr> --execute)")
+    if not execute and (include_costly or accept_partial or only):
+        _usage_exit("rollback: --include-costly / --only / --accept-partial only "
+                    "apply with --execute")
+    return {"action": "rollback", "root": pos[0], "corr": corr, "json": as_json,
+            "execute": execute, "include_costly": include_costly, "only": only,
+            "accept_partial": accept_partial, "fake": False, "debug": debug}
+
+
 # Registry of verb -> parser. The dict is the single source of truth for the
 # CLI surface — adding a verb is one entry here + the matching dispatcher.
 _VERB_PARSERS: Dict[str, Callable[[list], dict]] = {
@@ -358,6 +446,7 @@ _VERB_PARSERS: Dict[str, Callable[[list], dict]] = {
     "doctor":        _parse_doctor,
     "completion":    _parse_completion,
     "baton-schema":  _parse_baton_schema,
+    "rollback":      _parse_rollback,
 }
 
 # Tuple form kept for the test in test_shell_completion.py (asserts no drift between
@@ -452,6 +541,17 @@ def _dispatch_trace(spec: Dict[str, Any]) -> None:
         from .trace.pretty import pretty
         print(pretty(records, price_map=price_map), end="")
         return
+    if spec.get("counts"):
+        # Invocation-count report (M12): the client's per-(stage, model, ladder
+        # rung) table. --json composes to the machine shape (list of row dicts).
+        if spec.get("json"):
+            from .trace.aggregate import count_by_stage_model
+            print(json.dumps(count_by_stage_model(records, price_map=price_map),
+                             indent=2))
+            return
+        from .trace.pretty import counts_table
+        print(counts_table(records, price_map=price_map), end="")
+        return
     print(json.dumps(aggregate(records, price_map=price_map), indent=2))
 
 
@@ -497,6 +597,15 @@ def _dispatch_ab(spec: Dict[str, Any]) -> None:
             return
         _render_rescore(result)
         return
+    if spec.get("golden"):
+        from .experiment import golden_diff_rows, load_golden
+        golden = load_golden(spec["golden"])
+        result = asyncio.run(golden_diff_rows(cfg, base, golden))
+        if spec.get("json"):
+            print(json.dumps(result, indent=2))
+            return
+        _render_golden(result)
+        return
     if spec.get("report"):
         from .experiment import build_matrix
         matrix = asyncio.run(build_matrix(cfg, base))
@@ -533,6 +642,29 @@ def _render_rescore(result: Dict[str, Any]) -> None:
             c["conform"]["pass"], c["conform"]["fail"]))
         for e in c["conform"]["top_errors"]:
             print("      mismatch: {}".format(e))
+    for w in result["warnings"]:
+        print("  warning: " + w)
+
+
+def _render_golden(result: Dict[str, Any]) -> None:
+    """The golden diff on a terminal: per (variant, population) cell — how many
+    collected runs MATCH the pinned golden, and for those that drifted the
+    compact added/removed/changed keys (values bounded). A REPORT, not a gate:
+    n_differ==0 is your green, but the read never fails on drift; warnings carry
+    the no-output, multi-input, and never-hit-scrub flags."""
+    print("experiment {!r} vs golden (scrub: {}) — {} cell(s)".format(
+        result["experiment"], ", ".join(result["scrub"]) or "none",
+        len(result["cells"])))
+    for c in result["cells"]:
+        print("  {:<12} fp {}  N={}  {} match / {} differ (no_output={})".format(
+            c["variant"], c["fingerprint"][:12], c["n"],
+            c["n_match"], c["n_differ"], c["n_no_output"]))
+        for dd in c["diffs"]:
+            parts = []
+            for label in ("added", "removed", "changed"):
+                if dd[label]:
+                    parts.append("{} {}".format(label, ", ".join(sorted(dd[label]))))
+            print("    x{}: {}".format(dd["count"], "; ".join(parts)))
     for w in result["warnings"]:
         print("  warning: " + w)
 
@@ -587,8 +719,45 @@ def _dispatch_scaffold(spec: Dict[str, Any]) -> None:
     print("Then:  open the prompts/ dir and edit; see docs/tutorial.md and docs/archetypes.md")
 
 
+def _dispatch_rollback(spec: Dict[str, Any]) -> None:
+    """`yaah rollback` — read the run's trace + the pipeline's rollback
+    declarations and either print the undo MENU (default / no corr = list runs)
+    or --EXECUTE the undo targets. Self-contained (loads its own root) and does
+    NOT run `validate_root`: rollback is a read/undo tool the operator may need
+    precisely when a run left a config in a rejected state; requiring full
+    validation would block the cleanup. `base` goes on `sys.path` so `fn:` undo
+    targets resolve relative to the config dir (same rule as a running pipeline)."""
+    from . import rollback as rb
+    root = _read_json(spec["root"])
+    base = os.path.dirname(os.path.abspath(spec["root"]))
+    if base not in sys.path:
+        sys.path.insert(0, base)
+    nodes, stages = rb.load_pipeline(root, base)
+    records = rb.read_trace(root, base)
+    corr = spec.get("corr")
+    if spec["execute"]:
+        # the parser rejects --execute without a corr; narrow for the type checker
+        assert isinstance(corr, str) and corr
+        report = asyncio.run(rb.execute(
+            records, stages, nodes, corr,
+            include_costly=spec["include_costly"], only=spec["only"],
+            accept_partial=spec["accept_partial"]))
+        print(json.dumps(report, indent=2) if spec["json"]
+              else rb.render_report(report), end="" if not spec["json"] else "\n")
+        return
+    if corr is None:
+        runs = rb.list_runs(records, stages, nodes)
+        print(json.dumps({"runs": runs}, indent=2) if spec["json"]
+              else rb.render_list(runs), end="" if not spec["json"] else "\n")
+        return
+    menu = rb.build_menu(records, stages, nodes, corr)
+    print(json.dumps(menu, indent=2) if spec["json"]
+          else rb.render_menu(menu), end="" if not spec["json"] else "\n")
+
+
 _SELF_CONTAINED_DISPATCH: Dict[str, Callable[[Dict[str, Any]], None]] = {
     "ab":            _dispatch_ab,
+    "rollback":      _dispatch_rollback,
     "lint-overlay":  _dispatch_lint_overlay,
     "doctor":        _dispatch_doctor,
     "completion":    _dispatch_completion,
@@ -779,7 +948,8 @@ def _dispatch_resume(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> N
     # (was previously silently blocking).
     print("[yaah resume] engine running in this process until next gate or completion",
           file=sys.stderr)
-    _render_outcome(asyncio.run(resume_gate(root, base, spec["baton_id"], decision)))
+    _render_outcome(asyncio.run(resume_gate(root, base, spec["baton_id"], decision,
+                                            approver=spec.get("approver"))))
 
 
 def _dispatch_run(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
@@ -787,6 +957,16 @@ def _dispatch_run(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None
     out = asyncio.run(run_root(root, base))
     if out is not None:   # None = the serve-only path (which normally never returns)
         _render_outcome(out)
+        # Decisions-driven mode drives gates to completion, but can reach a gate
+        # it has no answer for; drive() then leaves the run PARKED rather than
+        # crash. Point the operator at the exact resume command so the walk-away
+        # is actionable. Exit stays the normal suspended-run code (0) — same as a
+        # plain `yaah run` that stops at its first gate.
+        from .harness import Suspended
+        if isinstance(out, Suspended) and root.get("decisions"):
+            print("parked at {}, no decision configured; resume with "
+                  "`yaah resume {} {}`".format(out.awaiting, spec["root"], out.baton_id),
+                  file=sys.stderr)
 
 
 _ROOT_DISPATCH: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], str], None]] = {

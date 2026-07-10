@@ -91,6 +91,23 @@ def added_lines_for(path: Path) -> List[str]:
     return out
 
 
+def all_lines_for(path: Path) -> List[str]:
+    """All lines from path (relative to REPO_ROOT) — whole-tree counterpart of added_lines_for."""
+    try:
+        return (REPO_ROOT / path).read_text().splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+
+
+def engine_src_files() -> List[Path]:
+    """All .py files under ENGINE_ROOT, relative to REPO_ROOT — for whole-tree scans."""
+    root = REPO_ROOT / ENGINE_ROOT
+    return sorted(
+        Path(ENGINE_ROOT) / p.relative_to(root)
+        for p in root.rglob("*.py")
+    )
+
+
 def is_stdlib(module_root: str) -> bool:
     stdlib = getattr(sys, "stdlib_module_names", None)
     if stdlib is not None:
@@ -113,7 +130,17 @@ def is_stdlib(module_root: str) -> bool:
 
 # ---------- CHECK 2 — core purity --------------------------------------------
 
-def check_core_purity(files: Iterable[Path]) -> Tuple[str, str]:
+def check_core_purity(
+    files: Iterable[Path],
+    get_lines=None,
+) -> Tuple[str, str]:
+    """Check that CORE_ROOTS files import only stdlib + yaah.*.
+
+    get_lines: callable (Path) -> List[str].  Defaults to added_lines_for (diff
+    mode).  Pass all_lines_for for whole-tree mode.
+    """
+    if get_lines is None:
+        get_lines = added_lines_for
     offenders: List[str] = []
     for f in files:
         s = str(f)
@@ -121,7 +148,7 @@ def check_core_purity(files: Iterable[Path]) -> Tuple[str, str]:
             continue
         if not s.endswith(".py"):
             continue
-        for line in added_lines_for(f):
+        for line in get_lines(f):
             m = re.match(r"\s*(?:from\s+([\w\.]+)\s+import|import\s+([\w\.]+))", line)
             if not m:
                 continue
@@ -137,7 +164,7 @@ def check_core_purity(files: Iterable[Path]) -> Tuple[str, str]:
             offenders.append(f"{s}: imports '{mod}'")
     if offenders:
         return "FAIL", "third-party import inside the zero-dep core: " + "; ".join(offenders)
-    return "PASS", "no new third-party imports in core/harness/comms"
+    return "PASS", "no third-party imports in core/harness/comms"
 
 
 # ---------- CHECK 3 — domain leakage -----------------------------------------
@@ -154,7 +181,17 @@ def load_banlist() -> List[str]:
     return out
 
 
-def check_domain_leakage(files: Iterable[Path]) -> Tuple[str, str]:
+def check_domain_leakage(
+    files: Iterable[Path],
+    get_lines=None,
+) -> Tuple[str, str]:
+    """Check that ENGINE_ROOT files contain no banlist terms.
+
+    get_lines: callable (Path) -> List[str].  Defaults to added_lines_for (diff
+    mode).  Pass all_lines_for for whole-tree mode.
+    """
+    if get_lines is None:
+        get_lines = added_lines_for
     words = load_banlist()
     if not words:
         return "PASS", "banlist empty (or missing) — no terms to enforce"
@@ -167,14 +204,14 @@ def check_domain_leakage(files: Iterable[Path]) -> Tuple[str, str]:
             continue
         if not s.endswith(".py"):
             continue
-        for i, line in enumerate(added_lines_for(f), start=1):
+        for line in get_lines(f):
             m = pattern.search(line)
             if m:
-                hits.append(f"{s}: banlist term '{m.group(1)}' in added line")
+                hits.append(f"{s}: banlist term '{m.group(1)}'")
                 break  # one hit per file is enough to report
     if hits:
         return "FAIL", "domain term leaked into engine: " + "; ".join(hits)
-    return "PASS", "no banlist terms in engine changes"
+    return "PASS", "no banlist terms in engine"
 
 
 # ---------- CHECK 4 — file shape (new files) ---------------------------------
@@ -222,11 +259,42 @@ def check_file_shape(files: Iterable[Path]) -> Tuple[str, str]:
 
 # ---------- driver ------------------------------------------------------------
 
+def _run_whole_tree() -> int:
+    """Run core-purity and domain-leakage over the entire engine source tree."""
+    files = engine_src_files()
+    print("YAAH governance check (whole-tree — all src/yaah/ Python files)")
+    print(f"Scanning {len(files)} files …")
+    print()
+
+    checks: List[Tuple[str, str, str]] = []
+
+    v, msg = check_core_purity(files, get_lines=all_lines_for)
+    checks.append(("CHECK 2 — core purity        ", v, msg))
+
+    v, msg = check_domain_leakage(files, get_lines=all_lines_for)
+    checks.append(("CHECK 3 — domain leakage     ", v, msg))
+
+    for label, verdict, reason in checks:
+        print(f"{label}: {verdict:<4}  {reason}")
+
+    print()
+    fail = any(v == "FAIL" for _, v, _ in checks)
+    if fail:
+        print("Whole-tree verdict: BLOCKED  (fix FAILs — these are invariant violations)")
+        return 1
+    print("Whole-tree verdict: PASS")
+    return 0
+
+
 def main() -> int:
     if not (REPO_ROOT / ".git").exists():
         print("review_my_pr.py: not a git repo (run from inside the YAAH checkout)",
               file=sys.stderr)
         return 2
+
+    if "--whole-tree" in sys.argv[1:]:
+        return _run_whole_tree()
+
     files = changed_files()
     added, removed = diff_line_counts()
     net = added - removed

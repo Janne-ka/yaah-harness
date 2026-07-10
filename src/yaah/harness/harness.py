@@ -15,7 +15,7 @@ import asyncio
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, List, Optional, Tuple, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
 from ..comms import Comms
 from ..core import Envelope, Failure, Kind, Verdict
@@ -42,6 +42,19 @@ _UNSET = object()  # "ttl argument not provided" — distinct from ttl=None (nev
 # feedback edge could spin `_drive`'s `while baton.stage is not None` forever. Far
 # above any real linear pipeline; overridable per-harness for tests.
 _MAX_STAGE_STEPS = 10000
+
+# The reserved resume-envelope HEADER that names WHO approved an override (the
+# AI-Act Art. 14(4)(d) audit signal). A header, not a payload key: identity is
+# metadata, and a payload key would both risk colliding with a domain decision
+# key and leak into the merged decision that flows downstream.
+_APPROVER_HEADER = "approver"
+
+# Upper bounds on a resume record's decision_diff, so a pathological decision
+# can't bloat the trace (keys only ever, never values): at most _MAX_DIFF_KEYS
+# keys per list, each key name clipped to _MAX_DIFF_KEY_CHARS. Both are far
+# above any real human approval form.
+_MAX_DIFF_KEYS = 40
+_MAX_DIFF_KEY_CHARS = 120
 
 
 def _route_key(value: object) -> str:
@@ -174,7 +187,16 @@ class Harness:
     def _is_transient_verdict(verdict: Verdict) -> bool:
         """A failed verdict whose failure looks like a transient infrastructural
         fault (a node/transport ERROR carrying an overload/timeout/lock message).
-        Gates the separate error-retry budget in _run_attempts."""
+        Gates the separate error-retry budget in _run_attempts.
+
+        A `foreach_error` aggregate is EXEMPT (impl-eval MED): its message embeds
+        each failed ITEM's detail, so one item's 429 read as "the stage is
+        transient" and re-ran the WHOLE swarm on the error_retries budget —
+        15 calls for 5 items at the defaults. The transient-retry rationale
+        ("a fresh request, pre-effect") is false for a swarm: the healthy items'
+        cost already happened. Partial tolerance is `min_success`, not a re-run."""
+        if any(f.code == "foreach_error" for f in verdict.failures):
+            return False
         return any(_is_transient((f.code or "") + " " + (f.message or ""))
                    for f in verdict.failures)
 
@@ -250,20 +272,88 @@ class Harness:
                 "bug — report with the corresponding trace".format(baton_id))
         baton.status = "running"
         stage = self.graph.stages[baton.stage]
-        resume_input = self._merge_decision(baton.pending, response)
+        pending = baton.pending  # the gate's EMITTED artifact, captured before the merge clears it
+        resume_input = self._merge_decision(pending, response)
         baton.pending = None
+        # LOG THE OVERRIDE: without this record the human decision left no trace
+        # at all — resume routes PAST the gate (no stage re-execution, so no
+        # stage span) and the baton is deleted on completion, so the run's trace
+        # ended at status:suspended. Emitted BEFORE the run continues, so the
+        # decision is on record even if the continuation fails. Keys only, never
+        # values (the RESPONSE payload may be sensitive); corr rides the merged
+        # input, which keeps the parked run's correlation_id. `approver` (WHO
+        # overrode) rides the resume envelope's header — identity is recorded,
+        # content is not. `decision_diff` is the emitted-vs-edited audit.
+        await self._spans.resumed(stage.name, resume_input,
+                                  awaiting=baton.awaiting,
+                                  decision_keys=response.payload.keys(),
+                                  approver=response.headers.get(_APPROVER_HEADER),
+                                  decision_diff=self._decision_diff(pending, response))
         baton.stage = self._next_stage(stage, resume_input)
         return await self._settle(baton, resume_input)
 
     @staticmethod
     def _merge_decision(pending: Optional[Envelope], response: Envelope) -> Envelope:
         """Fold the human decision onto the failed stage's artifact (decision keys
-        win). No prior artifact (a plain gate) → just the response."""
+        win). No prior artifact (a fanout/foreach member's AWAIT parks without one)
+        → the response alone, MINUS the reserved approver header: the identity is
+        recorded on the resume span and must stop there — passing the response
+        through verbatim carried it into the merged input and downstream (eval
+        finding; the pending path never leaked, its headers come from pending)."""
         if pending is None:
-            return response
+            headers = {k: v for k, v in response.headers.items()
+                       if k != _APPROVER_HEADER}
+            return Envelope(kind=response.kind, payload=dict(response.payload),
+                            headers=headers)
         payload = dict(pending.payload)
         payload.update(response.payload)
         return Envelope(kind=response.kind, payload=payload, headers=dict(pending.headers))
+
+    @staticmethod
+    def _decision_diff(pending: Optional[Envelope], response: Envelope) -> Dict[str, Any]:
+        """Key-level audit of what the human EDITED at the gate — the emitted-vs-
+        edited signal a future self-repair corpus reads off the trace record.
+        Compares the gate's EMITTED artifact (`pending`) against the human's
+        decision (`response`):
+          - emitted: keys the gate produced (the pending artifact; [] for a gate
+            with no prior artifact),
+          - added:   keys the human introduced (in response, not emitted),
+          - changed: keys the human overrode (in both, VALUE differs).
+        No `removed`: the merge is additive (merged = emitted ∪ response), so an
+        emitted key is never dropped from the flow — a `removed` list would be
+        provably always empty, i.e. padding.
+
+        KEYS ONLY — values are compared in-memory to detect `changed` but never
+        stored (same keys-only contract as decision_keys; a value may be a
+        sensitive free-text ruling). Bounded on BOTH axes (eval finding — a count
+        cap alone lets one megabyte-long key NAME bloat the record): each list is
+        capped at _MAX_DIFF_KEYS entries AND each stored key name is clipped to
+        _MAX_DIFF_KEY_CHARS; either cut sets the `truncated` flag."""
+        emitted = pending.payload if pending is not None else {}
+        resp = response.payload
+        added = sorted(k for k in resp if k not in emitted)
+        changed = sorted(k for k in resp if k in emitted and emitted[k] != resp[k])
+        emitted_keys = sorted(emitted.keys())
+        truncated = max(len(emitted_keys), len(added), len(changed)) > _MAX_DIFF_KEYS
+
+        def clip(keys: List[str]) -> List[str]:
+            nonlocal truncated
+            out = []
+            for k in keys[:_MAX_DIFF_KEYS]:
+                if len(k) > _MAX_DIFF_KEY_CHARS:
+                    truncated = True
+                    k = k[:_MAX_DIFF_KEY_CHARS] + "…"
+                out.append(k)
+            return out
+
+        diff: Dict[str, Any] = {
+            "emitted": clip(emitted_keys),
+            "added": clip(added),
+            "changed": clip(changed),
+        }
+        if truncated:
+            diff["truncated"] = True
+        return diff
 
     # -- internals --
 
@@ -348,11 +438,24 @@ class Harness:
                 # misroute is otherwise invisible in the trace.
                 route = ("<absent→default>" if on not in out.payload
                          else _route_key(out.payload.get(on)))
+        # effects_from (ADR-0008 D2): a PASSING stage hands its author-chosen effect
+        # HANDLE (payload[effects_from]) to its completion span so the `yaah
+        # rollback` verb has the context an undo needs. Mirrors the concerns_from
+        # pull above but COPIES (the descriptor stays on the payload for downstream
+        # stages), and only on _Pass — a _Cleared/_Suspend never committed the
+        # effect, and a FAILED attempt raised before reaching here (so a retry's
+        # note/error span never carries effects). The bound (serialize/clip) lives
+        # in the emitter. Passed only when configured so a stage without
+        # effects_from records no `effects` attr (backward compatible).
+        effects_attr: Dict[str, Any] = {}
+        if stage.effects_from and isinstance(result, _Pass):
+            effects_attr["effects"] = result.output.payload.get(stage.effects_from)
         await self._spans.stage(stage.name, input, t0,
                                 status=_status,
                                 concerns=getattr(result, "concerns", None),
                                 output=out, route=route,
-                                awaiting=getattr(result, "awaiting", None))
+                                awaiting=getattr(result, "awaiting", None),
+                                **effects_attr)
         return result
 
     def _fold_sticky(self, stage_input: Envelope, stage_output: Envelope) -> None:
@@ -361,7 +464,16 @@ class Harness:
         the key wins). The engine-level kill for the dropped-key defect class
         (H5) — payload-replacing nodes plus hand-maintained carry lists meant a
         load-bearing key (task, workdir, repo_root...) was eventually forgotten.
-        Runs on the linear pass path and on a fork's reduced join."""
+        Runs on the linear pass path and on a fork's reduced join.
+
+        A `final: true` TERMINAL stage opts its OUTPUT out of this re-fold — the
+        skip is a guard at the linear call site in `_drive`, NOT here and NOT in
+        the fork coordinator's walk. `final` is honored only on the linear
+        terminal because that is the one place a stage's own output becomes the
+        run's Done surface; the fork-machinery fold sites (this method's other
+        callers) stay unconditional. validate enforces the match — it rejects
+        `final` on any stage with a continuation key AND on any fork-scoped stage
+        — so a fork/branch fold never needs a `final` skip here."""
         for k in self.graph.sticky:
             if k in stage_input.payload and k not in stage_output.payload:
                 stage_output.payload[k] = stage_input.payload[k]
@@ -429,6 +541,18 @@ class Harness:
             if isinstance(result, _Suspend):
                 baton.status = "suspended"
                 baton.parked_at = self._wall()  # wall-clock: TTL must survive a restart (H1)
+                # Pin THIS RUN's correlation id onto the parked artifact before it
+                # is persisted. The artifact's own chain can have diverged from the
+                # run corr (a feedback-retry envelope copies headers WITHOUT a
+                # correlation_id, so its chain restarts on a fresh id) — and resume,
+                # possibly in another process, recovers the run corr ONLY from these
+                # headers. Without the pin the resume trace record (the logged
+                # human-override event) would land under a corr no other record of
+                # the run shares — an orphaned audit line. `input` here is the
+                # stage-entry envelope, the same one the suspended stage span was
+                # emitted with, so this is exactly the corr the trace groups by.
+                if result.last_output is not None:
+                    result.last_output.headers["correlation_id"] = input.correlation_id
                 baton.pending = result.last_output  # the artifact, for resume to keep
                 baton.awaiting = result.awaiting   # the open question, for the mailbox view
                 # surface concerns at the gate: those from prior passed stages PLUS
@@ -441,7 +565,11 @@ class Harness:
                     ask = result.last_output.payload.get("ask") or result.last_output.payload.get("question") or ""
                 return Suspended(baton.id, result.awaiting, concerns=list(baton.concerns), ask=ask)
             baton.concerns.extend(result.concerns)  # soft gate: noted, not blocking
-            self._fold_sticky(input, result.output)
+            # `final: true` (terminal only, enforced by validate): this stage's
+            # output is the run's FINAL word — skip the sticky re-fold so a tidy
+            # cleanup stage can drop the loop-state run frame from the Done output.
+            if not stage.final:
+                self._fold_sticky(input, result.output)
             input = result.output  # handover: output becomes next stage's input
             if stage.clears:  # this node clears the named gate(s) on completion
                 await self._clear_bus.publish_clears(stage.clears, input.correlation_id, input.payload)
@@ -468,11 +596,18 @@ class Harness:
         return routes.get(key, default)
 
     async def _run_stage(self, stage: Stage, input: Envelope) -> Union[_Pass, _Suspend]:
-        """Run one stage to a _Pass or _Suspend. Single-node and fan-out stages
-        share ONE retry/validate/escalate loop (`_run_attempts`); they differ only
-        in how an attempt PRODUCES its output (one request vs a gather+merge), so
-        each just supplies a producer. Keeps the two paths from drifting."""
-        produce = self._produce_fanout if stage.fanout else self._produce_single
+        """Run one stage to a _Pass or _Suspend. Single-node, fan-out and foreach
+        stages share ONE retry/validate/escalate loop (`_run_attempts`); they
+        differ only in how an attempt PRODUCES its output (one request vs a
+        gather+merge), so each just supplies a producer. Keeps the paths from
+        drifting. (validate rejects shape combos, so the order here is not
+        load-bearing — foreach first only because its check is cheapest.)"""
+        if stage.foreach:
+            produce: Any = self._produce_foreach
+        elif stage.fanout:
+            produce = self._produce_fanout
+        else:
+            produce = self._produce_single
         return await self._run_attempts(stage, input, produce)
 
     async def _run_attempts(
@@ -639,26 +774,7 @@ class Harness:
         roles = stage.fanout or []
         results = await asyncio.gather(
             *(self.comms.request(r, input) for r in roles), return_exceptions=True)
-        outs: List[Tuple[str, Envelope]] = []
-        # a failed role's `res` is a local exception OR an envelope (ERROR /
-        # failed VERDICT) — _failed_role_detail renders each shape
-        errors: List[Tuple[str, object]] = []
-        for role, res in zip(roles, results):
-            if isinstance(res, BaseException):
-                errors.append((role, res))
-            elif res.kind == Kind.ERROR:  # remote handler raised (H3) — a failed role,
-                await self._ingest_remote_trace(res)  # not a result to merge
-                errors.append((role, res))
-            elif res.kind == Kind.VERDICT and not Verdict.from_envelope(res).ok:
-                # A member that RETURNED a failed verdict (an agent exhausting
-                # its schema/parse attempts, a guard node's refusal) is a failed
-                # role too — merged as a result it reads as a clean pass
-                # downstream (a dead lens = zero findings, mailbox M8a).
-                await self._ingest_remote_trace(res)
-                errors.append((role, res))
-            else:
-                await self._ingest_remote_trace(res)  # R6 per-branch trace merge
-                outs.append((role, res))
+        outs, errors = await self._classify_parallel(list(zip(roles, results)))
 
         for _, res in outs:  # a fanned-out node that chose to suspend parks the stage
             if res.kind == Kind.AWAIT:
@@ -682,6 +798,115 @@ class Harness:
                     ", ".join(self._failed_role_detail(role, res) for role, res in errors)),
                 "ensure every fan-out node is reachable and succeeds"))
         return merged, None  # validate normally
+
+    async def _classify_parallel(
+        self, tagged: "List[Tuple[Any, Any]]",   # reply is Envelope | BaseException (gather)
+    ) -> "Tuple[List[Tuple[Any, Envelope]], List[Tuple[Any, object]]]":
+        """Split parallel members' replies into (successes, failures) — the ONE
+        classification both fanout and foreach use (ADR-0007 D6: shared machinery
+        so the shapes can't drift). A failure is a local exception, a Kind.ERROR
+        reply (a remote handler raised, H3), or a member-RETURNED failed verdict
+        (an agent exhausting its schema/parse attempts — merged as a result it
+        would read as a clean pass downstream, the dead-lens class, M8a).
+        Ingests every ENVELOPE reply's remote trace (R6), success or failure.
+        `tagged` pairs each reply with its caller-meaningful tag (a role name /
+        an item index) which flows through untouched."""
+        outs: "List[Tuple[Any, Envelope]]" = []
+        errors: "List[Tuple[Any, object]]" = []
+        for tag, res in tagged:
+            if isinstance(res, BaseException):
+                errors.append((tag, res))
+            elif res.kind == Kind.ERROR:
+                await self._ingest_remote_trace(res)
+                errors.append((tag, res))
+            elif res.kind == Kind.VERDICT and not Verdict.from_envelope(res).ok:
+                await self._ingest_remote_trace(res)
+                errors.append((tag, res))
+            else:
+                await self._ingest_remote_trace(res)
+                outs.append((tag, res))
+        return outs, errors
+
+    async def _produce_foreach(self, stage: Stage, input: Envelope) -> "Union[_Suspend, Tuple[Envelope, Optional[Verdict]]]":
+        """One attempt for a foreach stage (ADR-0007): map the stage's node over
+        `payload[items]` (a runtime-sized list), bounded to `max_concurrent` in
+        flight, then merge. Per-item input is REPLACE + named carries + sticky —
+        `{into: element, item_index, carries, sticky}` — never a copy of the
+        whole inbound payload (the visible-cost rule, D1). Each per-item
+        envelope is built with reply_with so corr/baton/clear_id survive and the
+        item's spans stitch into the run's trace (design-eval #3). Merge:
+        inbound payload ∪ {results: [{item_index, payload}] pairs in item order
+        (compaction-safe provenance, design-eval #2), failed_items: [indexes]}.
+        min_success reuses the k-of-n rule; an item replying AWAIT parks the
+        WHOLE stage; a stage retry re-runs ALL items (documented v1 semantics).
+        Used by _run_attempts."""
+        fe = stage.foreach or {}
+        key = str(fe.get("items", ""))
+        items = input.payload.get(key)
+        if not isinstance(items, list):
+            # fail LOUD at run time (validate can't know the runtime payload):
+            # name the key and the actual type, not a downstream KeyError.
+            return input.reply_with(Kind.RESULT, dict(input.payload)), Verdict.failed(Failure(
+                "foreach_input",
+                "foreach.items key {!r} must hold a list on the stage input; got {}".format(
+                    key, type(items).__name__),
+                "produce the list upstream (an agent output_schema / a transform provides)"))
+        into = str(fe.get("into") or "item")
+        carry = [c for c in (fe.get("carry") or []) if isinstance(c, str)]
+        limit = int(fe.get("max_concurrent") or 3)
+        sem = asyncio.Semaphore(max(1, limit))
+
+        def _item_env(i: int, element: object) -> Envelope:
+            payload: Dict[str, Any] = {into: element, "item_index": i}
+            for k in carry:
+                if k in input.payload:
+                    payload[k] = input.payload[k]
+            # sticky keys are the run frame (workdir etc.) — auto-included so a
+            # per-item worker resolves cwd_from exactly like a fanout member
+            # (design-eval #7); REPLACE applies to the bulky domain payload.
+            for k in self.graph.sticky:
+                if k in input.payload and k not in payload:
+                    payload[k] = input.payload[k]
+            return input.reply_with(input.kind, payload)
+
+        async def _one(i: int, element: object) -> Envelope:
+            async with sem:
+                return await self.comms.request(stage.node, _item_env(i, element))
+
+        replies = await asyncio.gather(
+            *(_one(i, el) for i, el in enumerate(items)), return_exceptions=True)
+        outs, errors = await self._classify_parallel(list(enumerate(replies)))
+
+        for _, res in outs:  # an item that chose to suspend parks the whole stage (v1)
+            if res.kind == Kind.AWAIT:
+                return _Suspend(str(res.payload.get("awaiting", "external")))
+
+        merged_payload = dict(input.payload)
+        merged_payload.update(
+            results=[{"item_index": i, "payload": res.payload} for i, res in outs],
+            failed_items=[i for i, _ in errors])
+        merged = input.reply_with(Kind.RESULT, merged_payload)
+        # Default (no min_success): every item must succeed — any failure fails the
+        # stage. With min_success declared, k-of-n TOLERATES failures — but the k
+        # floor holds UNCONDITIONALLY, not only on the errors path: unlike fanout
+        # (where validate bounds min_success ≤ len(roles) statically), the item
+        # count is runtime-sized, so an EMPTY or short list can under-deliver with
+        # zero failures — that must not read as a clean pass.
+        tolerated = stage.min_success is not None and len(outs) >= stage.min_success
+        if errors and not tolerated:
+            return merged, Verdict.failed(Failure(
+                "foreach_error",
+                "foreach item(s) failed: {}".format(
+                    ", ".join(self._failed_role_detail("item {}".format(i), res)
+                              for i, res in errors)),
+                "fix the failing items or declare min_success for partial tolerance"))
+        if stage.min_success is not None and len(outs) < stage.min_success:
+            return merged, Verdict.failed(Failure(
+                "foreach_error",
+                "only {} item(s) succeeded but min_success={} (items list held {})".format(
+                    len(outs), stage.min_success, len(items)),
+                "provide more items upstream or lower min_success"))
+        return merged, None  # validate normally (degrade under k-of-n is visible, not silent)
 
     @staticmethod
     def _failed_role_detail(role: str, res: object) -> str:

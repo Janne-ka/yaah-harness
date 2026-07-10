@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from .aggregate import record_cost_usd
+from .aggregate import count_by_stage_model, record_cost_usd
 
 
 def _fmt_ms(ms: float) -> str:
@@ -233,6 +233,67 @@ def cost_summary(records: Iterable[Dict[str, Any]],
         if c:
             row_bits.append(c)
         lines.append("  " + " · ".join(row_bits))
+    return "\n".join(lines) + "\n"
+
+
+def counts_table(records: Iterable[Dict[str, Any]],
+                 *, price_map: Optional[Dict[str, Any]] = None) -> str:
+    """Invocation-count report as an aligned table — `yaah trace --counts`. One
+    row per (stage, model, ladder rung), the columns the client reads instead of
+    hand-rolling stats.json + jq: stage · model · calls · tokens_in · tokens_out
+    · cost · p50 · p95.
+
+    Ladder second-rung rows (M7 escalation, records carrying `ladder_from`) are
+    marked ' (ladder)' on the model cell and kept as SEPARATE rows — never merged
+    into rung-1 (the client's hard invariant). Cost is honest: '-' when the model
+    is unpriced (cost unknown, never a silent $0.00), a $ amount when priced —
+    the same 'cost is opt-in' convention as --cost. Token counts are RAW integers
+    (forensic precision — the client sums/diffs them); durations use the trace's
+    ms/s formatting. Zero-token rows are kept. PURE; the CLI wraps load_jsonl +
+    this. --counts --json emits count_by_stage_model() as machine JSON instead."""
+    rows = count_by_stage_model(records, price_map=price_map)
+    if not rows:
+        return "no model calls\n"
+
+    def _cost_cell(g: Dict[str, Any]) -> str:
+        # priced -> a $ amount (incl. an explicit $0.0000 for a real zero-token
+        # call); unpriced -> '-' so a $0.00 is never silently invented.
+        if not g["priced"]:
+            return "-"
+        return "${:.4f}".format(g["cost_usd"])
+
+    def _model_cell(g: Dict[str, Any]) -> str:
+        return g["model_ref"] + (" (ladder)" if g["ladder"] else "")
+
+    headers = ["stage", "model", "calls", "tokens_in", "tokens_out",
+               "cost", "p50", "p95"]
+    body: List[List[str]] = []
+    for g in rows:
+        body.append([g["stage"], _model_cell(g), str(g["calls"]),
+                     str(g["tokens_in"]), str(g["tokens_out"]), _cost_cell(g),
+                     _fmt_ms(g["p50_ms"]), _fmt_ms(g["p95_ms"])])
+
+    # column widths from header + body; text cols (stage, model) left-aligned,
+    # the rest right-aligned so numbers line up for scanning.
+    widths = [len(h) for h in headers]
+    for r in body:
+        for i, cell in enumerate(r):
+            widths[i] = max(widths[i], len(cell))
+    left = {0, 1}
+
+    def _fmt_row(cells: List[str]) -> str:
+        out = []
+        for i, cell in enumerate(cells):
+            out.append(cell.ljust(widths[i]) if i in left else cell.rjust(widths[i]))
+        return "  ".join(out).rstrip()
+
+    lines = [_fmt_row(headers), _fmt_row(["-" * w for w in widths])]
+    for r in body:
+        lines.append(_fmt_row(r))
+    if any(not g["priced"] for g in rows):
+        # mirror cost_summary's honest signal when pricing is partial/absent
+        lines.append("")
+        lines.append("- = unpriced (no price-map entry for this model)")
     return "\n".join(lines) + "\n"
 
 

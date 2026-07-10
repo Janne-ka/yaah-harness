@@ -66,7 +66,7 @@ Plus:
 | `./visualize <target>` | One-shot SVG production for any config. The convenient default. | ~$0.07 + ~40s (haiku) |
 | `yaah run config-flow.real.json` | Default target (arch-drift), runs end-to-end with no human input. | same |
 | `yaah run config-flow-ab.real.json` | A/B comparison sonnet vs haiku — produces BOTH SVGs (`<stem>-a.svg` + `<stem>-b.svg`) side-by-side in the target's `diagrams/` dir. Fully automated, no gate. Use to verify haiku is still good enough on a new config shape. | ~$0.23 + ~85s |
-| `MERMAID_RENDERER=:canned yaah run config-flow.local.json` | Verify the pipeline shape without an LLM key. Output is a canned SVG (visually meaningless). | zero |
+| `MERMAID_RENDERER=:fixed_test_svg yaah run config-flow.local.json` | Verify the pipeline shape without an LLM key. Output is a canned SVG (visually meaningless). | zero |
 
 (Not installed? `python3 -m yaah.runtime <config>` is the equivalent; from a
 source checkout prefix `PYTHONPATH=src`.)

@@ -15,9 +15,13 @@ with BusTracer (the with-bus case) under the same Tracer port; same emit-site
 code on both sides.
 
 Size cap: a per-corr buffer is bounded by `buffer_max` records. When the cap is
-hit on emit, the OLDEST record for that corr is dropped and a single
-`{name: "trace_truncated", corr, dropped}` marker is appended on drain. This
-keeps the envelope bounded (otherwise a long-running stage with chatty
+hit on emit, the oldest `llm_progress` PULSE is dropped first (a pulse is
+trash-after-read; `model_call`/`stage` are the cost/audit data the carriage
+exists for — with `capture: [live]` a long streaming call would otherwise FIFO
+an earlier rung's model_call out and silently lose its cost from the report);
+only a pulse-free buffer falls back to dropping the OLDEST record. Either way a
+single `{name: "trace_truncated", corr, dropped}` marker is appended on drain.
+This keeps the envelope bounded (otherwise a long-running stage with chatty
 contributors could balloon a reply envelope past any transport's frame size).
 
 Targets Python 3.9+.
@@ -50,8 +54,15 @@ class EnvelopeTracer(Tracer):
         buf = self._by_corr.setdefault(corr, [])
         buf.append(record)
         if len(buf) > self._buffer_max:
-            # drop oldest (FIFO); count it so drain can append a single marker
-            buf.pop(0)
+            # evict the oldest PULSE first, else the oldest record (see module
+            # docstring); count it so drain can append a single marker. The scan
+            # runs only on overflow and buffer_max is small — not a hot path.
+            for i, r in enumerate(buf):
+                if r.get("name") == "llm_progress":
+                    buf.pop(i)
+                    break
+            else:
+                buf.pop(0)
             self._dropped[corr] = self._dropped.get(corr, 0) + 1
 
     async def drain(self, corr: str) -> List[Dict[str, Any]]:

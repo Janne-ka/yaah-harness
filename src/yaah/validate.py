@@ -368,16 +368,32 @@ def _is_fork(stage_config: Dict[str, Any], stage_names: set) -> bool:
 # `note` is the config comment convention; any `_`-prefixed key is meta (`_about`).
 _STAGE_KEYS = frozenset({
     "node", "id", "validators", "max_attempts", "error_retries", "feedback",
-    "escalate", "then", "fanout", "min_success", "fork", "branch", "fanin",
-    "wait", "clears", "concerns_from", "concerns_into", "clearable",
-    "on_error", "note",
+    "escalate", "then", "final", "fanout", "min_success", "fork", "branch", "fanin",
+    "foreach", "wait", "clears", "concerns_from", "concerns_into", "clearable",
+    "on_error", "effects_from", "note",
 })
+
+# The continuation keys that make a stage NON-terminal — build_graph reads each as a
+# routing edge (then/branch/fork/fanout/fanin/foreach). `final: true` is illegal
+# alongside any of them: sticky is the run frame the dataflow lattice re-folds on
+# EVERY edge, so only a terminal stage (the last word) may drop the re-fold.
+_CONTINUATION_KEYS = ("then", "branch", "fork", "fanout", "fanin", "foreach")
+
+# the keys a `foreach` block may carry (ADR-0007) — a typo'd `max_parallel`
+# would otherwise silently run unbounded, the same silent-no-op class as
+# _STAGE_KEYS itself.
+_FOREACH_KEYS = frozenset({"items", "into", "carry", "max_concurrent"})
 
 # Every key build_graph reads off the graph object itself. Same silent-no-op
 # class as stage keys: a typo'd `stiky` would quietly change nothing.
 # `constraints` is validation-only (never read by build_graph): declared
 # ordering rules checked below.
-_GRAPH_KEYS = frozenset({"start", "stages", "sticky", "constraints", "note"})
+# `on_failure` (ADR-0009 D1, the auto-saga opt-in) is read by the RUNTIME
+# BOUNDARY (yaah.saga), never by build_graph — listed here so an armed pipeline
+# is not rejected as a typo'd key; its value grammar is checked in
+# validate_pipeline (yaah.saga.check_on_failure_value, the one implementation).
+_GRAPH_KEYS = frozenset({"start", "stages", "sticky", "constraints", "note",
+                         "on_failure"})
 
 _CONSTRAINT_KEYS = frozenset({"precedes", "note"})
 
@@ -412,6 +428,46 @@ def _check_on_error(stage: str, oe: Any, errs: List[str]) -> None:
                 "{{\"compensate\": target}}, got {!r}".format(stage, oe))
 
 
+def _check_rollback(role: str, rb: Any, errs: List[str]) -> None:
+    """Hard-check the node-level `rollback` capability block (ADR-0008 D1): the
+    author-declared undo the `yaah rollback` verb walks in reverse. Shape:
+    {"target": <fn:/http: call_target>, "cost"?: "cheap"|"costly"}. Mirrors
+    _check_on_error's per-key rejection so a typo can't silently disable the undo
+    (a rollback the author believes is configured must not be a no-op).
+
+    `target` is restricted to fn:/http: in v1: the verb runs OUTSIDE a harness (a
+    CLI reading the trace file), which is comms-free, and a `node:` target
+    hard-requires comms (external_call raises without it). A node: target is
+    REJECTED here rather than left to validate, record, list in the menu, and die
+    at --execute (design-eval #3)."""
+    if not isinstance(rb, dict):
+        errs.append("node {!r}: rollback must be an object {{target, cost?}}, "
+                    "got {!r}".format(role, rb))
+        return
+    target = rb.get("target")
+    if not (isinstance(target, str) and target):
+        errs.append("node {!r}: rollback needs a non-empty `target` call_target "
+                    "string (fn:/http:)".format(role))
+    elif target.startswith("node:"):
+        errs.append("node {!r}: rollback target {!r} is a node: target, but the "
+                    "rollback verb runs OUTSIDE a harness (a CLI reading the trace) "
+                    "with no comms, and a node: target requires comms — use an "
+                    "fn:/http: target".format(role, target))
+    elif not (target.startswith("fn:") or target.startswith("http:")):
+        errs.append("node {!r}: rollback target {!r} must be an fn:/http: "
+                    "call_target".format(role, target))
+    cost = rb.get("cost", "cheap")
+    if cost not in ("cheap", "costly"):
+        errs.append("node {!r}: rollback.cost must be \"cheap\" or \"costly\", "
+                    "got {!r}".format(role, cost))
+    unknown = sorted(k for k in rb
+                     if k not in ("target", "cost", "note")
+                     and not k.startswith("_"))  # note/_* = config comments
+    if unknown:
+        errs.append("node {!r}: unknown rollback key(s) {}; known: target, "
+                    "cost".format(role, unknown))
+
+
 def _successor_edges(stages: Dict[str, Any]) -> Dict[str, set]:
     """stage -> set of possible NEXT stages, from every routing key build_graph
     reads (then, branch routes + default, fork targets). The fanin `expect`
@@ -444,6 +500,48 @@ def _reachable(edges: Dict[str, Any], frm: str, *, avoid: Optional[str] = None) 
                 seen.add(t)
                 todo.append(t)
     return seen
+
+
+def _fork_reachable_scope(stages: Dict[str, Any]) -> set:
+    """The set of stages the ForkCoordinator (not the linear `_drive`) walks — a
+    fork BRANCH chain or a fan-in `then` chain — reached from any fork stage's
+    targets. `final` (skip the sticky re-fold) is honored only on the linear
+    terminal, so a `final` on one of these is a silent no-op that validate rejects.
+
+    DEFENSIVE by contract: `validate_pipeline` calls this BEFORE it has flagged a
+    malformed `fork`/`branch` value, so it must never crash on one (the gather-all
+    contract). Every routing value is type-checked; a malformed one contributes no
+    edge and is rejected by the shape checks elsewhere. Follows `then`/`branch`
+    routes + `fork` targets — the same successor relation `_successor_edges` uses,
+    but tolerant of bad shapes."""
+    edges: Dict[str, set] = {}
+    for name, s in stages.items():
+        nxt: set = set()
+        if isinstance(s, dict):
+            then = s.get("then")
+            if isinstance(then, str):
+                nxt.add(then)
+            b = s.get("branch")
+            if isinstance(b, dict):
+                routes = b.get("routes")
+                if isinstance(routes, dict):
+                    nxt.update(v for v in routes.values() if isinstance(v, str))
+                if isinstance(b.get("default"), str):
+                    nxt.add(b["default"])
+            fork = s.get("fork")
+            if isinstance(fork, list):
+                nxt.update(t for t in fork if isinstance(t, str))
+        edges[name] = {t for t in nxt if t in stages}
+    scope: set = set()
+    for s in stages.values():
+        if not isinstance(s, dict):
+            continue
+        fork = s.get("fork")
+        if isinstance(fork, list):
+            for t in fork:
+                if isinstance(t, str) and t in stages:
+                    scope |= _reachable(edges, t) | {t}
+    return scope
 
 
 def _check_constraints(cons: Any, start: Any, stages: Dict[str, Any],
@@ -494,7 +592,9 @@ def _check_constraints(cons: Any, start: Any, stages: Dict[str, Any],
                         "bypassing the required stage".format(i, late, early))
 
 
-def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -> None:
+def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None, *,
+                      contract_for: Optional[Any] = None,
+                      consumes_for: Optional[Any] = None) -> None:
     """Fail fast on a malformed pipeline at BUILD time instead of mid-run. Every
     cross-reference must resolve: graph.start, each `then`, branch routes/default
     → a declared stage; each stage's node, validators, fanout roles → a declared
@@ -505,7 +605,12 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
 
     `base_path` (the root config's dir, as `build` passes its `base_dir`) lets the
     data-flow contract check read `template_file` renders; omit it and a
-    `template_file` edge is left to the runtime's fail-loud instead of guessed at."""
+    `template_file` edge is left to the runtime's fail-loud instead of guessed at.
+
+    `contract_for` / `consumes_for` (ADR-0006 D7.2): an embedding app's registry
+    contract sources (`Registry.contract_source()` / `consumes_source()`) so its
+    CUSTOM node types get the same ERROR-grade data-flow checking as built-ins.
+    None (the default) = built-ins + inline declarations only, byte-identical."""
     nodes = set(config.get("nodes", {}))
     g = config.get("graph") or {}
     stages = g.get("stages", {})
@@ -544,10 +649,23 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
                 errs.append("node {!r}: escalate_model needs parse (the `help` "
                             "trigger is a parsed key) — remove `parse: false` or "
                             "drop escalate_model".format(role))
+        # ADR-0008 D1: the node-level `rollback` capability block (the author's
+        # per-node undo the `yaah rollback` verb runs). Absent = the node is
+        # honestly-unknown/irreversible; present = shape-checked here.
+        rb = n.get("rollback")
+        if rb is not None:
+            _check_rollback(role, rb, errs)
     for k in g:
         if k not in _GRAPH_KEYS and not k.startswith("_"):
             errs.append("graph: unknown key {!r}{}; known: {}".format(
                 k, _suggest(k, _GRAPH_KEYS), ", ".join(sorted(_GRAPH_KEYS))))
+    # ADR-0009 D1: the auto-saga opt-in's value grammar ("rollback" | {mode,
+    # include_costly}). ONE implementation shared with the runtime arm point
+    # (yaah.saga) — a typo'd value must not silently leave un-armed a saga the
+    # author believes is armed (the same silent-disable class as _check_on_error).
+    if "on_failure" in g:
+        from .saga import check_on_failure_value
+        errs.extend(check_on_failure_value(g.get("on_failure")))
     sticky = g.get("sticky")
     if sticky is not None and (not isinstance(sticky, list)
                                or not all(isinstance(k, str) and k for k in sticky)):
@@ -558,12 +676,74 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
     if start not in stages:
         errs.append("graph.start {!r} is not a stage".format(start))
     stage_names = set(stages)
+    # Stages the ForkCoordinator walks (a fork BRANCH chain or a fan-in `then`
+    # chain) rather than the linear `_drive`. `final` (skip the sticky re-fold) is
+    # honored ONLY on the linear walk's terminal — the fold sites inside the fork
+    # machinery are unconditional — so `final` on a fork-scoped stage would silently
+    # do nothing. Computed once here (DEFENSIVELY — a malformed fork/branch is
+    # flagged below, not crashed on) to reject that no-op loud.
+    _fork_scope = _fork_reachable_scope(stages)
     for name, s in stages.items():
+        # a non-list here used to escape into the loops below as a raw TypeError
+        bad_shape = [k for k in ("fanout", "fork", "validators")
+                     if k in s and not isinstance(s[k], list)]
+        if bad_shape:
+            errs.append("stage {!r}: {} must be a list of names, got {}".format(
+                name, "/".join(repr(k) for k in bad_shape),
+                "/".join(type(s[k]).__name__ for k in bad_shape)))
+            s = {k: v for k, v in s.items() if k not in bad_shape}
         fo = s.get("fanout") or []
         fk = s.get("fork") or []
         is_fork = bool(fk)
         if fo and fk:
             errs.append("stage {!r}: has both 'fanout' and 'fork' — one stage, one parallel shape".format(name))
+        # A `fanin` is a parallel JOIN; `fanout`/`fork` is a parallel SOURCE. One stage
+        # that is both is a walker-dependent trap — `_drive` reaches it fork-first, the
+        # branch walker fanin-first, so which shape "wins" depends on the walk, not the
+        # config. Reject at load rather than run something order-dependent (the dataflow
+        # lattice tolerates it soundly, but the runtime behaviour is ambiguous).
+        if s.get("fanin") and (fo or fk):
+            src = "fanout" if fo else "fork"
+            errs.append("stage {!r}: has both 'fanin' (a parallel JOIN) and {!r} (a "
+                        "parallel SOURCE) — one stage cannot be both; split the join and "
+                        "the {} into separate stages".format(name, src, src))
+        # foreach (ADR-0007): dynamic per-item fan-out — one stage, one parallel shape,
+        # so it excludes every other shape; then the block's own structure is checked
+        # (a malformed foreach that slipped to the harness would fail at RUN time on
+        # the first swarm, the exact late-discovery class validate exists to kill).
+        fe = s.get("foreach")
+        if fe is not None:
+            for other in ("fanout", "fork", "fanin"):
+                if s.get(other):
+                    errs.append("stage {!r}: has both 'foreach' and {!r} — one stage, "
+                                "one parallel shape".format(name, other))
+            if not isinstance(fe, dict):
+                errs.append("stage {!r}: foreach must be an object "
+                            "{{items, into?, carry?, max_concurrent?}}, got {}".format(
+                                name, type(fe).__name__))
+            else:
+                for k in fe:
+                    if k not in _FOREACH_KEYS:
+                        errs.append("stage {!r}: unknown foreach key {!r}; known: {}".format(
+                            name, k, ", ".join(sorted(_FOREACH_KEYS))))
+                items = fe.get("items")
+                if not (isinstance(items, str) and items):
+                    errs.append("stage {!r}: foreach.items must be a non-empty payload-key "
+                                "string (the upstream-provided list), got {!r}".format(
+                                    name, items))
+                into = fe.get("into")
+                if into is not None and not (isinstance(into, str) and into):
+                    errs.append("stage {!r}: foreach.into must be a non-empty string".format(name))
+                carry = fe.get("carry")
+                if carry is not None and (not isinstance(carry, list)
+                                          or not all(isinstance(c, str) and c for c in carry)):
+                    errs.append("stage {!r}: foreach.carry must be a list of payload-key "
+                                "strings".format(name))
+                mc = fe.get("max_concurrent")
+                if mc is not None and (not isinstance(mc, int) or isinstance(mc, bool)
+                                       or mc < 1):
+                    errs.append("stage {!r}: foreach.max_concurrent must be a positive "
+                                "int, got {!r}".format(name, mc))
         node = s.get("node")
         if not node:
             if not is_fork and not s.get("fanin"):
@@ -584,7 +764,8 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
         fi = s.get("fanin") or {}
         if fi and not isinstance(fi, dict):
             errs.append("stage {!r}: fanin must be an object".format(name))
-        for e in (fi.get("expect") if isinstance(fi.get("expect"), list) else []):
+        _expect = fi.get("expect") if isinstance(fi, dict) else None
+        for e in (_expect if isinstance(_expect, list) else []):
             if e not in stages:
                 errs.append("stage {!r}: fanin expects {!r}, not a stage".format(name, e))
         then = s.get("then")
@@ -603,16 +784,65 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
         ci = s.get("concerns_into")
         if ci is not None and not (isinstance(ci, str) and ci):
             errs.append("stage {!r}: concerns_into must be a non-empty payload-key string".format(name))
+        # ADR-0008 D2: effects_from names the payload key whose value the harness
+        # copies onto the completion span (the effect HANDLE the rollback verb
+        # reads). REJECTED on a fork/fanin stage: the fork PARENT's completion span
+        # is emitted on a separate no-output path, so the copy would silently
+        # record nothing (design-eval #6) — forbidden loudly instead. Linear,
+        # branch-child, and foreach stages all complete through the shared seam.
+        ef = s.get("effects_from")
+        if ef is not None:
+            if not (isinstance(ef, str) and ef):
+                errs.append("stage {!r}: effects_from must be a non-empty payload-key "
+                            "string (the effect handle the rollback verb reads)".format(name))
+            elif s.get("fork") or s.get("fanin"):
+                errs.append("stage {!r}: effects_from is not allowed on a fork/fanin "
+                            "stage — the fork parent's completion span is emitted on a "
+                            "separate no-output path, so the effect descriptor would "
+                            "silently record nothing; put effects_from on the stage "
+                            "that actually produces the effect".format(name))
         ms = s.get("min_success")
         if ms is not None:
             fo = s.get("fanout")
-            if not isinstance(fo, list):
-                errs.append("stage {!r}: min_success only applies to a fanout stage "
-                            "(set `fanout: [roles...]`, or remove it)".format(name))
+            fe = s.get("foreach")
+            if isinstance(fe, dict):
+                # foreach's item count is RUNTIME-sized (ADR-0007, design-eval #1):
+                # the only static bound is >= 1 — a compile-time upper bound would
+                # need the list length, which doesn't exist yet.
+                if not (isinstance(ms, int) and not isinstance(ms, bool) and ms >= 1):
+                    errs.append("stage {!r}: min_success must be a positive int "
+                                "(got {!r})".format(name, ms))
+            elif not isinstance(fo, list):
+                errs.append("stage {!r}: min_success only applies to a fanout or "
+                            "foreach stage (set `fanout: [roles...]` / `foreach: "
+                            "{{...}}`, or remove it)".format(name))
             elif not (isinstance(ms, int) and not isinstance(ms, bool)
                       and 1 <= ms <= len(fo)):
                 errs.append("stage {!r}: min_success must be an int between 1 and "
                             "len(fanout)={} (got {!r})".format(name, len(fo), ms))
+        fin = s.get("final")
+        if fin is not None:
+            if not isinstance(fin, bool):
+                errs.append("stage {!r}: final must be true or false, got {!r}".format(name, fin))
+            elif fin:
+                cont = [k for k in _CONTINUATION_KEYS if s.get(k)]
+                if cont:
+                    errs.append(
+                        "stage {!r}: final: true is only legal on a TERMINAL stage, but "
+                        "this stage also has {} — sticky keys are the run frame the "
+                        "dataflow lattice re-folds on every edge (downstream cwd_from "
+                        "threading depends on it), so only the LAST word (a stage with no "
+                        "then/branch/fork/fanout/fanin/foreach) may drop the re-fold. "
+                        "Remove `final` or make this stage terminal.".format(
+                            name, "/".join(cont)))
+                elif name in _fork_scope:
+                    errs.append(
+                        "stage {!r}: final: true is set on a stage inside a fork's scope "
+                        "(a fork branch or a fan-in `then` chain), which the fork "
+                        "coordinator walks — the sticky re-fold there is unconditional, so "
+                        "`final` would silently do nothing. `final` is honored only on the "
+                        "linear terminal of the run; move the cleanup after the fork (on "
+                        "the fork stage's own `then`) or drop `final`.".format(name))
         if s.get("on_error"):  # falsy (absent/null/false) = default-or-opt-out, like the harness
             _check_on_error(name, s["on_error"], errs)
         for k in s:
@@ -624,11 +854,16 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None) -
         _check_constraints(cons, start, stages, errs)
     # The data-flow contract (ADR-0005 + ADR-0006 §D5): fail loud at LOAD on a consumer that
     # reads a key provably ABSENT on a closed path. One analysis, shared with lint_pipeline —
-    # validate takes the ERRORS (here), the lint takes the WARNINGS.
-    from .dataflow import analyze_dataflow
-    df_errors, _ = analyze_dataflow(config.get("nodes") or {}, stages,
-                                    g.get("sticky") or [], g.get("start"), base_path)
-    errs.extend(df_errors)
+    # validate takes the ERRORS (here), the lint takes the WARNINGS. Only on a structurally
+    # sound graph: the analysis assumes valid shapes (a `fanout: 5` would crash it), and the
+    # structural findings above already fail the config loud.
+    if not errs:
+        from .dataflow import analyze_dataflow
+        df_errors, _ = analyze_dataflow(config.get("nodes") or {}, stages,
+                                        g.get("sticky") or [], g.get("start"), base_path,
+                                        contract_for=contract_for,
+                                        consumes_for=consumes_for)
+        errs.extend(df_errors)
     if errs:
         raise ValueError("invalid pipeline:\n  - " + "\n  - ".join(errs))
 
@@ -655,7 +890,9 @@ def _augment_provides_from_code(nodes: Dict[str, Any],
 
 
 def lint_pipeline(config: Dict[str, Any], base_path: Optional[str] = None,
-                  resolve: Optional[Callable[[Any], Optional[List[str]]]] = None) -> List[str]:
+                  resolve: Optional[Callable[[Any], Optional[List[str]]]] = None, *,
+                  contract_for: Optional[Any] = None,
+                  consumes_for: Optional[Any] = None) -> List[str]:
     """Advisory lint over a VALID pipeline config — returns WARNINGS, never raises.
 
     Catches valid-but-RISKY shapes that otherwise bite deep in a run, each rule traced
@@ -683,17 +920,33 @@ def lint_pipeline(config: Dict[str, Any], base_path: Optional[str] = None,
     nodes = config.get("nodes") or {}
     if resolve is not None:
         nodes = _augment_provides_from_code(nodes, resolve)
-    g = config.get("graph") or {}
+    _graph = config.get("graph")
+    g: Dict[str, Any] = _graph if isinstance(_graph, dict) else {}
     stages = g.get("stages") or {}
     sticky = g.get("sticky") or []
+    # never-raises contract: a non-dict container (nodes: "x", stages: [...]) or a
+    # non-dict stage VALUE is validate_pipeline's to reject — the lint treats it as
+    # absent rather than crash every rule below (and `dataflow._edges`) on `.items()`
+    # / `.get()` (adversarial-eval finding, 2026-07-07).
+    if not isinstance(nodes, dict):
+        nodes = {}
+    if not isinstance(stages, dict):
+        stages = {}
+    elif any(not isinstance(s, dict) for s in stages.values()):
+        stages = {k: s for k, s in stages.items() if isinstance(s, dict)}
     _lint_weak_output_schema(nodes, warnings)
     _lint_gate_ignores_rejection(nodes, stages, warnings)
+    _lint_rollback_without_effects(nodes, stages, warnings)
+    _lint_reserved_key_collision(nodes, stages, sticky, warnings)
+    _lint_clear_is_not_rollback(nodes, stages, warnings)
+    _lint_untrusted_unfenced(nodes, stages, base_path, warnings)
     # ADR-0005 slice B: the broad requires↔provides graph analysis (absorbs the 1a
     # single-hop render/branch checks as the 1-length-path case). Lives in its own module
     # (the dataflow lattice + fixpoint are independently testable); imported lazily to keep
     # this module cheap to import.
     from .dataflow import analyze_dataflow
-    _, df_warnings = analyze_dataflow(nodes, stages, sticky, g.get("start"), base_path)
+    _, df_warnings = analyze_dataflow(nodes, stages, sticky, g.get("start"), base_path,
+                                      contract_for=contract_for, consumes_for=consumes_for)
     warnings.extend(df_warnings)
     return warnings
 
@@ -723,9 +976,11 @@ def _lint_weak_output_schema(nodes: Dict[str, Any], warnings: List[str]) -> None
         required = schema.get("required")
         if not isinstance(required, list):
             continue
-        props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        _props = schema.get("properties")
+        props = _props if isinstance(_props, dict) else {}
         untyped = [k for k in required
-                   if not isinstance(props.get(k), dict)
+                   if not isinstance(props, dict)
+                   or not isinstance(props.get(k), dict)
                    or not ("type" in props[k] or "enum" in props[k])]
         if required and untyped:
             warnings.append(
@@ -769,11 +1024,15 @@ def _lint_gate_ignores_rejection(nodes: Dict[str, Any], stages: Dict[str, Any],
     negative — acceptable while gates share one `decision` key."""
     from .harness.decision_forms import FORMS
     branches_on_decision = any(
-        (s.get("branch") or {}).get("on") == "decision" for s in stages.values())
+        (s.get("branch") or {}).get("on") == "decision" for s in stages.values()
+        if isinstance(s, dict))   # non-dict stage value: validate's to reject, not a lint crash
     if branches_on_decision:
         return
     for name, s in stages.items():
-        node = nodes.get(s.get("node"))
+        if not isinstance(s, dict):
+            continue
+        _ref = s.get("node")
+        node = nodes.get(_ref) if isinstance(_ref, str) else None
         if not (isinstance(node, dict) and node.get("type") == "human_gate"):
             continue
         outcomes = _gate_decision_outcomes(node, FORMS)
@@ -785,6 +1044,316 @@ def _lint_gate_ignores_rejection(nodes: Dict[str, Any], stages: Dict[str, Any],
                 "\"routes\": {{...}}}}` on this gate (or confirm a transform consumes the "
                 "decision). [lint: gate-decision-ignored]".format(
                     name, node.get("form"), outcomes))
+
+
+def _lint_rollback_without_effects(nodes: Dict[str, Any], stages: Dict[str, Any],
+                                   warnings: List[str]) -> None:
+    """Rule `rollback-without-effects` (ADR-0008 D2). A node declares `rollback`
+    but no stage running it declares `effects_from` — the undo target will receive
+    no effect HANDLE (effects=None). Legal (some undos key off the correlation id
+    alone), hence a WARNING not an error: the author should choose it knowingly,
+    not arrive at it by omission. A node with at least one stage carrying
+    effects_from is satisfied; a rollback node never wired into a stage is a
+    different (out-of-scope) smell and is not flagged here."""
+    nodes_with_effects = {s.get("node") for s in stages.values()
+                          if isinstance(s, dict) and s.get("effects_from") and s.get("node")}
+    for role, node in nodes.items():
+        if role.startswith("_") or not isinstance(node, dict):
+            continue
+        if not isinstance(node.get("rollback"), dict):
+            continue
+        wired = any(isinstance(s, dict) and s.get("node") == role for s in stages.values())
+        if wired and role not in nodes_with_effects:
+            warnings.append(
+                "node {!r} declares `rollback` but no stage running it declares "
+                "`effects_from` — the undo target will receive no effect handle "
+                "(effects=None). Legal if the undo keys off the correlation id "
+                "alone; otherwise add `effects_from: \"<key>\"` to the stage that "
+                "produces the effect. [lint: rollback-without-effects]".format(role))
+
+
+# Payload keys the ENGINE injects on a `feedback: true` retry — declaring one as your OWN key
+# silently collides. `harness._with_feedback` writes BOTH onto the payload before each retry
+# (`feedback` = the validator failures, `priorAttempt` = the prior output payload), and the agent
+# node's `_render` (agents/agent.py, exempted via its own `_ENGINE_INJECTED` frozenset) auto-
+# appends a non-empty `feedback` value to the prompt. This set is the two `_with_feedback` keys —
+# `_ENGINE_INJECTED` also carries `tool_manifest`, which is a render-mechanism key, not a
+# retry-loop collision; kept in lock-step with those sites (a shared cross-module constant would
+# be ideal but lives outside this module's edit surface).
+_RESERVED_INJECTED_KEYS = frozenset({"feedback", "priorAttempt"})
+
+
+def _reserved_hits(names: Iterable[Any], where: str, warnings: List[str]) -> None:
+    """Append a reserved-key-collision warning for each reserved name found in `names` (an
+    iterable of author-declared key strings) at surface `where`. Non-reserved / non-string
+    members are ignored — the lint never raises (a malformed shape is validate_pipeline's job)."""
+    for k in names:
+        if k in _RESERVED_INJECTED_KEYS:
+            warnings.append(
+                "{}: uses reserved key {!r} as its own — the harness AUTO-INJECTS `feedback` "
+                "(the validator failures) and `priorAttempt` (the prior output) onto the payload "
+                "on every `feedback: true` retry, and an agent prompt auto-appends a non-empty "
+                "`feedback` value, so your {!r} is silently overwritten/double-injected. Rename it "
+                "(e.g. `loop_feedback`). [lint: reserved-key-collision]".format(where, k, k))
+
+
+def _lint_reserved_key_collision(nodes: Dict[str, Any], stages: Dict[str, Any],
+                                 sticky: Any, warnings: List[str]) -> None:
+    """Rule `reserved-key-collision`. The harness OWNS `feedback`/`priorAttempt` on a
+    `feedback: true` retry (see `_RESERVED_INJECTED_KEYS`). An author who DECLARES either as
+    their OWN payload key gets silent double-injection/collision — the verify-loop cookbook
+    example hit this and renamed its key to `loop_feedback`.
+
+    Flags every AUTHORED-KEY surface: a node's `provides`, an agent's `output_schema`
+    properties/required, `graph.sticky`, a `foreach` block's `into`/`items`/`carry`, and a
+    stage's `effects_from`/`concerns_from`/`concerns_into`. Deliberately NOT flagged: a
+    NODE-level `carry` (arch-drift carries `feedback` to keep the engine's own `{{feedback}}`
+    filled — cooperation, not collision) and a `human_gate`'s `decision_schema` (the human's
+    revise note, a different key surface). A transform that merely RETURNS a `feedback` key from
+    its fn body is invisible here (opaque code) — undetectable statically, by design."""
+    for role, node in nodes.items():
+        if role.startswith("_") or not isinstance(node, dict):
+            continue
+        prov = node.get("provides")
+        if isinstance(prov, list):
+            _reserved_hits(prov, "node {!r} `provides`".format(role), warnings)
+        if node.get("type") == "agent":
+            schema = node.get("output_schema")
+            if isinstance(schema, dict):
+                props = schema.get("properties")
+                if isinstance(props, dict):
+                    _reserved_hits(props.keys(),
+                                   "node {!r} `output_schema` properties".format(role), warnings)
+                req = schema.get("required")
+                if isinstance(req, list):
+                    _reserved_hits(req, "node {!r} `output_schema` required".format(role), warnings)
+    if isinstance(sticky, list):
+        _reserved_hits(sticky, "graph.sticky", warnings)
+    for name, s in stages.items():
+        if not isinstance(s, dict):
+            continue
+        fe = s.get("foreach")
+        if isinstance(fe, dict):
+            for fk in ("into", "items"):
+                v = fe.get(fk)
+                if isinstance(v, str):
+                    _reserved_hits([v], "stage {!r} foreach.{}".format(name, fk), warnings)
+            carry = fe.get("carry")
+            if isinstance(carry, list):
+                _reserved_hits(carry, "stage {!r} foreach.carry".format(name), warnings)
+        for sk in ("effects_from", "concerns_from", "concerns_into"):
+            v = s.get(sk)
+            if isinstance(v, str):
+                _reserved_hits([v], "stage {!r} {}".format(name, sk), warnings)
+
+
+def _stage_acknowledges_effects(stage: Dict[str, Any]) -> bool:
+    """True when a stage's `on_error` acknowledges a committed external effect on failure: an
+    explicit `null` (fail-as-is opt-out) or a `{compensate: target}` undo. ABSENT or "clear" do
+    NOT — clear drops ENGINE state only (ADR-0008), leaving any external effect in place."""
+    if "on_error" not in stage:
+        return False                        # default is "clear"
+    oe = stage["on_error"]
+    if oe is None:
+        return True                         # explicit fail-as-is opt-out
+    return isinstance(oe, dict) and bool(oe.get("compensate"))
+
+
+def _lint_clear_is_not_rollback(nodes: Dict[str, Any], stages: Dict[str, Any],
+                                warnings: List[str]) -> None:
+    """Rule `clear-is-not-rollback` (ADR-0008 Context; slop-audit D#6). `on_error: "clear"` (the
+    default) drops ENGINE state only — a side-effecting node failing under it READS as cleaned up
+    while its external effect persists. Nudge when a node the author marked `idempotent: true`
+    (the OnceNode wrapper: a replay-sensitive COMMITTED external effect, architecture.md) is run
+    by any stage under bare `clear`, with no undo declared.
+
+    Covered (no warn): the node declares a node-level `rollback` (undo later via `yaah rollback`,
+    covers every stage), OR the stage declares `on_error: {compensate: ...}` (undo at failure),
+    OR the stage declares `on_error: null` (the author explicitly owns the fail-as-is risk).
+    Aggregation is per-STAGE and sound: if even ONE stage runs the node under bare `clear`, warn
+    naming that stage — a node run by a compensating stage AND a clearing stage still has the
+    silent-effect gap on the clearing one (the fast counter-arg's must-fix, verified).
+
+    Deliberate scope (a WARNING, hence advisory, hence tolerant of the rare miss): `idempotent`
+    is the author's OWN committed-effect signal, so this is precise and low-false-positive.
+    `post`/`shell` nodes WITHOUT `idempotent` are NOT flagged — most are read-only or safely
+    re-runnable (`git status`, a GET-shaped post), and firing on all of them would false-positive
+    enough to get the rule ignored. An author with an undo-unnecessary idempotent effect writes
+    `on_error: null` once to say so."""
+    for role, node in nodes.items():
+        if role.startswith("_") or not isinstance(node, dict) or not node.get("idempotent"):
+            continue
+        if isinstance(node.get("rollback"), dict):
+            continue                        # node-level undo declared -> covered for every stage
+        uncovered = sorted(name for name, s in stages.items()
+                           if isinstance(s, dict) and s.get("node") == role
+                           and not _stage_acknowledges_effects(s))
+        if uncovered:
+            warnings.append(
+                "node {!r} is `idempotent: true` (a committed external effect) but stage(s) {} "
+                "run it under bare `clear` — on failure `clear` drops ENGINE state only, so the "
+                "external effect persists while the run reads as cleaned up. Declare `compensate` "
+                "(undo at failure), a node-level `rollback` (undo later via yaah rollback), or "
+                "`on_error: null` to acknowledge fail-as-is. "
+                "[lint: clear-is-not-rollback]".format(role, uncovered))
+
+
+# Fence-aware placeholder for the untrusted-unfenced lint (M12). The `\w+` KEY group matches
+# `templating.PLACEHOLDER` exactly (the token render/human_gate actually fill); the optional
+# leading `!` mirrors the AGENT node's fence syntax (`agents/agent.py::_PLACEHOLDER`, `{{!key}}`
+# = mark the value untrusted). NOTE the honest asymmetry this lint is built on: only the AGENT
+# node honors `!`; render and human_gate render via `templating.fill`, which leaves `{{!key}}`
+# as a LITERAL and never frames a bare `{{key}}` value. So at those sites `!` is read here only
+# as the author's untrusted-INTENT marker (→ quiet), not as a working runtime defense.
+_UNTRUSTED_PLACEHOLDER = re.compile(r"{{\s*(!?)\s*(\w+)\s*}}")
+
+
+def _agent_authored_keys(node: Dict[str, Any]) -> "frozenset":
+    """The payload keys an AGENT node AUTHORS from its model output — the untrusted set. This is
+    NARROWER than its data-flow contract: `carry`/`carry_cwd` keys are FORWARDED unchanged (they
+    keep their upstream provenance, so they aren't attributed to this agent), and only these
+    authored keys are. `raw` is always authored (the raw model text). With `parse` and an
+    `output_schema`, the declared/required keys are the model's parsed fields; an inline
+    `provides` on the agent counts too. A parse:true agent with NO schema authors keys we can't
+    ENUMERATE, so only `raw` is named (its other parsed keys stay unattributed → the lint is
+    quiet on them rather than guess). Never raises on a malformed schema."""
+    authored = {"raw"}
+    if node.get("parse") is False:
+        return frozenset(authored)
+    schema = node.get("output_schema")
+    if isinstance(schema, dict):
+        props = schema.get("properties")
+        if isinstance(props, dict):
+            authored.update(k for k in props if isinstance(k, str))
+        req = schema.get("required")
+        if isinstance(req, list):
+            authored.update(k for k in req if isinstance(k, str))
+    prov = node.get("provides")
+    if isinstance(prov, list):
+        authored.update(k for k in prov if isinstance(k, str))
+    return frozenset(authored)
+
+
+def _ancestors(preds: Dict[str, List[str]], target: str) -> set:
+    """Every stage reverse-reachable from `target` via the predecessor map (dataflow._edges,
+    which includes fanin edges) — i.e. every stage that CAN run before `target` on some path."""
+    seen: set = set()
+    todo = list(preds.get(target, ()))
+    while todo:
+        p = todo.pop()
+        if p not in seen:
+            seen.add(p)
+            todo.extend(preds.get(p, ()))
+    return seen
+
+
+def _consumer_template(node: Dict[str, Any], base_path: Optional[str]) -> Optional[str]:
+    """The template text a CONSUMER node interpolates payload keys into, or None if this node
+    type isn't an unframed consumer (or its template can't be read statically). The two unframed
+    consumers: `human_gate`'s inline `ask` string, and `render`'s `template_text`/`template_file`
+    (read relative to base_path, reusing the render lint's file resolver)."""
+    ntype = node.get("type")
+    if ntype == "human_gate":
+        ask = node.get("ask")
+        return ask if isinstance(ask, str) else None
+    if ntype == "render":
+        from .templating import render_template_text
+        return render_template_text(node, base_path)
+    return None
+
+
+def _untrusted_msg(consumer: str, ntype: Any, key: str, producers: List[str]) -> str:
+    ph = "{{" + key + "}}"
+    fenced = "{{!" + key + "}}"
+    prod = ", ".join(repr(p) for p in producers)
+    return (
+        "stage {c!r}: the {t} interpolates {ph} UNFENCED, but {k!r} is agent-authored "
+        "(produced by {prod}). A {t} renders via the plain templater — it does NOT frame or "
+        "escape the value and does NOT honor {fenced} fencing (only an agent prompt does), so "
+        "the raw model text reaches the consumer (a human, an AI operator driving the gate, or "
+        "a rendered document) as-is. HEURISTIC, not an injection-safety proof: sanitize the "
+        "value in an upstream transform, or confirm the consumer cannot act on injected "
+        "instructions. [lint: untrusted-unfenced]".format(
+            c=consumer, t=ntype, ph=ph, k=key, prod=prod, fenced=fenced))
+
+
+def _lint_untrusted_unfenced(nodes: Dict[str, Any], stages: Dict[str, Any],
+                             base_path: Optional[str], warnings: List[str]) -> None:
+    """Rule `untrusted-unfenced` (mailbox M12). An ADVISORY heuristic — explicitly NOT an
+    injection-safety proof. It flags a consumer site (`human_gate` ask / `render` template) that
+    interpolates `{{key}}` UNFENCED where an AGENT stage on some path to it AUTHORS `key`. Agent
+    output is untrusted text; those two consumer types render it UNFRAMED (see
+    `_UNTRUSTED_PLACEHOLDER`), so a crafted value reaches a human / AI operator / document as-is.
+
+    Provenance is graph reachability, NOT the data-flow lattice: an agent ancestor that authors
+    the key taints the consumer EVEN THROUGH an opaque parse-transform (the client's real shape:
+    agent → parse envelope-transform → gate). Deliberately QUIET when the key's provenance is
+    unknowable — a key only an opaque transform could have invented, an engine key (shell
+    `exit_code`), a human_gate's own `decision`, or an entry/carried key — because the honest
+    move is to flag agent-AUTHORED text, not to guess. A `{{!key}}` (author's untrusted marker)
+    is quiet. One warning per (consumer, key). Never raises.
+
+    Two honesty notes (adversarial eval 2026-06-30, judged against the real client config):
+      - the findings are a FLOOR, not a clean bill: agent text RENAMED by a transform (a parse
+        fn folding one agent key into a new name) loses its attribution and is NOT flagged — on
+        the audited real config that was the MAJORITY of the exposed gate surface. So when any
+        hit fires, ONE consolidated caveat warning says so; a reader of lint output alone must
+        not conclude the flagged set is complete. (Adding the renamed key to the producing
+        agent's `provides` restores attribution.)
+      - an enum-constrained schema key (a decision limited to two values) is STILL flagged: it
+        is agent-authored, and treating the schema constraint as a sanitizer would be exactly
+        the guessing this rule refuses. Intentional; pinned by the judge-decision test."""
+    from .dataflow import _edges
+    preds = _edges(stages)
+    authored_by: Dict[str, "frozenset"] = {}
+    for s_name, s in stages.items():
+        ref = s.get("node") if isinstance(s, dict) else None
+        node = nodes.get(ref) if isinstance(ref, str) else None
+        if isinstance(node, dict) and node.get("type") == "agent":
+            if isinstance(s, dict) and isinstance(s.get("foreach"), dict):
+                # ADR-0007: a foreach stage's agent output lands NESTED under
+                # `results[i].payload`, never at the top level — attributing its
+                # authored keys here would flag downstream reads of keys that
+                # aren't actually there (design-eval nit #9). The nested content
+                # is untrusted too, but a top-level {{key}} can't read it.
+                continue
+            authored_by[s_name] = _agent_authored_keys(node)
+    if not authored_by:
+        return
+    hit_count = 0
+    for c_name, s in stages.items():
+        ref = s.get("node") if isinstance(s, dict) else None
+        node = nodes.get(ref) if isinstance(ref, str) else None
+        if not isinstance(node, dict):
+            continue
+        text = _consumer_template(node, base_path)
+        if not text:
+            continue
+        producers_of: Dict[str, List[str]] = {}
+        for anc in _ancestors(preds, c_name):
+            for key in authored_by.get(anc, ()):
+                producers_of.setdefault(key, []).append(anc)
+        if not producers_of:
+            continue
+        seen: set = set()
+        for m in _UNTRUSTED_PLACEHOLDER.finditer(text):
+            fenced, key = m.group(1), m.group(2)
+            if fenced or key in seen:
+                continue
+            producers = producers_of.get(key)
+            if producers:
+                seen.add(key)
+                hit_count += 1
+                warnings.append(_untrusted_msg(c_name, node.get("type"), key, sorted(set(producers))))
+    if hit_count:
+        # The floor-not-clean-bill caveat (see the docstring). Emitted only WITH hits, so it
+        # never adds a fresh --strict failure to an otherwise-quiet pipeline — but anyone
+        # triaging the hits sees, in the same output, that fixing them is not the whole surface.
+        warnings.append(
+            "the {} untrusted-unfenced finding(s) above are a FLOOR, not a clean bill: agent "
+            "text RENAMED by a transform (a parse fn folding an agent key into a new name) "
+            "loses its attribution and is NOT flagged. To widen coverage, add such renamed "
+            "keys to the producing agent's `provides`. [lint: untrusted-unfenced]".format(hit_count))
 
 
 def validate_budgets(root: Dict[str, Any], pipeline: Dict[str, Any]) -> None:
@@ -851,6 +1420,26 @@ def is_fork_config(stage_config: Dict[str, Any], stage_names: set) -> bool:
 # can never drift — they were hand-copied before, with a "kept in step" comment
 # doing the synchronization.
 
+def check_rollback_trace_sink(root: Dict[str, Any],
+                              pipeline: Dict[str, Any]) -> List[str]:
+    """ADR-0008 D2 + ADR-0009 D1 cross-file ERRORs — WIDENED (ADR-0009
+    design-eval #4) to take the whole PIPELINE (nodes + graph) so the check can
+    see `graph.on_failure`: a node declaring `rollback` OR an armed on_failure
+    saga requires a persisted file trace sink under mode "tracer"; an armed saga
+    with NO rollback-declaring node is a self-contradictory config (ERROR); a
+    malformed on_failure value is an ERROR (never a silent un-arm).
+
+    ONE shared implementation, in `yaah.saga` (this name stays exported here for
+    back-compat importers), called from BOTH the author-time surface
+    (`validate_config`) AND the runtime assembly (`runtime._assemble_harness`),
+    because the check needs root+pipeline in scope and `validate_config` does
+    NOT run on `yaah run` — so a "checked at load" that only lived in
+    validate_config would be a lie (design-eval #2). Returns the error list
+    (empty when satisfied); the caller raises."""
+    from .saga import check_rollback_trace_sink as _impl
+    return _impl(root, pipeline)
+
+
 def validate_config(root: Dict[str, Any], base_path: str,
                     resolve: Optional[Callable[[Any], Optional[List[str]]]] = None) -> List[str]:
     """Validate a loaded root AND the pipeline it references — the full check
@@ -874,6 +1463,14 @@ def validate_config(root: Dict[str, Any], base_path: str,
     else:
         return []   # no pipeline to check; root validation already vouched for the shape
     validate_pipeline(pipeline_cfg, base_path=base_path)
+    # ADR-0008 D2 + ADR-0009 D1 cross-file ERRORs (root + pipeline in scope):
+    # rollback / an armed on_failure saga needs a persisted file trace sink, and
+    # an armed saga needs a rollback-declaring node. Also enforced in
+    # runtime._assemble_harness so `yaah run` (which never calls validate_config)
+    # refuses too. WIDENED call site (ADR-0009): passes the whole pipeline.
+    rb_errs = check_rollback_trace_sink(root, pipeline_cfg)
+    if rb_errs:
+        raise ValueError("invalid config:\n  - " + "\n  - ".join(rb_errs))
     return lint_pipeline(pipeline_cfg, base_path=base_path, resolve=resolve)
 
 

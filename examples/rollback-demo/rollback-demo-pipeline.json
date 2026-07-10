@@ -1,0 +1,44 @@
+{
+  "$schema": "../../schemas/pipeline.schema.json",
+  "_note": "ADR-0008 rollback demo. Spec-correct per D1/D2 and validated: effects_from is a checked stage key, rollback a shape-checked node key. See README for the full menu/--execute walkthrough.",
+  "nodes": {
+    "write_alpha": {
+      "type": "transform",
+      "target": "fn:undo:write_alpha",
+      "call": "envelope",
+      "rollback": {"target": "fn:undo:delete_alpha", "cost": "cheap"}
+    },
+    "write_beta": {
+      "type": "transform",
+      "target": "fn:undo:write_beta",
+      "call": "envelope",
+      "rollback": {"target": "fn:undo:delete_beta", "cost": "costly"}
+    },
+    "write_gamma": {
+      "_note": "No rollback declared — appears in the impossible bucket.",
+      "type": "transform",
+      "target": "fn:undo:write_gamma",
+      "call": "envelope"
+    }
+  },
+  "graph": {
+    "start": "write_alpha",
+    "stages": {
+      "write_alpha": {
+        "node": "write_alpha",
+        "effects_from": "effect",
+        "then": "write_beta"
+      },
+      "write_beta": {
+        "node": "write_beta",
+        "effects_from": "effect",
+        "then": "write_gamma"
+      },
+      "write_gamma": {
+        "node": "write_gamma",
+        "effects_from": "effect",
+        "then": null
+      }
+    }
+  }
+}

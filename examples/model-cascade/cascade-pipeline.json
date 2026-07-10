@@ -1,0 +1,23 @@
+{
+  "$schema": "../../schemas/pipeline.schema.json",
+  "_doc": "Model-cascade — cheap-composition using the engine's built-in ONE-RUNG MODEL LADDER (`escalate_model`). A CHEAP model (haiku) attempts the task; if it judges it can't meet the contract it replies with a truthy `help` key, and the engine re-calls the SAME prompt ONCE with the EXPENSIVE model (opus) and returns that reply. No `help` => the cheap answer short-circuits and the expensive model is never called. This is a single agent stage + one config field — the escalation is engine machinery, not a graph you wire. The `help` reply must still satisfy `output_schema`, so `help` is declared as an ADDITIVE optional string and `answer` (required) is allowed to be empty on the blocked path.",
+  "nodes": {
+    "role:extract": {
+      "type": "agent",
+      "prompt": "file:extract",
+      "model": "claude:claude-haiku-4-5",
+      "escalate_model": "claude:claude-opus-4-6",
+      "stage": "extract",
+      "output_schema": {
+        "properties": {"answer": {"type": "string"}, "help": {"type": "string"}},
+        "required": ["answer"]
+      }
+    }
+  },
+  "graph": {
+    "start": "extract",
+    "stages": {
+      "extract": {"node": "role:extract", "then": null}
+    }
+  }
+}

@@ -1,7 +1,10 @@
 # 0006 — The node contract capability (`describe`): one source of truth for data-flow contracts
 
-**Status:** Proposed (design only — no engine code yet)
-**Date:** 2026-07-01
+**Status:** Accepted — static core SHIPPED. The `provides` contract (§D1–D5), the templating
+extraction (§D9.7), and the symmetric `consumes` capability (§D10) are all in the engine; the
+data-flow checker holds ZERO per-type knowledge on either side. D7 portable bindings (frozen
+manifest / live-describe for other-language ports) remain REQUIREMENTS-ONLY — deferred, own design.
+**Date:** 2026-07-01 (updated 2026-07-06: consumes symmetry §D10)
 **Supersedes/​reframes:** ADR-0005 slice D (the Python `@provides` extractor) — that decorator
 becomes *one language's way to implement this*, not the mechanism.
 
@@ -190,7 +193,7 @@ beside the builder: `register(type, builder, contract)`. This IS the static bind
 change (except the intentional severity broadening in §D5, flagged for review).** Helpers:
 `carry = _as_key_set(cfg.get("carry"))`; `cwd = {cfg["cwd_from"]}` if it's a non-empty str else `{}`.
 
-> **‡ An agent is NEVER `closed`.** An agent merges its whole parsed reply onto the payload
+> **‡ An agent is NEVER `closed`.** An agent's whole parsed reply becomes the payload
 > (`agent.py:388` spreads `**parsed`), and `check_schema` does not enforce `additionalProperties`
 > (`jsonschema.py` handles only `type/enum/required/properties/items`) — so the model can emit keys
 > the schema never listed and they still get through. We therefore can NEVER prove an agent's output
@@ -328,18 +331,53 @@ For each consumer — a `render`'s `{{key}}` placeholders, a `branch.on` key —
 
 ## D9. Migration (each step keeps the suite green; acceptance per step)
 
-1. **Contract type + `resolve_contract` + built-in `contract(cfg)` fns** (§D1–D3). Acceptance:
+1. **[SHIPPED]** Contract type + `resolve_contract` + built-in `contract(cfg)` fns (§D1–D3). Acceptance:
    unit-test each built-in's Contract vs the D2 table; `resolve_contract` unknown→opaque, inline→preserve.
-2. **Register contracts** beside builders (`register(type, builder, contract)`); no lint change yet.
+2. **[SHIPPED]** Register contracts beside builders; no lint change yet.
    Acceptance: registry exposes `contract_for`; suite green.
-3. **Rewrite `dataflow._transfer`** to `resolve_contract` + §D4; DELETE the type-ladder,
+3. **[SHIPPED]** Rewrite `dataflow._transfer` to `resolve_contract` + §D4; DELETED the type-ladder,
    `_shell_keys`/`_worktree_keys`, and `# file:line` comments; unknown→opaque. Acceptance: suite green;
    NEW test — custom node that adds an undeclared key does NOT false-positive downstream (the D6-3 hole).
-4. **Fold severity** (§D5); DELETE `_check_data_flow_contract`. Acceptance: UC2–UC4 pass; the §D5
+4. **[SHIPPED]** Fold severity (§D5); DELETED `_check_data_flow_contract`. Acceptance: UC2–UC4 pass; the §D5
    broadening reviewed & accepted; suite green.
-5. **Manifest** (§D7a) — freeze `describe()` per instance; author-time lint reads manifest + inline. (own design)
-6. **Live describe-only mode** (§D7b) for CI. (own design)
-7. **Drive-by:** extract templating (`_PLACEHOLDER` + `_fill`) to one module. Acceptance: one copy, suite green.
+5. **[deferred — own design]** Manifest (§D7a) — freeze `describe()` per instance; author-time lint reads manifest + inline.
+6. **[deferred — own design]** Live describe-only mode (§D7b) for CI.
+7. **[SHIPPED]** Drive-by: extract templating (`PLACEHOLDER` + `fill`) to one module. Acceptance: one copy, suite green.
+8. **[SHIPPED — 2026-07-06]** Consumes symmetry (§D10) — the reader side moves onto the node too, so
+   the checker holds zero per-type knowledge on EITHER side. Acceptance: suite green; NEW tests — a
+   custom node's declared `consumes` is checked; a render's inline `consumes` cannot fabricate a
+   false error.
+
+## D10. Consumes — the provides mirror (2026-07-06 extension)
+
+§D1–D9 liberated the **provides** side (keys a node ADDS): the checker no longer knows what any
+node produces. But the **consumes** side (keys a node READS from its inbound payload) stayed
+hardcoded — `dataflow.py` had `if node.get("type") == "render"` as the ONLY key-reader, parsing the
+template inline. Same slop, other side. D10 completes the symmetry.
+
+**`consumes(cfg, base_path) → frozenset`** — the mirror of the contract function. A node reports the
+keys it reads from the payload flowing INTO it, checked by the lint against that node's inbound
+`Flow` (the same `(known, complete, closed)` → ERROR/WARNING/skip machine as §D5). Resolution
+mirrors §D3 with ONE deliberate asymmetry:
+
+| | inline on a KNOWN node | rationale |
+|---|---|---|
+| `provides` | **AUGMENTS** (`base ∪ inline`) | a node may EMIT more than the built-in declares — additive, never a false positive |
+| `consumes` | **IGNORED** (built-in is authoritative) | a built-in reader's source (a render's template) is the EXACT, COMPLETE read-set; merging an extra `consumes` fabricates a read the node never performs → a false hard-error (blocks a working pipeline) |
+
+So inline `consumes` is the **custom-node path only** (a node with no built-in reader declares its
+reads and gains checking — impossible before). `branch.on` is NOT a node consumes: it reads the
+node's OUTPUT to route and is a generic STAGE feature (any stage may branch), so it stays in the
+lattice, not per-type. Message wording still branches on `type == "render"` (render keeps its
+established `render-key-*` tag; a custom node gets `input-key-*`) — but this is PRESENTATION only;
+with the asymmetry above a render's read-set is only ever its placeholders, so the selection is
+provably sound (key sources never mix). `describe()` (§D1) subsumes both: a full descriptor is
+`{ provides, consumes }` — two resolvers today (different timing: provides propagates forward,
+consumes is checked at the input), foldable into one primitive later if a third capability appears.
+
+Code: `node_contract.py` (`render_consumes`, `BUILTIN_CONSUMES`, `resolve_consumes`),
+`templating.py` (`render_template_text` — a node owns reading its own template), `dataflow.py`
+(`type=="render"` block → generic `resolve_consumes`).
 
 ## Images
 
@@ -414,3 +452,29 @@ refinement** (see D4) — a declared envelope-transform / custom inline-`provide
 Every built-in preserve node's added keys were verified UNCONDITIONALLY present (so keeping `closed`
 is sound). Slice B5 (templating extraction) landed too: one `templating.py` (`PLACEHOLDER` + `fill`)
 replaces the 3 regex copies + 2 `_fill` copies.
+
+## Review record (haiku counter-arg + adversarial code-eval, 2026-07-06, on the consumes slice §D10)
+
+The consumes slice ran the two-brain gate: a fast haiku contrarian on the DESIGN decisions and a
+heavy opus code-eval on correctness. They **converged** on one footgun — the strongest signal —
+which turned the fix from cosmetic to structural.
+
+- **haiku (design)** predicted abstractly that consumes-augment differs from provides-augment: it
+  *grows what's checked*, so it CAN block a valid pipeline (provides-augment can't). It also pushed
+  that Slice 1's value is mostly the refactor (custom-node checking is niche) and the bug-catching
+  reach is the deferred agent-prompt slice. Verdicts recorded: build-it headline overstated (it's a
+  real structural refactor, not speculative), but the "you defaulted small" nudge was fair.
+- **opus (code)** found the concrete repro haiku predicted: a render filling `{{raw}}` fine but
+  carrying `consumes:["verdict"]` emitted a FALSE "render FAILS" hard-error; and an `allow_unfilled`
+  render + stray `consumes` was hard-blocked with advice ("set allow_unfilled") the author already
+  followed. Both `analyze_dataflow` errors → `validate` fail-loud → a working pipeline blocked at load.
+
+**Structural fix (not a patch):** inline `consumes` never augments a built-in reader (the §D10
+asymmetry). The render's template is authoritative and complete, so a stray `consumes` is ignored,
+not merged — the false-error class is designed out, and the `type=="render"` message selection is
+proven sound because key sources can no longer mix. Also fixed: both `builtin_*_for` seams now truly
+never-raise on an unhashable `type` (the provides side had the identical latent `.get()`).
+
+Decisions taken by the maintainer at this gate: **do NOT** wire the agent-prompt / `human_gate.ask`
+consumes broadening now (it surfaces new findings on live pipelines — needs its own reviewed slice,
+like the §D5 broadening); **keep two resolvers** rather than folding into one `describe()` primitive.

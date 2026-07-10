@@ -51,17 +51,15 @@ async def rescore_rows(cfg: Dict[str, Any], base: str, schema: Dict[str, Any], *
     names where the raw text lives in the row's output payload (the agent
     convention is "raw"; a transform-shaped pipeline may relocate it)."""
     from .runner import _check_experiment
-    from ..runtime_factories import _rel
 
     _check_experiment(cfg)
     if not isinstance(schema, dict):
         raise ValueError("rescore needs a JSON-Schema-subset OBJECT "
                          "(type/enum/required/properties/items)")
     exp_id = cfg["id"]
-    if store is None:
-        from ..adapters.experiment_stores import JsonlExperimentStore
-        store = JsonlExperimentStore(_rel(base, (cfg.get("store") or {}).get("dir", ".ab")))
-    rows = await store.rows(exp_id)
+    from .store_factory import opened_store
+    async with opened_store(cfg, base, store) as st:
+        rows = await st.rows(exp_id)
     required = (schema.get("required") or None)
 
     groups: Dict[Any, List[Dict[str, Any]]] = {}

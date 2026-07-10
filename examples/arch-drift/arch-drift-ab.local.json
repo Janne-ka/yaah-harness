@@ -1,6 +1,6 @@
 {
   "_doc": "Offline / fake config for the arch-drift A/B variant. Same fake-provider trick as arch-drift.local.json but scripts TWO distinct mermaid responses keyed by model name — one each for sonnet (candidate A) and haiku (candidate B), so the report shows visibly-different markup per candidate even on fake. Both render to the SAME canned SVG (mermaid renderer is the canned shortcut to skip the mmdc dep); the demo's cost-comparison story is the load-bearing part, not the visual variation. For real per-model SVG output, use the .real.json config with mmdc installed.",
-  "_note_renderer": "Set MERMAID_RENDERER=:canned in the env before running, or wrap the command (the render_mermaid transform reads it).",
+  "_note_renderer": "Set MERMAID_RENDERER=:fixed_test_svg in the env before running, or wrap the command (the render_mermaid transform reads it).",
   "_note_tracer": "trace.capture must include `cost` — without it the UsageAttacher's requires_capture=('cost',) check rejects at build time. The capture-check is the engine surface that catches `attach used without the data` silently-wrong, per ADR-0003.",
   "transport": {"type": "inproc"},
   "providers": {

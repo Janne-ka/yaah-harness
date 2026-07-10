@@ -25,7 +25,7 @@ from __future__ import annotations
 # or vice versa). Tested in test_completion.py.
 _VERBS = ("init", "scaffold", "run", "list", "resume", "clear",
           "validate", "explain", "trace", "baton-schema", "doctor",
-          "manual", "mcp-serve", "ab",
+          "manual", "mcp-serve", "ab", "rollback",
           "completion")
 
 # Per-verb flag sets used in completion. These are what the user can usefully
@@ -125,6 +125,7 @@ _yaah() {{
     'manual:print the generated agent manual'
     'mcp-serve:serve validate/run/gates as MCP tools over stdio'
     'ab:run an A/B experiment campaign (rows per run)'
+    'rollback:walk a completed run declared undo targets (menu / --execute)'
     'completion:emit shell completion script'
   )
 

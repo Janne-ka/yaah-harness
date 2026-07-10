@@ -69,3 +69,19 @@ Until those triggers fire, the cookbook stays read-only-by-design.
   `explain` → `list` → `trace --pretty` → state-store inspection.
   When to ask "is this a yaah bug or a pipeline bug" + symptom → command
   table.
+- [bounded-loop-best-of-n.md](bounded-loop-best-of-n.md) — bounded
+  cross-stage loop + best-of-N reduce: produce → judge → tally (with
+  cycle counter + best-so-far), branch backward, exit at the cap or
+  a score threshold, return the highest-scoring attempt. Reference
+  implementation in `examples/verify-loop/`.
+- [preflight-guard.md](preflight-guard.md) — validate + normalize
+  input in a deterministic `transform` and `branch` on the result, so
+  garbage input is rejected BEFORE any model call ("don't pay for a
+  model call on garbage input"). Shape gate, not a semantic one.
+  Reference implementation in `examples/preflight-guard/`.
+- [model-cascade.md](model-cascade.md) — cheap model first, escalate to
+  expensive only when needed. Two shapes: the built-in one-rung ladder
+  (`escalate_model`, escalates on the cheap model's `help` self-report)
+  and the branch cascade (escalates on an external validator verdict),
+  with a table for choosing. Reference implementation in
+  `examples/model-cascade/`.

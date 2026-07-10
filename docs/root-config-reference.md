@@ -62,6 +62,18 @@ type-specific fields the new type doesn't accept.
 Unknown top-level keys, bad shapes, and bad enums are caught by `validate_root`
 with a suggestion. Any `_`-prefixed key (`_about`, `_fake`) is a comment.
 
+**`decisions` matching (auto-drive).** Each key answers a gate by its `awaiting`
+tag. An **authored** convenience gate matches loosely — the whole tag, then the
+parts either side of `:` — so `{"data-audit": ...}` answers a gate whose
+`awaiting` is `data-audit`, `review:data-audit`, or `data-audit:v2`. A **fault**
+park (the escalate lane, when a stage exhausts its attempts) is tagged
+`human:<stage>` and matches an **exact key only**: `{"human:merge": ...}` answers
+it, but `{"merge": ...}` does **not** — auto-approving a parked *failure* has to
+be opt-in and explicit, never a suffix-match accident. A gate with no matching
+decision (and no `interactive` fallback) leaves the run **parked** as a resumable
+baton — the driver prints the `yaah resume` command and exits with the normal
+suspended-run code, it does not crash.
+
 ## Transport
 
 ```json
@@ -81,7 +93,7 @@ TLS cert paths resolve relative to the root file.
 ```json
 "providers": {
   "claude": {"type": "claude_cli"},                     // claude -p (+ extra_args, allow_dangerous_flags)
-  "router": {"type": "litellm"},                        // any litellm-routed model
+  "router": {"type": "litellm", "stream": true},        // any litellm-routed model
   "fake":   {"type": "fake", "default": "ok"}           // offline/test: canned responses
 },
 "default_provider": "claude"
@@ -89,6 +101,10 @@ TLS cert paths resolve relative to the root file.
 A node's `model: "claude:claude-sonnet-4-6"` is `provider:model`. `fake` and
 `fake_scripted` (fixtures `by_model`) make a root runnable offline — the `--fake`
 flag merges an inline `_fake` block over the top so one file covers both.
+litellm's `"stream": true` (optional, default off) switches it to real SSE
+chunking — incremental deltas feed the `live` monitoring heartbeat; the default
+stays a single collected call (usage always attached) until chunking has live
+mileage.
 
 ## Prompt / data / mcp sources
 
@@ -121,9 +137,22 @@ store is what lets `--list`/`--resume` work cross-process and survive a crash.
                     {"type": "file", "path": "trace.jsonl"}]}
 ```
 `capture` is an orthogonal SET, not a verbosity level — `phase` (stage/status/
-duration, default-on), `cost` (tokens/model), `tools`. `stats_file` takes a
-`price_map` (tokens→$). Cross-field checks reject silently-dropped config (e.g.
-`sinks` under `mode: none`). `--explain` shows the effective trace block.
+duration, default-on), `cost` (tokens/model), `tools`, `live` (mid-call
+monitoring pulses: turn started / a throttled chars-so-far heartbeat / each tool
+call / done — answers "alive or hung?" while a model call runs; sizes and names
+only, never model text). `stats_file` takes a `price_map` (tokens→$).
+Cross-field checks reject silently-dropped config (e.g. `sinks` under
+`mode: none`). `--explain` shows the effective trace block.
+Pipelines in which any node declares `rollback:` — or arm the auto-saga
+(`graph.on_failure: "rollback"`, ADR-0009: automatic unwind of completed stages
+on terminal failure; cheap-only unless `include_costly`; always re-raises; on a
+non-inproc transport the trace may lag by the final records, a documented bounded
+limit) — require a `{"type": "file", ...}`
+entry in `sinks` (FileTraceSink) UNDER the default `mode: "tracer"` — a file sink
+declared beside `mode: "none"`/`"envelope"` never persists (the tracer builder
+short-circuits before sinks), so those modes are rejected too. The trace record
+IS the rollback input; checked at `yaah validate` time AND at `yaah run` time;
+both refuse without it.
 
 ## Plugins (extension types)
 

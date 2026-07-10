@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from ..core import Envelope, Failure, Kind, Verdict
 from ..external_call import call_target
@@ -32,6 +32,9 @@ from ..trace import Span
 from .reduce import default_reduce
 from .stage import Stage
 from .stage_failed import StageFailed
+
+if TYPE_CHECKING:                       # runtime import would be circular
+    from .harness import Harness
 
 
 class _WaitDetermined(Exception):
@@ -79,7 +82,7 @@ class ForkCoordinator:
     """Run a fork stage to its rejoined output. One instance per Harness; methods
     are re-entrant for nested forks (a fresh _ForkCtx per call to run_collect)."""
 
-    def __init__(self, harness: object, *, comms: object, clear_bus: object,
+    def __init__(self, harness: "Harness", *, comms: object, clear_bus: object,
                  envelopes: object, tracer: object, clock: object) -> None:
         # `harness` is reached ONLY for the shared run-stage seam (graph /
         # _exec_stage / _next_stage — theme B: branches must run stages exactly
@@ -290,6 +293,7 @@ class ForkCoordinator:
                 return None  # the fan-in coordinator owns the continuation
             if stage.fork:  # a nested fork runs to its own clear, then the branch continues
                 cleared = await self.run_collect(stage, input, concerns=ctx.concerns)
+                self._h._fold_sticky(input, cleared)  # nested-fork join: mirror _drive
                 input = cleared
                 stage_name = self._h._next_stage(stage, cleared)
                 continue
@@ -301,6 +305,13 @@ class ForkCoordinator:
                     "stage {!r} suspended inside a fork branch — gates inside a fork "
                     "are unsupported in v1; keep branches gateless".format(stage.name))
             ctx.concerns.extend(result.concerns)  # soft concerns survive the fork
+            # Re-fold graph.sticky between branch stages, exactly as harness._drive
+            # does on the linear path (theme B: one run-stage seam, no drift). Without
+            # this a payload-replacing branch stage silently dropped a sticky key a
+            # later branch stage needed — the chain worked linearly but lost data in a
+            # branch (contradicting Graph.sticky's "after every passing stage"). The
+            # helper is fill-if-missing, so a stage that SET the key still wins.
+            self._h._fold_sticky(input, result.output)
             input = result.output
             if stage.clears:  # a branch node can clear named gate(s) too
                 await self._bus.publish_clears(

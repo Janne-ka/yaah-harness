@@ -1,0 +1,1 @@
+{"title": "  Q3 outage postmortem  ", "text": "  A config push at 14:02 UTC dropped the cache tier; p99 latency spiked for 18 minutes until rollback. Root cause: an unbounded key in the new template.  "}

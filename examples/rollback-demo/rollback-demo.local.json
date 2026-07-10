@@ -1,0 +1,15 @@
+{
+  "$schema": "../../schemas/root.schema.json",
+  "_note": "File trace sink is REQUIRED by ADR-0008 D2: the trace record is the rollback input.",
+  "transport": {"type": "inproc"},
+  "providers": {"fake": {"type": "fake", "default": "ok"}},
+  "default_provider": "fake",
+  "state": {"type": "file", "dir": ".rollback-demo-state"},
+  "trace": {
+    "capture": ["phase"],
+    "sinks": [{"type": "file", "path": "trace.jsonl"}]
+  },
+  "pipeline": "rollback-demo-pipeline.json",
+  "input": "input.json",
+  "run": true
+}

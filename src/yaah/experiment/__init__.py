@@ -8,10 +8,11 @@ because the experiment artifact and the production artifact are the same
 species. One port (ExperimentStore) keeps the row substrate swappable.
 """
 from .fingerprint import config_fingerprint
+from .golden import golden_diff_rows, load_golden
 from .report import build_matrix
 from .rescore import rescore_rows
 from .runner import run_experiment
 from .experiment_store import ExperimentStore
 
 __all__ = ["ExperimentStore", "build_matrix", "config_fingerprint",
-           "rescore_rows", "run_experiment"]
+           "golden_diff_rows", "load_golden", "rescore_rows", "run_experiment"]

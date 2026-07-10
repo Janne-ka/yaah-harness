@@ -1,0 +1,28 @@
+{
+ "id": "summarizer-ab",
+ "note": "the shipped yaah ab example: same pipeline, two summarizer models",
+ "variants": {
+  "A": "starter.local.json",
+  "B": "starter-b.local.json"
+ },
+ "inputs": [
+  "fixtures/input.json"
+ ],
+ "repetitions": 3,
+ "metrics": {
+  "score": "score"
+ },
+ "price_map": {
+  "fake:summarize": {
+   "input": 0,
+   "output": 0
+  },
+  "fake:summarize-b": {
+   "input": 0,
+   "output": 0
+  }
+ },
+ "store": {
+  "dir": ".ab"
+ }
+}

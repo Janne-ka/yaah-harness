@@ -270,7 +270,7 @@ def parse_extracted(envelope, config) -> Dict[str, Any]:
             "notes": obj.get("notes", "")}
 
 
-_CANNED_SVG = (
+_FIXED_TEST_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="120">'
     '<rect x="10" y="10" width="80" height="40" fill="#eef"/>'
     '<rect x="120" y="10" width="80" height="40" fill="#eef"/>'
@@ -280,28 +280,38 @@ _CANNED_SVG = (
     '<text x="270" y="35" text-anchor="middle">fixture</text>'
     '</svg>'
 )
+# Back-compat alias — kept so existing env vars / docs still work.
+_CANNED_SVG = _FIXED_TEST_SVG
+
+# MERMAID_RENDERER values that return the fixed test SVG (no mmdc needed).
+# ":fixed_test_svg" is the canonical name; ":canned" is a deprecated alias.
+_FIXED_TEST_RENDERERS = frozenset({":fixed_test_svg", ":canned"})
 
 
 def render_mermaid(envelope, config) -> Dict[str, Any]:
     """Render `mermaid` to SVG. Shells out to `mmdc` (mermaid-cli) by default;
-    `MERMAID_RENDERER=:canned` returns a fixed canned SVG for offline tests."""
+    `MERMAID_RENDERER=:fixed_test_svg` returns a fixed placeholder SVG for
+    offline tests. `:canned` is a deprecated alias for the same behaviour —
+    use `:fixed_test_svg` in new configs."""
     renderer = os.environ.get("MERMAID_RENDERER", "mmdc")
-    if renderer == ":canned":
-        # The canned renderer returns ONE fixed SVG regardless of the mermaid
-        # input — it's an offline placeholder, not a lighter real renderer.
-        # Print to stderr so a user who set this env var sees they did NOT get
-        # a real render of their diagram. (Quiet `or "1"` env opts out.)
+    if renderer in _FIXED_TEST_RENDERERS:
         if os.environ.get("YAAH_CANNED_QUIET", "") != "1":
+            if renderer == ":canned":
+                sys.stderr.write(
+                    "[config-flow] DEPRECATED: MERMAID_RENDERER=:canned — "
+                    "use :fixed_test_svg instead; :canned will be removed in "
+                    "a future release.\n")
             sys.stderr.write(
-                "[config-flow] WARNING: MERMAID_RENDERER=:canned — returning a "
+                "[config-flow] WARNING: MERMAID_RENDERER={} — returning a "
                 "fixed placeholder SVG that does NOT reflect the agent's mermaid "
-                "output. For real artifacts, unset the env var and install mmdc.\n")
-        return {**envelope.payload, "new_svg": _CANNED_SVG}
+                "output. For real artifacts, unset the env var and install mmdc.\n"
+                .format(renderer))
+        return {**envelope.payload, "new_svg": _FIXED_TEST_SVG}
     if shutil.which(renderer) is None:
         raise RuntimeError(
             "mermaid renderer {!r} not on PATH — install with "
             "`npm install -g @mermaid-js/mermaid-cli`, or set "
-            "`MERMAID_RENDERER=:canned` for an offline run".format(renderer))
+            "`MERMAID_RENDERER=:fixed_test_svg` for an offline run".format(renderer))
     mermaid = envelope.payload.get("mermaid", "")
     with tempfile.TemporaryDirectory() as tmp:
         mmd, svg = os.path.join(tmp, "g.mmd"), os.path.join(tmp, "g.svg")

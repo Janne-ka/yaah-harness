@@ -58,6 +58,13 @@ The escape hatch for a one-off:
 }
 ```
 
+Naming note: the `human:` prefix on an `awaiting` tag is the escalate lane's
+namespace — under the [`decisions` auto-drive map](root-config-reference.md)
+a `human:*` tag matches an **exact** key only (never the loose gate-name
+fallback), so prefer a bare tag (`"spec-review"`) for authored gates you
+intend to auto-drive. The mailbox flow (`yaah list` → `resume`) is unaffected
+by the tag's shape.
+
 The builder (`build/builders.py::_build_human_gate`) rejects at load time:
 - a `form` value that isn't a catalog entry,
 - `form: "json_schema"` without `decision_schema`,

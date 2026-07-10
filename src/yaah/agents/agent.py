@@ -27,6 +27,7 @@ from ..trace import NullTracer, Span
 # capability stays a runtime check (SupportsTurn / supports_turn) because
 # claude_cli deliberately lacks it.
 from . import api_provider as _ap
+from .live_events import make_live_bridge
 from .tool import Tool
 from .tool_loop import run_tool_loop
 
@@ -368,18 +369,27 @@ class Agent(Node):
             usage["model"] = None  # per-call too: a stale value from the previous
             # rung would mislabel this span when THIS call's backend doesn't report
             t0 = time.monotonic()
+            # Live-monitoring bridge (MED-002 wired): built only when the tracer
+            # captures `live` — the emit-site convention (a disabled capture skips
+            # gathering raw material). Fresh per call: the heartbeat throttle state
+            # is per-call, and both call paths forward the same events.
+            on_event = None
+            if "live" in getattr(self._tracer, "captures", frozenset()):
+                on_event = make_live_bridge(self._tracer, input.correlation_id,
+                                            parent=input.id, stage=self._stage)
             if tools and self._supports_turn(model):
                 # model-initiated tool-loop (invisible to the harness); the agent's
                 # comms resolves any node: tool impls
                 text = await run_tool_loop(self._backend, prompt, tools,
                                            comms=self._events, model=model,
                                            tracer=self._tracer, corr=input.correlation_id,
-                                           parent=input.id, **opts)
+                                           parent=input.id, on_event=on_event, **opts)
             else:
                 # Plain (non-tool) path: collect the stream into a string. Stream-first
                 # via the bridge — a collected-only backend/double falls back to its
                 # native complete() inside _ap.complete (see api_provider).
-                text = await _ap.complete(self._backend, prompt, model=model, **opts)
+                text = await _ap.complete(self._backend, prompt, model=model,
+                                          on_event=on_event, **opts)
             t1 = time.monotonic()
             await self._tracer.emit(Span.timed(
                 "model_call", corr=input.correlation_id, parent=input.id, t0=t0, t1=t1,

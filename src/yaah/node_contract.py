@@ -36,6 +36,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, NamedTuple, Optional
 
+from .templating import PLACEHOLDER, render_template_text  # no cycle: templating imports no yaah
+
 
 def _as_key_set(val: Any) -> frozenset:
     """A config field meant to be a list of key NAMES → the set of its string entries; any
@@ -163,7 +165,15 @@ def render_contract(cfg: Dict[str, Any]) -> Contract:
 
 
 def human_gate_contract(cfg: Dict[str, Any]) -> Contract:
-    return preserve("decision")
+    # A gate resumes by MERGING the human's ENTIRE decision payload onto the pending
+    # payload (harness._merge_decision) — the human can add ARBITRARY keys. So the gate
+    # keeps inbound keys and guarantees `decision`, but its output is an OPEN merge:
+    # `closed` must NOT survive it, or a key only the human supplies would be "provably
+    # absent" downstream — a false-positive hard ERROR on a working pipeline. Same
+    # Contract shape as preserve_declared, for the merge-seam reason rather than the
+    # author-declared one. (A miss downstream of a gate is thus at most a WARNING;
+    # inline `provides:` on the gate node declares human-supplied keys to silence it.)
+    return preserve_declared({"decision"})
 
 
 def get_contract(cfg: Dict[str, Any]) -> Contract:
@@ -218,9 +228,109 @@ BUILTIN_CONTRACTS: Dict[str, Callable[[Dict[str, Any]], Contract]] = {
 }
 
 
+# --- consumes: the mirror of `provides` (ADR-0006 symmetry) --------------------------------
+# A node's CONSUMES is the set of payload keys it READS from its INBOUND envelope (checked by
+# the lint against the flow INTO the stage's node). `provides` moved onto the node long ago;
+# `consumes` was still hardcoded in the checker (`if type == "render"`). It now lives here too,
+# so the checker holds ZERO per-type knowledge on either side, and a CUSTOM node can declare
+# `consumes: [...]` in config and get its inputs checked. Signature takes `base_path` because a
+# source can be an external file (a render's `template_file`). Must NOT raise.
+#
+# `branch.on` is NOT here: it reads the node's OUTPUT to route, and it is a generic STAGE
+# feature (any stage may branch), not per-TYPE knowledge — so it correctly stays in the lattice.
+
+
+def render_consumes(cfg: Dict[str, Any], base_path: Optional[str]) -> frozenset:
+    """The keys a render fills from its inbound payload — its `{{...}}` placeholders. The
+    "smart default": parse the template. `allow_unfilled:true` means the author accepts literal
+    holes, so it declares it reads nothing checkable."""
+    if cfg.get("allow_unfilled"):
+        return frozenset()
+    text = render_template_text(cfg, base_path)
+    return frozenset(PLACEHOLDER.findall(text)) if text is not None else frozenset()
+
+
+# type name → consumes function. Only render reads its inbound payload among the built-ins
+# today (agent prompts / human_gate `ask` also do — that is the reviewed broadening, a later
+# slice). Every other built-in reads nothing checkable → absent here → empty.
+BUILTIN_CONSUMES: Dict[str, Callable[[Dict[str, Any], Optional[str]], frozenset]] = {
+    "render": render_consumes,
+}
+
+ConsumesFor = Callable[[Any, Dict[str, Any], Optional[str]], Optional[frozenset]]
+
+
+def builtin_consumes_for(ntype: Any, cfg: Dict[str, Any],
+                         base_path: Optional[str]) -> Optional[frozenset]:
+    """The built-in consumes for a type, or None if the type is unknown (custom). Never raises
+    — a non-str/unhashable type or malformed cfg yields the safest answer (None → falls to
+    inline/empty), not an exception."""
+    if not isinstance(ntype, str):        # unhashable (e.g. `type: [..]`) would raise on .get
+        return None
+    fn = BUILTIN_CONSUMES.get(ntype)
+    if fn is None:
+        return None
+    try:
+        return fn(cfg if isinstance(cfg, dict) else {}, base_path)
+    except Exception:
+        return frozenset()
+
+
+def resolve_consumes(ntype: Any, cfg: Dict[str, Any], base_path: Optional[str], *,
+                     consumes_for: Optional[ConsumesFor] = None) -> frozenset:
+    """The keys a node READS from its inbound payload (ADR-0006 symmetry with resolve_contract).
+    NEVER raises. Precedence:
+      1. a registered/built-in consumes for the type (render parses its template) — this is
+         AUTHORITATIVE and COMPLETE (a render reads EXACTLY its `{{...}}`, never more), so
+         inline `consumes:` does NOT apply to it and is ignored;
+      2. else (a custom type, no built-in) inline config `consumes: [...]` — the node's declared
+         read-set, checkable;
+      3. else empty — reads nothing checkable (the sound "doesn't have to" floor).
+
+    NOTE the deliberate asymmetry with `resolve_contract`: inline `provides:` AUGMENTS a known
+    node (a node may emit MORE keys than the built-in declares — additive, never a false
+    positive). Inline `consumes:` does the OPPOSITE — it never augments a built-in consumer,
+    because a built-in reader's source (the template) is the exact, complete read-set. Merging
+    an inline `consumes` into a render would fabricate a read the node does not perform → a
+    false hard-error (a render whose template is fine, blocked at load). So inline consumes is
+    the CUSTOM-node path only."""
+    if consumes_for is None:
+        consumes_for = builtin_consumes_for
+    try:
+        base = consumes_for(ntype, cfg, base_path)
+        if base is not None:
+            return base                   # built-in consumer: authoritative, inline ignored
+        inline = cfg.get("consumes") if isinstance(cfg, dict) else None
+        return (frozenset(x for x in inline if isinstance(x, str))
+                if isinstance(inline, list) else frozenset())
+    except Exception:
+        return frozenset()
+
+
+# Node TYPES that can reply Kind.AWAIT and park their stage awaiting an external
+# decision. Node knowledge as DATA (ADR-0006), beside the contract table it
+# qualifies: the dataflow lattice reads it to decide whether a fanout stage has a
+# suspend/resume lane (resume REPLACES the merged payload with the human's
+# response, so `closed` cannot survive such a stage). Among the built-ins only
+# the gate awaits (build/human_gate.py is the one Kind.AWAIT emitter).
+SUSPENDING_TYPES = frozenset({"human_gate"})
+
+
+def may_suspend(ntype: Any) -> bool:
+    """Could a node of this TYPE reply Kind.AWAIT at runtime? An unknown (custom /
+    undeclared / malformed) type is a "may" — widen when in doubt; the non-gate
+    built-ins are provably request/reply-only. Never raises."""
+    if not isinstance(ntype, str):
+        return True
+    return ntype in SUSPENDING_TYPES or ntype not in BUILTIN_CONTRACTS
+
+
 def builtin_contract_for(ntype: Any, cfg: Dict[str, Any]) -> Optional[Contract]:
     """The built-in contract for a node type, or None if the type is unknown (custom). Never
-    raises — a malformed cfg yields the safest contract, not an exception."""
+    raises — a non-str/unhashable type or malformed cfg yields the safest answer, not an
+    exception."""
+    if not isinstance(ntype, str):        # unhashable (e.g. `type: [..]`) would raise on .get
+        return None
     fn = BUILTIN_CONTRACTS.get(ntype)
     if fn is None:
         return None

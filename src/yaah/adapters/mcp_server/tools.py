@@ -107,7 +107,8 @@ async def _tool_resume(args: Dict[str, Any]) -> Dict[str, Any]:
     root, base = _load_root(args["root_path"])
     validate_root(root)
     out = await resume_gate(root, base, args["baton_id"],
-                            dict(args.get("decision") or {}))
+                            dict(args.get("decision") or {}),
+                            approver=args.get("approver"))
     return _outcome_json(out)
 
 
@@ -119,13 +120,23 @@ async def _tool_run(args: Dict[str, Any]) -> Dict[str, Any]:
     prompt has no place on a protocol channel) and no serve-forever (a
     serve-only root would block the protocol loop for the process lifetime).
     The run itself is seeded identically (runtime._seed_task)."""
+    from ... import saga
     from ...runtime import _assemble_harness, _seed_task
+    from ...runtime_factories import opened_store
     root, base = _load_root(args["root_path"])
     validate_root(root)
-    harness = await _assemble_harness(root, base)
-    task, run_kw = _seed_task(root, base)
-    out = await harness.run(task, **run_kw)
-    return _outcome_json(out)
+    # Build the state backend under opened_store so its connection is released
+    # when the run returns (same ownership rule as the runtime action verbs) —
+    # otherwise a postgres-backed MCP `run` leaks one connection per call.
+    async with opened_store(root.get("state"), base) as store:
+        harness = await _assemble_harness(root, base, store=store)
+        task, run_kw = _seed_task(root, base)
+        # ADR-0009 D6: route through settle_terminal so a StageFailed arms the
+        # auto-saga, then re-raises — the raised StageFailed propagates to the
+        # server's tools/call wrapper and comes back as isError:true (unchanged).
+        out = await saga.settle_terminal(root, base, harness,
+                                         harness.run(task, **run_kw))
+        return _outcome_json(out)
 
 
 _ROOT_PATH_PROP = {"type": "string",
@@ -171,7 +182,12 @@ TOOLS: List[Dict[str, Any]] = [
                                     "baton_id": _BATON_ID_PROP,
                                     "decision": {"type": "object",
                                                  "description": "The decision payload; "
-                                                                "shape per baton_schema."}},
+                                                                "shape per baton_schema."},
+                                    "approver": {"type": "string",
+                                                 "description": "Optional: WHO approved — "
+                                                                "recorded on the resume audit "
+                                                                "span (identity only, never "
+                                                                "decision values)."}},
                      "required": ["root_path", "baton_id", "decision"]},
      "handler": _tool_resume},
     {"name": "run",

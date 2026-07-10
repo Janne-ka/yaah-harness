@@ -1,0 +1,14 @@
+{
+ "_extends": "starter.local.json",
+ "providers": {
+  "fake": {
+   "type": "fake_scripted",
+   "by_model": {
+    "summarize-b": [
+     "{\"summary\":\"hello from B, with a score\",\"score\":4}"
+    ]
+   }
+  }
+ },
+ "pipeline": "starter-b.json"
+}

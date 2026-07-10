@@ -140,6 +140,56 @@ def scenario_scaffold_every_archetype() -> None:
         ", ".join(sorted(ARCHETYPES))))
 
 
+def scenario_gate_template_auto_drives_by_gate_name() -> None:
+    """The scaffolded branch-with-gate starter must auto-drive with a
+    `decisions` map keyed by the GATE NAME — the convention archetypes.md
+    documents (`decisions: {<gate>: ...}`). Regression: the template once
+    authored its gate as `awaiting: "human:review"`, which collided with the
+    escalate lane's reserved exact-match namespace, so `decisions: {"review":
+    ...}` silently missed and the run parked instead of completing."""
+    import asyncio
+    from yaah.harness import Done
+    from yaah.runtime import run_root
+
+    tmp = tempfile.mkdtemp(prefix="yaah-gate-drive-")
+    try:
+        target = os.path.join(tmp, "p")
+        scaffold(target, "branch-with-gate")
+        with open(os.path.join(target, "starter.local.json"), "r") as f:
+            root = json.load(f)
+        root["decisions"] = {"review": {"decision": "approve"}}
+        out = asyncio.run(run_root(root, target))
+        assert isinstance(out, Done), \
+            "the documented decisions convention must drive the scaffold to Done; got {}".format(out)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("PASS branch-with-gate scaffold auto-drives via decisions keyed by gate name")
+
+
+def scenario_no_live_gitignore_in_template_sources() -> None:
+    """A template's gitignore must ship as `_gitignore` (mapped to `.gitignore`
+    at load time), NEVER as a literal `.gitignore`: git honors a literal one
+    for OUR repo, silently un-tracking sibling template files that match its
+    patterns. Regression: branch-with-gate's `published.html` ignore rule
+    swallowed the template's own `templates/published.html` — present on
+    authors' disks, absent from every fresh checkout, so CI (and only CI)
+    failed the gate-drive scenario with render_template_unreadable."""
+    import importlib.resources as ir
+    from yaah.init_template import ARCHETYPES, load_template
+    for arch in sorted(ARCHETYPES):
+        root = ir.files("yaah.templates").joinpath(arch)
+        names = [c.name for c in root.iterdir()]
+        assert ".gitignore" not in names, \
+            "template {!r} has a LIVE .gitignore in the source tree — rename it " \
+            "to _gitignore (load_template maps it back) or it will silently " \
+            "un-track sibling template files".format(arch)
+        tpl = load_template(arch)
+        assert ".gitignore" in tpl, \
+            "template {!r}: _gitignore must surface as .gitignore in the scaffold".format(arch)
+        assert "_gitignore" not in tpl, arch
+    print("PASS no live .gitignore in template sources; _gitignore maps to .gitignore")
+
+
 def scenario_scaffold_unknown_archetype() -> None:
     """An unknown archetype raises ValueError with an actionable message
     that lists the known names (per the error-voice rule)."""
@@ -198,6 +248,8 @@ def scenario_with_schema_ref_guards() -> None:
 if __name__ == "__main__":
     main()
     scenario_scaffold_every_archetype()
+    scenario_gate_template_auto_drives_by_gate_name()
+    scenario_no_live_gitignore_in_template_sources()
     scenario_scaffold_unknown_archetype()
     scenario_archetypes_and_descriptions_in_sync()
     scenario_with_schema_ref_guards()

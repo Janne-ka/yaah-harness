@@ -20,8 +20,10 @@ beside it. New here? Start with the [Quickstart](../docs/quickstart.md) and
 | **`hello-yaah/`** | the smallest real pipeline — `agent → validate+retry → parse → render`, and the data-flow contract | `yaah run starter.local.json` |
 | **`review-pipeline/`** | a **branch** + a **human gate** with durable suspend/resume (`yaah list` / `yaah resume`) | `yaah run review.local.json` (then `yaah list`, `yaah resume <id> decision.json`) |
 | **`fork-join/`** | **fork** to parallel lenses + **fan-in** with a `reduce` | `yaah run review.local.json` |
-| **`arch-drift/`** | an **instrumented** pipeline: snapshot → extract → render → diff → human gate → land, with tracing + cost (the canonical instrumented archetype) | `MERMAID_RENDERER=:canned yaah run arch-drift.local.json` |
-| **`config-flow/`** | a **meta-tool** pipeline — operates on *other* yaah configs and draws their flow as an SVG | `MERMAID_RENDERER=:canned yaah run config-flow.local.json` |
+| **`arch-drift/`** | an **instrumented** pipeline: snapshot → extract → render → diff → human gate → land, with tracing + cost (the canonical instrumented archetype) | `MERMAID_RENDERER=:fixed_test_svg yaah run arch-drift.local.json` |
+| **`config-flow/`** | a **meta-tool** pipeline — operates on *other* yaah configs and draws their flow as an SVG | `MERMAID_RENDERER=:fixed_test_svg yaah run config-flow.local.json` |
+| **`preflight-guard/`** | a **deterministic guard** (`transform` + `branch`) that validates/normalizes input and rejects garbage BEFORE any model call — "don't pay for a model call on garbage input" | `yaah run preflight.local.json` (reject) / `preflight-valid.local.json` (pass) |
+| **`model-cascade/`** | a **cheap→expensive model ladder** (`escalate_model`): the cheap model asks for `help` when blocked and the engine escalates once; otherwise it short-circuits | `yaah run cascade-escalate.local.json` / `cascade-short-circuit.local.json` |
 
 ## Harness / agent-loop (tool-using agents)
 
@@ -49,4 +51,4 @@ PYTHONPATH=src python3 examples/config_pipeline.py
 Describe what you want to an AI assistant pointed at [`AGENTS.md`](../AGENTS.md) —
 it knows the node types and the conventions and will draft the JSON. Then run the
 `*.local.json` overlay (fake provider; for SVG examples add
-`MERMAID_RENDERER=:canned`) to verify it offline before going real.
+`MERMAID_RENDERER=:fixed_test_svg`) to verify it offline before going real.

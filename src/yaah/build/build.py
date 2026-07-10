@@ -42,16 +42,20 @@ def build_graph(g: Dict[str, Any]) -> Graph:
             feedback=bool(s.get("feedback", False)),
             escalate=s.get("escalate"),
             then=s.get("then"),
+            final=bool(s.get("final", False)),  # terminal-only: skip sticky re-fold on this output
+
             fanout=s.get("fanout"),  # role BARRIER: ask N workers, merge replies
             min_success=(int(s["min_success"]) if s.get("min_success") is not None
                          else None),  # k-of-n fanout completion (M9a)
             branch=s.get("branch"),
             fork=s.get("fork"),      # branch CHAINS: spread to N stages, fanin rejoins
             fanin=s.get("fanin"),
+            foreach=s.get("foreach"),  # ADR-0007: bounded map of `node` over payload[items]
             wait=s.get("wait"),
             clears=[s["clears"]] if isinstance(s.get("clears"), str) else s.get("clears"),
             concerns_from=s.get("concerns_from"),  # payload key -> baton.concerns on pass
             concerns_into=s.get("concerns_into"),  # baton.concerns -> payload key pre-run
+            effects_from=s.get("effects_from"),  # ADR-0008 D2: payload key -> completion-span `effects` (rollback handle)
             clearable=bool(s.get("clearable", True)),   # all nodes clearable by default
             on_error=s.get("on_error", "clear"),         # every node error-clears (default), override to compensate/None
         )
