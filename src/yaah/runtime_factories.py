@@ -117,6 +117,29 @@ def _resolve_pkg_ref(ref: str) -> Any:
     return cfg
 
 
+def _load_one_base(ref: str, *, from_path: str, _seen: tuple) -> Any:
+    """Resolve ONE `_extends` reference `ref` (as it appears in a string-form
+    `_extends` OR a single entry of a list-form `_extends`), returning the parsed,
+    fully-expanded base object.
+
+    Same per-ref handling either way: a `yaah:`-scheme ref is a packaged seed
+    (importlib.resources); anything else is a path resolved relative to
+    `from_path`'s dir (unless absolute) and loaded with its own `_extends`
+    expanded recursively — so a base may itself extend, and cycles are detected
+    across the whole resolution via `_seen` (which threads `from_path`)."""
+    if ref.startswith(_PKG_REF):  # a packaged seed — resolve via importlib.resources
+        base = _resolve_pkg_ref(ref)
+        base_path = ref
+    else:
+        base_path = ref
+        if not os.path.isabs(base_path):
+            base_path = os.path.normpath(os.path.join(os.path.dirname(from_path), base_path))
+        base = _load_with_extends(base_path, _seen=_seen + (from_path,))
+    if not isinstance(base, dict):
+        raise ValueError("_extends base {!r} is not a JSON object".format(base_path))
+    return base
+
+
 def _load_with_extends(path: str, *, _seen: tuple) -> Any:
     if path in _seen:
         raise ValueError("_extends cycle: {!r} via {}".format(
@@ -131,15 +154,31 @@ def _load_with_extends(path: str, *, _seen: tuple) -> Any:
             raise ValueError("{}: invalid JSON — {}".format(path, e.msg)) from None
     if not isinstance(cfg, dict) or "_extends" not in cfg:
         return cfg
-    base_path = cfg.pop("_extends")
-    if base_path.startswith(_PKG_REF):  # a packaged seed — resolve via importlib.resources
-        base = _resolve_pkg_ref(base_path)
-    else:
-        if not os.path.isabs(base_path):
-            base_path = os.path.normpath(os.path.join(os.path.dirname(path), base_path))
-        base = _load_with_extends(base_path, _seen=_seen + (path,))
-    if not isinstance(base, dict):
-        raise ValueError("_extends base {!r} is not a JSON object".format(base_path))
+    spec = cfg.pop("_extends")
+    # `_extends` is a single ref (string) OR a list of refs. The list is exactly
+    # the FLATTENING of a chain: `_extends: ["a", "b"]` == a child that extends a
+    # file which extends `b` which extends `a` — bases merge LEFT-TO-RIGHT (each
+    # later base deep-merges over the accumulator, so LATER entries WIN over
+    # earlier ones), then this file (`cfg`) deep-merges on top of them all. So the
+    # child always wins over every base, and among bases the rightmost wins.
+    # Empty list = no bases. Each entry gets the same per-ref handling a lone
+    # string gets (relative paths, `yaah:` package refs, recursive `_extends`,
+    # cycle detection). See `_load_one_base`.
+    if isinstance(spec, list):
+        merged: Any = {}
+        for i, ref in enumerate(spec):
+            if not isinstance(ref, str):
+                raise ValueError(
+                    "_extends[{}] is {}; every list entry must be a path string "
+                    "(a 'yaah:' package ref or a file path)".format(
+                        i, type(ref).__name__))
+            merged = _deep_merge(merged, _load_one_base(ref, from_path=path, _seen=_seen))
+        return _deep_merge(merged, cfg)
+    if not isinstance(spec, str):
+        raise ValueError(
+            "_extends is {}; must be a path string or a list of path strings".format(
+                type(spec).__name__))
+    base = _load_one_base(spec, from_path=path, _seen=_seen)
     return _deep_merge(base, cfg)
 
 
