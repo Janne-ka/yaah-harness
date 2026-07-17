@@ -105,9 +105,13 @@ extras). Three sources:
   most common in multi-stage pipelines. An agent's reply REPLACES the
   payload (ADR-0004): only `raw` + the parsed JSON keys + the agent's
   `carry:` list survive it, so an `input` key like `topic` used after the
-  agent is gone unless the agent declares `"carry": ["topic"]`. NOTE:
-  `yaah validate --strict` does NOT catch this form — a parsing agent
-  counts as "could provide anything" — it surfaces only at run time.
+  agent is gone unless the agent declares `"carry": ["topic"]`. `yaah
+  validate --strict` now catches the DIRECT case — a `render`/`branch`
+  right after such an agent fires `[lint: missing-carry]` (a WARNING that
+  blocks `--strict`; the model *might* still echo the key, so it is not a
+  hard error). It stays conservative: a drop hidden behind an intermediate
+  `transform` between the agent and the reader is not flagged and still
+  surfaces only at run time.
 - A `render` node after an agent with `"parse": false` (ADR-0004 opt-out)
   and no `transform` between to merge the parsed JSON onto the payload.
 - An `agent` node with `"strict_render": true` — its prompt referenced a

@@ -18,9 +18,11 @@ The whole model, before you invest in the rest of the page:
 - **Comms** — the harness routes between nodes; they never call each other.
 - **You write two JSON files:** a *pipeline* (nodes + how they're wired with
   `then`/`branch`/`fork`) and a *root config* (model backend + input).
-- **The one gotcha:** an agent's reply is a STRING in `payload["raw"]`. A `parse`
-  transform turns it into keys. Put a parse between any `agent` and a `render`/`branch`,
-  or the render fails (`render_unfilled_placeholders`) pointing at the missing parse.
+- **The one gotcha:** agents parse their JSON reply by default (ADR-0004) — the
+  parsed keys plus `raw` replace the whole incoming payload. Any upstream key a later
+  stage reads must be in `"carry": [...]` on the agent, or it silently disappears
+  (symptom: `render_unfilled_placeholders`). Opt out with `"parse": false` if you need
+  raw text downstream; then add an explicit `transform` before any `render`/`branch`.
 - **Build your own:** list stages → pick a node per stage → wire them → run on the
   fake backend → swap in a real model. Or copy the nearest example and edit.
 - **Run one right now:**
@@ -56,7 +58,8 @@ Have something in mind ("draft → review → publish", "fix a bug test-first",
 1. **List your steps** as stages, in order.
 2. **Pick a node per step:** `agent` (think), `transform` (deterministic code),
    `human_gate` (a person decides), `shell` / `shell_check` (run a command),
-   `render` (write a file) — and a `parse` transform after every agent.
+   `render` (write a file). Agents parse their JSON reply by default — no
+   explicit parse stage needed unless you set `"parse": false`.
 3. **Wire them** in the graph with `then` (next), `branch` (decide), or
    `fork` + `fanin` (parallel).
 4. **Copy a `*.local.json` root**, point it at your pipeline and a `fake` provider
@@ -83,46 +86,34 @@ yaah run starter.local.json
 (Not pip-installed? `python3 -m yaah.runtime starter.local.json` is the
 equivalent; from a source checkout prefix `PYTHONPATH=src`.)
 
-It has four steps: **summarize** (an agent) → **check** (a validator) → **parse**
-(a transform) → **render**. Here is the envelope's `payload` at each step — this is
-the whole lesson:
+It has two steps: **summarize** (an agent, parse-by-default) → **render**. Here is
+the envelope's `payload` at each step — this is the whole lesson:
 
 ```
 1. the input                {"text": "YAAH is a domain-free harness."}
 
-2. after `summarize`        {"raw": "{\"summary\": \"hello\"}"}
-   the agent answered — and its answer is a plain STRING under "raw".
-   Nothing has read it yet.
+2. after `summarize`        {"raw": "{\"summary\": \"hello\"}", "summary": "hello"}
+   the agent answered AND parsed its JSON reply (ADR-0004 default).
+   `summary` is already a real key on the payload, alongside `raw`.
 
-3. after `check`            {"raw": "{\"summary\": \"hello\"}"}
-   the validator only LOOKED: "is raw valid JSON with a summary key?" Yes.
-   It changed nothing.
-
-4. after `parse`            {"summary": "hello"}
-   the transform turned that string into a real key.
-
-5. after `render`           {"summary": "hello",
+3. after `render`           {"raw": "...", "summary": "hello",
                              "output": "<h1>hello</h1>",
                              "path": "summary.html"}
-   the template <h1>{{summary}}</h1> could finally see `summary`.
+   the template <h1>{{summary}}</h1> could see `summary` — no parse stage needed.
 ```
 
-**The one thing to remember:** an agent gives you a *string* in `raw`. A validator
-checks it but does not unpack it. Until a **parse** step turns that string into
-keys, nothing downstream can use it — a `render` fails with
-`render_unfilled_placeholders`, telling you a parse step is missing (rather than
-shipping a broken `{{summary}}` at exit 0). Set `allow_unfilled: true` on the
-render only when a field is intentionally optional.
-
-So the rule is simple: **between an agent and any `render` or `branch`, put a parse
-step.** You'll see it in every example.
+**The one thing to remember:** an agent's reply **replaces** the whole incoming
+payload. Only `raw`, the parsed JSON keys, and the agent's `"carry": [...]` keys
+survive. An upstream key like `topic` that a stage after the agent still needs must
+be listed in `"carry": ["topic"]` on the agent, or it silently disappears (symptom:
+`render_unfilled_placeholders` naming that key at the later stage).
+Set `allow_unfilled: true` on the render only when a field is intentionally optional.
 
 <details>
-<summary>The four files (open <code>examples/hello-yaah/</code>)</summary>
+<summary>The five files (open <code>examples/hello-yaah/</code>)</summary>
 
 - `starter.json` — the pipeline (nodes + graph)
 - `starter.local.json` — the root config (fake backend, which pipeline, which input)
-- `hello_transforms.py` — the parse function
 - `prompts/summarize.md`, `fixtures/input.json`, `templates/output.html`
 </details>
 

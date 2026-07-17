@@ -14,9 +14,12 @@ tests). It's the cross-tool source of truth.
 - `yaah-review-my-pr` — pre-PR self-review against the three values + ADR-0001 invariants.
 
 Two rules that bite hardest (full set in AGENTS.md):
-- **Data-flow contract:** an agent's reply is a STRING in `payload["raw"]`; a
-  `transform` parse step (not the validator) merges it. Every `agent → render`/`branch`
-  edge needs a parse, or `render` fails with `render_unfilled_placeholders`.
+- **Data-flow contract (ADR-0004):** agents parse JSON by default (`parse: true`) — the
+  parsed keys plus `raw` replace the payload; no explicit `transform` needed. **But
+  the WHOLE incoming payload is replaced:** any upstream key a later stage reads must be
+  listed in `"carry": [...]` on the agent, or it silently disappears (symptom:
+  `render_unfilled_placeholders`). Opt out with `"parse": false` — then the graph linter
+  requires an explicit `transform` before any `render`/`branch`.
 - **Domain-free engine:** nothing in `src/yaah/` may name anything app-specific.
 
 ## Cross-agent mailbox

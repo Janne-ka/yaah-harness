@@ -1,9 +1,11 @@
 {
   "nodes": {
     "role:summarize": {"type": "agent", "prompt": "file:summarize",
-                       "model": "fake:summarize", "stage": "summarize"},
+                       "model": "fake:summarize", "stage": "summarize",
+                       "output_schema": {"properties": {"summary": {"type": "string"}},
+                                         "required": ["summary"]}},
     "role:render":    {"type": "render", "template_file": "templates/output.html",
-                       "out": "summary.html"}
+                       "out": "summary.html", "allow_untrusted": true}
   },
   "graph": {
     "start": "summarize",

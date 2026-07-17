@@ -103,10 +103,10 @@ holds.
 1. **Read and write `payload`; leave `headers` to the harness.** Return via
    `input.reply(kind, **fields)` or `input.reply_with(kind, payload_dict)` so
    causation chains correctly.
-2. **An agent's output is `payload["raw"]`, a string.** If a later stage needs to
-   `branch` on a field or a template needs `{{field}}`, a **parse `transform` must
-   run first** to lift `raw` into real keys. An agent→branch or agent→render edge
-   with no parse between them is the #1 authoring bug.
+2. **An agent parses its JSON reply by default (ADR-0004).** The parsed keys plus
+   `raw` land on the new payload — no explicit parse stage needed for the common
+   case. With `"parse": false`, the agent returns `{raw: <text>}` only and the
+   graph linter requires an explicit `transform` before any `render`/`branch`.
 3. **Only `carry`-listed keys survive an agent stage.** A payload-replacing
    transform must explicitly re-carry what downstream needs (the factory uses a
    `_carry` helper). A dropped key now fails the render (`render_unfilled_placeholders`)

@@ -72,15 +72,23 @@ are battle-tested in ways a fresh design isn't.
   nothing else survives the agent:** an `input` key like `topic` that a
   stage AFTER the agent still reads dies there unless the agent declares
   `"carry": ["topic"]` (symptom: `render_unfilled_placeholders` naming
-  that key at the later stage — and `validate --strict` cannot pre-catch
-  it, since a parsing agent counts as "could provide anything"). On parse
+  that key at the later stage). The load-time linter now catches the
+  common case: a `render`/`branch` DIRECTLY after a `parse:true` agent
+  reading a key the agent neither carries nor declares fires
+  `[lint: missing-carry]` (a WARNING — the model *might* echo the key —
+  that blocks `--strict`); the remedy it names is the same `carry:`, or
+  declaring the key in `output_schema`/`provides` if the model emits it.
+  (It is deliberately conservative: a drop hidden behind an intermediate
+  `transform` is a known blind spot it does not flag.) On parse
   failure the agent emits a failed verdict that the harness's
   retry+feedback loop catches the same way a `json_object` validator
   would. Opt out with `"parse": false` on the agent node for
   streaming/raw-only cases; the load-time graph linter will then require
   a `transform` between the agent and any render/branch.
 - **A human gate must `branch` on `decision`** — a gate with only `then` is a pause,
-  not a gate; the human's reject is ignored.
+  not a gate; the human's reject is ignored. `form: "approve"` is a single-button
+  continue gate (its only valid decision is `approve`); for a real yes/no, use
+  `form: "approve_or_revise"` or a `json_schema` form with an inline `decision_schema`.
 - **`fn:` targets resolve relative to the config's directory** — keep
   `transforms.py` next to the config and it just resolves; for shared/production
   code, package it (`pip install -e .`) and use a dotted path. Full note in
@@ -90,6 +98,8 @@ are battle-tested in ways a fresh design isn't.
   retired in 24h for this reason.)
 - **Always ship a `.fake.json` overlay** (`_extends` the canonical, swap models to
   `fake:*`) so the pipeline runs offline/CI for free. Verify on it before going real.
+  For the `fake_scripted` provider config shape (the `by_model` table, list cycling,
+  scripting retries), see [`docs/cookbook/offline-runs.md`](docs/cookbook/offline-runs.md#the-fake_scripted-provider).
 - **Generate → validate → repair.** Walk a draft config through
   `yaah.validate.validate_root` / `validate_pipeline` mentally (unknown keys, typed-
   block shapes, enum values, every `then`/`branch`/`fanin` target resolves) before

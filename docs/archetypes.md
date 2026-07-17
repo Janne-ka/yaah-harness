@@ -114,6 +114,9 @@ loop back to revise.
   surfacing the right decision shape. Always declare `form:` on
   human_gate nodes; otherwise `yaah baton-schema` exits with
   "no form declared." See [`docs/decision-forms.md`](decision-forms.md).
+- `form: "approve"` is a single-button continue gate (its only valid
+  decision is `approve`); for a real yes/no, use `form: "approve_or_revise"`
+  or a `json_schema` form with an inline `decision_schema`.
 
 ---
 

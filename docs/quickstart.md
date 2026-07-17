@@ -33,7 +33,6 @@ You should see each stage trace, then `RESULT: Done`, and a `summary.html` file:
 
 ```
 [trace] stage summarize ok (1ms)
-[trace] stage parse ok (1ms)
 [trace] stage render ok (1ms)
 RESULT: Done(output=Envelope(... payload={'summary': 'hello', ...}))
 
@@ -43,22 +42,24 @@ $ cat summary.html
 
 ## 3. What just happened
 
-One message (an **Envelope**) flowed through four steps: **summarize** (an agent)
-→ **check** (a validator) → **parse** → **render**. Watch its `payload` change:
+One message (an **Envelope**) flowed through two steps: **summarize** (an agent)
+→ **render**. Watch its `payload` change:
 
 ```
 input               {"text": "YAAH is a domain-free harness."}
-after summarize     {"raw": "{\"summary\": \"hello\"}"}     ← the agent's answer, a STRING
-after parse         {"summary": "hello"}                    ← now it's a real key
-after render        {"summary": "hello", "output": "<h1>hello</h1>", ...}
+after summarize     {"raw": "{\"summary\": \"hello\"}", "summary": "hello"}
+                                                       ↑ parsed by the agent (ADR-0004)
+after render        {"raw": "...", "summary": "hello", "output": "<h1>hello</h1>", ...}
 ```
 
-The thing to remember: an agent hands you a *string* in `raw`. A **parse** step
-turns it into usable keys — without it, `render` fails (`render_unfilled_placeholders`), telling you the parse step is missing.
+The agent parses its JSON reply by default (`parse: true`) — the parsed keys land
+directly on the payload alongside `raw`, so `render` finds `summary` without a
+separate parse stage. The one thing to watch: the agent's reply **replaces** the
+whole incoming payload, so any upstream key a later stage reads needs a `"carry": [...]`
+declaration on the agent, or it disappears.
 
-That's six small files in `examples/hello-yaah/`: a pipeline, a root config, the
-parse function, a prompt, an input, a template. The [tutorial](tutorial.md) builds
-on it step by step.
+That's five small files in `examples/hello-yaah/`: a pipeline, a root config, a
+prompt, an input, a template. The [tutorial](tutorial.md) builds on it step by step.
 
 ## 4. Make it real
 

@@ -60,13 +60,22 @@ def _walk(node: "ir.abc.Traversable", rel: str, out: Dict[str, str]) -> None:
     honors it for OUR repo too, so it silently un-tracks sibling template files
     matching its own patterns (branch-with-gate's `published.html` rule
     swallowed the template's `templates/published.html` — present on authors'
-    disks, absent from every fresh checkout, caught only by CI)."""
+    disks, absent from every fresh checkout, caught only by CI).
+
+    The distilled AI-rules file ships the same way: `_agents.md` is RENAMED to
+    `AGENTS.md` here. It carries the ~6 engine rules that bite an AI author in a
+    CONSUMER repo (payload-replace, parse-by-default, reserved `feedback`, input
+    fencing, the offline authoring loop, gates) so that guidance travels with the
+    scaffold instead of living only in this repo. Underscore-prefixed so it stays
+    a single source of truth and doesn't read as a live AGENTS.md for our tree."""
     for child in node.iterdir():
         name = child.name
         if name == "__init__.py" or name == "__pycache__" or name.endswith(".pyc"):
             continue
         if name == "_gitignore":
             name = ".gitignore"
+        elif name == "_agents.md":
+            name = "AGENTS.md"
         child_rel = "{}/{}".format(rel, name) if rel else name
         if child.is_dir():
             _walk(child, child_rel, out)

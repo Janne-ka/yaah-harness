@@ -190,6 +190,80 @@ def scenario_no_live_gitignore_in_template_sources() -> None:
     print("PASS no live .gitignore in template sources; _gitignore maps to .gitignore")
 
 
+def scenario_agents_md_ships_into_every_scaffold() -> None:
+    """Every scaffolded project must carry a distilled `AGENTS.md` so the rules
+    that bite an AI author/executor travel to CONSUMER repos (they currently
+    live only in this repo's AGENTS.md + cookbook, forcing consumers to
+    hand-rederive them). It ships as `_agents.md` in each template source dir
+    (mapped to `AGENTS.md` at scaffold time) for the same reason the gitignore
+    ships as `_gitignore`: a literal `AGENTS.md` in a template dir is a live
+    file for OUR repo and would confuse tooling / drift from a single source."""
+    import importlib.resources as ir
+    from yaah.init_template import ARCHETYPES, load_template
+
+    # Marker lines the distilled rules file MUST contain — one probe per rule so
+    # a well-meaning trim that drops a rule reddens here, not in a consumer repo.
+    MARKERS = [
+        "REPLACE",          # agent replies replace the payload
+        "carry:",           # carry: survives; only raw + parsed keys + carry
+        "graph.sticky",     # loop-frame keys
+        "ADR-0004",         # parse-by-default
+        "parse: false",     # explicit transform escape hatch
+        "loop_feedback",    # engine-reserved feedback vs your own retry key
+        "{{!",              # fence untrusted input
+        "yaah validate --strict",  # the authoring loop
+        "yaah baton-schema",       # driving parked gates
+        "approve_or_revise",       # real gate decisions
+        "docs/archetypes.md",      # pointer to full docs
+    ]
+    for arch in sorted(ARCHETYPES):
+        root = ir.files("yaah.templates").joinpath(arch)
+        names = [c.name for c in root.iterdir()]
+        assert "AGENTS.md" not in names, (
+            "template {!r} has a LIVE AGENTS.md in the source tree — rename it "
+            "to _agents.md (load_template maps it back to AGENTS.md) so it ships "
+            "from a single underscore-prefixed source".format(arch))
+        assert "_agents.md" in names, (
+            "template {!r}: ship the distilled rules as _agents.md so scaffold "
+            "renames it to AGENTS.md".format(arch))
+        tpl = load_template(arch)
+        assert "AGENTS.md" in tpl, (
+            "template {!r}: _agents.md must surface as AGENTS.md in the "
+            "scaffold".format(arch))
+        assert "_agents.md" not in tpl, arch
+        body = tpl["AGENTS.md"]
+        for marker in MARKERS:
+            assert marker in body, (
+                "scaffolded AGENTS.md for {!r} is missing rule marker {!r}".format(
+                    arch, marker))
+    print("PASS every archetype scaffolds a distilled AGENTS.md (from _agents.md)")
+
+
+def scenario_rules_files_are_byte_identical() -> None:
+    """The four rules files — each archetype's `_agents.md` and the
+    `examples/hello-yaah/AGENTS.md` — are byte-identical ON PURPOSE today: one
+    distilled rules set, shipped verbatim into every scaffold and the example.
+    If per-archetype divergence is ever wanted (e.g. fork-fanin-specific advice),
+    update THIS test deliberately — don't let the copies drift silently."""
+    paths = [
+        os.path.join(HERE, "..", "src", "yaah", "templates", "linear", "_agents.md"),
+        os.path.join(HERE, "..", "src", "yaah", "templates", "branch-with-gate", "_agents.md"),
+        os.path.join(HERE, "..", "src", "yaah", "templates", "fork-fanin", "_agents.md"),
+        os.path.join(EXAMPLE, "AGENTS.md"),
+    ]
+    for p in paths:
+        assert os.path.exists(p), "rules file missing: {}".format(os.path.normpath(p))
+    bodies = [_read(p) for p in paths]
+    ref = bodies[0]
+    for p, body in zip(paths[1:], bodies[1:]):
+        assert body == ref, (
+            "rules file {} has drifted from linear/_agents.md — they are meant to "
+            "be byte-identical; if per-archetype divergence is intended, update "
+            "scenario_rules_files_are_byte_identical deliberately".format(
+                os.path.normpath(p)))
+    print("PASS the four rules files are byte-identical (single distilled source)")
+
+
 def scenario_scaffold_unknown_archetype() -> None:
     """An unknown archetype raises ValueError with an actionable message
     that lists the known names (per the error-voice rule)."""
@@ -250,6 +324,8 @@ if __name__ == "__main__":
     scenario_scaffold_every_archetype()
     scenario_gate_template_auto_drives_by_gate_name()
     scenario_no_live_gitignore_in_template_sources()
+    scenario_agents_md_ships_into_every_scaffold()
+    scenario_rules_files_are_byte_identical()
     scenario_scaffold_unknown_archetype()
     scenario_archetypes_and_descriptions_in_sync()
     scenario_with_schema_ref_guards()

@@ -5,27 +5,25 @@ to adapt; the authoring *judgment* (when to use which) stays in `SKILL.md`.
 
 ## Quick reference
 
-**Smallest viable pipeline** (linear, one agent, one validator, one parse
-transform — same shape as the QUICK START; the parse stage is not optional, see
-the data-flow contract in `quickstart.md`):
+**Smallest viable pipeline** (linear, one agent — parse-by-default (ADR-0004) so
+no explicit parse stage needed; the agent's JSON reply keys land directly on the
+payload alongside `raw`):
 ```json
 {
   "nodes": {
-    "role:think":  {"type": "agent", "prompt": "file:my-prompt", "model": "claude:claude-sonnet-4-6", "stage": "think"},
-    "role:check":  {"type": "json_object"},
-    "role:parse":  {"type": "transform", "target": "fn:my_transforms:parse", "call": "envelope"}
+    "role:think":  {"type": "agent", "prompt": "file:my-prompt", "model": "claude:claude-sonnet-4-6", "stage": "think"}
   },
   "graph": {
     "start": "think",
     "stages": {
-      "think": {"node": "role:think", "validators": ["role:check"], "max_attempts": 3, "feedback": true, "then": "parse"},
-      "parse": {"node": "role:parse", "then": null}
+      "think": {"node": "role:think", "max_attempts": 3, "feedback": true, "then": null}
     }
   }
 }
 ```
-(`my_transforms.py` lives next to the root config and is imported from the run
-dir; `fn:` targets in config are trusted code — never point one at anything
+Opt out with `"parse": false` on the agent when you need raw text downstream; then
+the graph linter requires an explicit `transform` before any `render`/`branch`.
+(`fn:` targets in config are trusted code — never point one at anything
 payload-derived.)
 
 **Fork (asymmetric A/B)** — a `fork` stage spreads the envelope to successor
