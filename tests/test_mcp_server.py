@@ -119,6 +119,20 @@ NOISE_TRANSFORM = (
     "    return {'ok': True}\n"
 )
 
+# A pipeline that hard-FAILS at runtime with no human gate -> StageFailed. The
+# MCP `run` handler must return the SAME structured failure object run --json
+# prints, as JSON in the isError content (a debugger parses it, not str(e)).
+FAILING_PIPELINE = {
+    "nodes": {
+        "role:do": {"type": "shell", "command": ["true"], "stage": "do"},
+        "role:check": {"type": "shell_check", "command": ["false"], "stage": "check"},
+    },
+    "graph": {"start": "do", "stages": {
+        "do": {"node": "role:do", "validators": ["role:check"],
+               "max_attempts": 1, "then": None},
+    }},
+}
+
 GATED_PIPELINE = {
     "nodes": {
         "role:writer": {"type": "agent", "template": "write a spec for {{request}}",
@@ -222,6 +236,22 @@ async def scenario_run_linear(client: _Client) -> None:
     assert out["outcome"] == "done", out
     assert "thinking" in out["payload"]["raw"], out  # the fake writer's text
     assert out["payload"]["note"] == {"ok": True}, out  # the noisy transform ran
+
+
+async def scenario_run_failed_structured(client: _Client) -> None:
+    """A hard stage failure comes back isError:true, but the content is the SAME
+    structured object run --json prints (outcome/stage/failures) — parseable, not
+    a flattened str(e). Falsifier: revert tools.py to let str(e) surface and this
+    json.loads fails (the content would be a prose sentence)."""
+    d = tempfile.mkdtemp()
+    root = _write_project(d, FAILING_PIPELINE)
+    is_err, text = await _call(client, "run", {"root_path": root})
+    assert is_err, text
+    obj = json.loads(text)                        # structured, not prose
+    assert obj["outcome"] == "failed", obj
+    assert obj["stage"] == "do", obj
+    assert obj["failures"][0]["code"] == "shell_exit", obj
+    assert "message" in obj["failures"][0], obj
 
 
 async def scenario_gate_roundtrip(client: _Client) -> None:
@@ -331,6 +361,7 @@ async def amain() -> None:
     sys.stdout = leak
     try:
         await scenario_run_linear(client)
+        await scenario_run_failed_structured(client)
         await scenario_gate_roundtrip(client)
     finally:
         sys.stdout = real_stdout

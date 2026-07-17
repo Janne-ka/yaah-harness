@@ -10,8 +10,9 @@ from .gate_driver import Decider, build_decider, drive
 from .graph import Graph
 from .harness import Harness, Outcome
 from .stage import Stage
-from .stage_failed import StageFailed
+from .stage_failed import DecisionRejected, StageFailed
 from .suspended import Suspended
 
 __all__ = ["Harness", "Graph", "Stage", "Baton", "BatonStore", "Cleared", "Done",
-           "Outcome", "Suspended", "StageFailed", "drive", "build_decider", "Decider"]
+           "Outcome", "Suspended", "StageFailed", "DecisionRejected",
+           "drive", "build_decider", "Decider"]

@@ -32,7 +32,7 @@ import os
 import sys
 from typing import Any, Callable, Dict
 
-from .harness import StageFailed
+from .harness import DecisionRejected, StageFailed
 from .runtime_factories import _read_json
 from .validate import validate_root
 
@@ -124,12 +124,11 @@ def _parse_cli(argv: list) -> dict:
     if debug:                  # global like --fake: full tracebacks instead of
         rest.remove("--debug") # the message-only error boundary in main()
     as_json = "--json" in rest
-    if as_json:                # scoped to --list (machine-readable mailbox view);
-        rest.remove("--json")  # noise on any other action triggers the unknown-arg path below
+    if as_json:                # machine-readable output for run / resume / list —
+        rest.remove("--json")  # other actions reject it via the guard below
     if not rest:
-        if as_json:
-            _usage_exit("--json is only valid with --list")
-        return {"action": "run", "root": root, "fake": fake, "debug": debug}
+        return {"action": "run", "root": root, "fake": fake, "debug": debug,
+                "json": as_json}
     cmd = rest[0]
     if cmd in ("-h", "--help"):
         print("usage: " + _USAGE)
@@ -139,8 +138,11 @@ def _parse_cli(argv: list) -> dict:
             _usage_exit("--list takes no extra arguments")
         return {"action": "list", "root": root, "fake": fake, "debug": debug,
                 "json": as_json}
-    if as_json:
-        _usage_exit("--json is only valid with --list")
+    if as_json and cmd != "--resume":
+        # --json is machine-readable output on the run/resume/list actions only;
+        # on clear/explain/lint-overlay it's noise. (bare `run` handled above,
+        # --list just above, --resume just below.)
+        _usage_exit("--json is only valid with run, resume, and --list")
     if cmd == "--clear":
         if len(rest) > 1:
             _usage_exit("--clear takes no extra arguments")
@@ -171,7 +173,7 @@ def _parse_cli(argv: list) -> dict:
         if len(rest) > 3:
             _usage_exit("--resume takes a baton id and an optional decision file")
         return {"action": "resume", "root": root, "fake": fake, "debug": debug,
-                "baton_id": rest[1], "approver": approver,
+                "baton_id": rest[1], "approver": approver, "json": as_json,
                 "decision_file": rest[2] if len(rest) == 3 else None}
     _usage_exit("unknown argument {!r}".format(cmd))
     return {}  # unreachable; satisfies type checkers
@@ -884,9 +886,32 @@ def _print_concerns(concerns: list) -> None:
         print(line)
 
 
-def _render_outcome(out: Any) -> None:
-    """One run/resume Outcome on the console: the GATE banner when parked
-    (durable state lets another process resume it), then the RESULT line."""
+def _outcome_json(out: Any) -> Dict[str, Any]:
+    """The machine-readable shape of a run/resume Outcome for `--json` — stable
+    field names, mirrored by the MCP `run`/`resume` handlers (same shapes across
+    surfaces) because both dispatch to the Outcome's own `to_json_dict`, the
+    single source of truth. A StageFailed is an EXCEPTION, not an Outcome; its
+    JSON is StageFailed.to_failure_json, printed at the main() boundary."""
+    to_json = getattr(out, "to_json_dict", None)
+    if to_json is not None:
+        return to_json()
+    return {"outcome": type(out).__name__.lower(), "detail": str(out)}
+
+
+def _print_outcome_json(out: Any) -> None:
+    # payloads carry engine-produced JSON data; default=str is the codebase's
+    # established safe fallback (MCP server + jsonio use it) for the rare
+    # non-JSON leaf, so a large/odd payload can't crash the machine-readable path.
+    print(json.dumps(_outcome_json(out), indent=2, default=str))
+
+
+def _render_outcome(out: Any, as_json: bool = False) -> None:
+    """One run/resume Outcome on the console: `--json` prints the structured
+    object; otherwise the GATE banner when parked (durable state lets another
+    process resume it), then the RESULT line."""
+    if as_json:
+        _print_outcome_json(out)
+        return
     from .harness import Suspended
     if isinstance(out, Suspended):
         print("GATE baton_id={} awaiting={} concerns={}".format(
@@ -949,14 +974,15 @@ def _dispatch_resume(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> N
     print("[yaah resume] engine running in this process until next gate or completion",
           file=sys.stderr)
     _render_outcome(asyncio.run(resume_gate(root, base, spec["baton_id"], decision,
-                                            approver=spec.get("approver"))))
+                                            approver=spec.get("approver"))),
+                    as_json=spec.get("json", False))
 
 
 def _dispatch_run(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
     from .runtime import run_root
     out = asyncio.run(run_root(root, base))
     if out is not None:   # None = the serve-only path (which normally never returns)
-        _render_outcome(out)
+        _render_outcome(out, as_json=spec.get("json", False))
         # Decisions-driven mode drives gates to completion, but can reach a gate
         # it has no answer for; drive() then leaves the run PARKED rather than
         # crash. Point the operator at the exact resume command so the walk-away
@@ -1062,13 +1088,33 @@ def main() -> None:
     spec = _parse_subcommand(argv) if argv[0] in _VERB_PARSERS else _parse_cli(argv)
     try:
         _dispatch(spec)
+    except DecisionRejected as e:
+        # A resume decision violated the parked gate's form (N1). NOT a
+        # StageFailed (it must never arm the auto-saga), so it needs its own
+        # arm of the same handler: --json emits the structured failure
+        # (outcome:"failed", code:"decision_rejected", data{form,errors,baton_id}),
+        # else the prose message (which carries BOTH remedies). Exit 1, like a
+        # failed run — the gate stays PARKED and re-submittable.
+        if spec.get("debug"):
+            raise
+        if spec.get("json"):
+            print(json.dumps(e.to_failure_json(), indent=2, default=str))
+        else:
+            print("decision rejected: {}".format(e), file=sys.stderr)
+        raise SystemExit(1) from None
     except StageFailed as e:
         # The run failed a hard gate: the message names the stage + failures
         # (stage_failed.py carries the verdict) — that's the operator's answer;
         # the traceback is engine internals, shown only under --debug.
         if spec.get("debug"):
             raise
-        print("pipeline failed: {}".format(e), file=sys.stderr)
+        if spec.get("json"):
+            # machine-readable failure on stdout (a debugger parses stage +
+            # failures[code/message/fix_hint/data] instead of scraping prose);
+            # exit code UNCHANGED (still 1). --debug wins over --json above.
+            print(json.dumps(e.to_failure_json(), indent=2, default=str))
+        else:
+            print("pipeline failed: {}".format(e), file=sys.stderr)
         raise SystemExit(1) from None
     except (ValueError, OSError, ImportError) as e:
         # Config-class errors (missing file, bad JSON, failed validation,

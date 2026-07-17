@@ -35,6 +35,12 @@ prompt source), calls the model backend, returns the raw text. Placeholders:
 `{{key}}` resolves payload-first then `config`; `{{!key}}` marks the value
 UNTRUSTED and fences it (unguessable per-render token); bare payload values get
 fence-mimicking sequences neutralized (the instruction-channel defense).
+`{{?key}}` marks the placeholder OPTIONAL — a key legitimately absent on early
+passes (e.g. a cross-loop `loop_feedback` note a `tally` transform writes only
+from the second iteration): an absent `{{?key}}` renders EMPTY instead of leaving
+a literal, and under `strict_render` it does NOT fault. This lets a feedback-loop
+agent set `strict_render: true` and still fault on a genuinely-missing REQUIRED
+key. The markers compose as `{{?!key}}` (optional AND untrusted).
 
 Config: `template` *or* `prompt` (required), `model`, `stage` (trace/event
 label), `cwd_from`, `carry` (payload keys forwarded into the reply — agents
@@ -46,7 +52,10 @@ reply; opt out with `parse: false` for streaming/raw-only cases),
 value in payload ∪ `config` extras FAILS the stage loud with
 `render_unfilled_placeholders` naming the key + stage, instead of leaving the
 literal `{{name}}` in the prompt; engine-injected keys like `tool_manifest` and
-present-but-empty values never trip it. Catches the stage-local unfilled-placeholder
+present-but-empty values never trip it, and a placeholder the author marks
+optional with `{{?key}}` renders empty rather than faulting — so an agent reading
+a loop-seeded key like `{{?loop_feedback}}` can run strict and still fault on a
+genuinely-missing required key. Catches the stage-local unfilled-placeholder
 class no static lint can),
 `output_schema` (optional JSON-Schema subset — the stage's OUTPUT CONTRACT,
 parse-path only: the agent self-validates its parsed reply against it
@@ -231,6 +240,19 @@ For the heavier factory documents the app uses `transform` +
 Like `human_gate`, `render` fills `{{key}}` with the plain templater — the value
 is inserted **unframed**, and `{{!key}}` is a literal (no fencing). See the lint
 note below.
+
+Two opt-out flags (both default `false`):
+
+- `allow_unfilled` — by default an unfilled `{{placeholder}}` FAILS the stage
+  (`render_unfilled_placeholders`), the loud form of the worst fault class (a
+  forgotten parse step shipping a literal `{{name}}` at exit 0). Set it `true`
+  when a field is intentionally optional.
+- `allow_untrusted` — a render cannot fence (`{{!key}}` is a literal here), so
+  the `untrusted-unfenced` lint has no in-place remedy on a render. Set it `true`
+  to assert this render's output feeds a **human/file**, not a model prompt, so
+  unfenced agent-authored text is legitimate — it silences ONLY this render's own
+  `untrusted-unfenced` warnings (agent-prompt and `human_gate` sites unaffected).
+  No runtime effect; a lint-only opt-out parallel to `allow_unfilled`.
 
 ## Lint: `untrusted-unfenced` — agent-authored text at an unframed consumer
 

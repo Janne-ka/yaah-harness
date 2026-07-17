@@ -56,6 +56,7 @@ type-specific fields the new type doesn't accept.
 | `serve` | `"all"` / list / `{placement}` | which roles THIS host runs (distributed). |
 | `run` | bool | run the pipeline now, or stay a serve-only worker (default: run iff `input` present). |
 | `baton_ttl` | minutes | how long a parked gate survives before the sweep (default 4320 = 72h, so a Friday gate is resumable Monday). |
+| `strict_resume` | bool | enforce a parked gate's declared `form` at `resume` (default **true**). A decision that violates the form is rejected (`decision_rejected`, exit 1) instead of silently taking the branch default; the gate stays parked and re-submittable. `false` restores the old blind merge — set it only for a gate whose form is genuinely mis-declared. No effect on a gate with no `form`. See ADR-0002. |
 | `live_config` | bool | re-read mutable node leaves from the pipeline file per call (no restart). |
 | `decisions` / `interactive` | map / bool | gate-driver answers (auto-drive) / stdin prompting. |
 

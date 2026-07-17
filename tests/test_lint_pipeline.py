@@ -1642,6 +1642,67 @@ def untrusted_strict_fails_with_exit_2() -> None:
     assert _UT in err, err
 
 
+# ── allow_untrusted: opt-out for RENDER sites whose output feeds a human/file ──
+# A render can't fence ({{!key}} is a literal there — templating.fill), so the
+# untrusted-unfenced warning has no in-place remedy on a render. `allow_untrusted:
+# true` on the render node is the author's explicit "this output feeds a human/
+# file, not a model prompt" opt-out — parallel to `allow_unfilled`. It silences
+# ONLY the render's own sites; agent-prompt (n/a) and human_gate sites are
+# unaffected.
+
+
+def render_untrusted_fires_without_allow_untrusted() -> None:
+    # baseline (may already be covered): a render of an agent-authored key warns.
+    cfg = _render_after_agent_cfg("Report: {{summary}}", schema={"required": ["summary"]})
+    assert _ut(cfg), lint_pipeline(cfg)
+
+
+def allow_untrusted_silences_the_render_site() -> None:
+    cfg = _render_after_agent_cfg("Report: {{summary}}", schema={"required": ["summary"]})
+    cfg["nodes"]["r"]["allow_untrusted"] = True
+    assert not _ut(cfg), lint_pipeline(cfg)
+
+
+def allow_untrusted_does_not_silence_a_gate_site() -> None:
+    # the opt-out is per-RENDER-node: a human_gate site is a different consumer and
+    # stays flagged even if some unrelated render sets allow_untrusted.
+    cfg = _gate_ask_cfg("Answer: {{question}}", schema={"required": ["question"]})
+    cfg["nodes"]["g"]["allow_untrusted"] = True   # not a render → must NOT silence
+    assert _ut(cfg), lint_pipeline(cfg)
+
+
+def allow_untrusted_only_silences_the_render_that_sets_it() -> None:
+    # two renders of the same agent-authored key; only the one with the flag is quiet.
+    cfg = {"nodes": {
+        "a": {"type": "agent", "output_schema": {"required": ["summary"]}},
+        "r1": {"type": "render", "template_text": "{{summary}}", "allow_untrusted": True},
+        "r2": {"type": "render", "template_text": "{{summary}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "r1", "then": "s3"},
+            "s3": {"node": "r2"}}}}
+    w = _ut(cfg)
+    # exactly the r2 site warns (r1 silenced); the floor caveat is the only other hit
+    site_hits = [m for m in w if "FLOOR" not in m]
+    assert len(site_hits) == 1, w
+    assert "'s3'" in site_hits[0], site_hits[0]
+
+
+def render_untrusted_message_names_allow_untrusted_remedy() -> None:
+    cfg = _render_after_agent_cfg("Report: {{summary}}", schema={"required": ["summary"]})
+    m = [x for x in _ut(cfg) if "FLOOR" not in x][0]
+    assert "allow_untrusted" in m, m
+    # honest framing preserved: still a heuristic, still points at sanitize
+    assert "heuristic" in m.lower() and "sanitize" in m.lower(), m
+
+
+def gate_untrusted_message_does_not_name_allow_untrusted() -> None:
+    # allow_untrusted is a RENDER remedy — the gate message must not prescribe it.
+    cfg = _gate_ask_cfg("Answer: {{question}}", schema={"required": ["question"]})
+    m = [x for x in _ut(cfg) if "FLOOR" not in x][0]
+    assert "allow_untrusted" not in m, m
+
+
 # ── [lint: reserved-key-collision] — author declares an engine-injected key as their own ──
 # The harness `_with_feedback` (harness.py) injects `feedback` (the validator failures) AND
 # `priorAttempt` (the prior output) onto the payload on every `feedback: true` retry, and the
@@ -1887,6 +1948,292 @@ def clear_rollback_lint_never_raises_on_malformed() -> None:
         lint_pipeline(cfg)   # must not raise
 
 
+# ── missing-carry: an agent that carries neither-declares a key a downstream reads ──
+# The 2026-07-07 naive-agent field-test trap: a `parse:true` agent with NO
+# output_schema/provides RESETS the payload to exactly {raw} (+carry +cwd) — its
+# contract is neither `closed` nor `complete`, so the closed/complete render+branch
+# checks both go silent (dataflow.py `else: note_blocked()`), and note_blocked finds
+# no tainted envelope ancestor → nothing warned. `validate --strict` blessed the
+# config; the run died with render_unfilled_placeholders. A WARNING tier (never a hard
+# error — the model MAY echo the key), fired ONLY on the incomplete-agent-reset
+# producer, distinguished from a fork/fanin JOIN output (same neither-flag Flow shape,
+# but legitimately unchecked).
+
+
+def _carry_cfg(template="{{topic}}", *, node_overrides=None, sticky=None,
+               node_type="agent", parse=True):
+    agent = {"type": node_type}
+    if parse is not None:
+        agent["parse"] = parse
+    if node_overrides:
+        agent.update(node_overrides)
+    render = {"type": "render", "template_text": template}
+    graph = {"start": "s1", "stages": {"s1": {"node": "a", "then": "s2"},
+                                       "s2": {"node": "r"}}}
+    if sticky is not None:
+        graph["sticky"] = sticky
+    return {"nodes": {"a": agent, "render": render, "r": render},
+            "graph": graph}
+
+
+def _has_carry_warn(cfg, base_path=None):
+    return any("missing-carry" in m for m in lint_pipeline(cfg, base_path))
+
+
+def missing_carry_fires_on_the_exact_2026_07_07_trap() -> None:
+    # (1) parse:true agent, no output_schema/provides, does not carry `topic`; a
+    # downstream render reads {{topic}}. Today silent; must now WARN naming the
+    # reading stage, the key, the producing agent stage, and BOTH remedies.
+    cfg = _carry_cfg("Report on {{topic}}")
+    validate_pipeline(cfg)   # must NOT raise: warning-tier, not a hard error
+    w = [m for m in lint_pipeline(cfg) if "missing-carry" in m]
+    assert w, lint_pipeline(cfg)
+    m = w[0]
+    assert "topic" in m, m               # names the key
+    assert "'s2'" in m, m                # names the reading stage
+    assert "'s1'" in m or "'a'" in m, m  # names the producing agent (stage or role)
+    assert "carry" in m, m               # remedy 1
+    assert "output_schema" in m or "provides" in m, m  # remedy 2
+
+
+def missing_carry_silent_when_key_is_carried() -> None:
+    # (2) same pipeline + carry: ["topic"] on the agent → the reset's known set now
+    # includes topic → silent BY CONSTRUCTION (no new knob).
+    cfg = _carry_cfg("Report on {{topic}}", node_overrides={"carry": ["topic"]})
+    assert not _has_carry_warn(cfg), lint_pipeline(cfg)
+
+
+def missing_carry_silent_when_key_is_sticky() -> None:
+    # (3) graph.sticky re-applies the key on every transfer → in `known` → silent.
+    cfg = _carry_cfg("Report on {{topic}}", sticky=["topic"])
+    assert not _has_carry_warn(cfg), lint_pipeline(cfg)
+
+
+def missing_carry_silent_when_key_in_output_schema() -> None:
+    # (4a) declaring the key in output_schema flips the contract to `complete`, and the
+    # key is in `known` → the incomplete-reset case no longer applies → silent.
+    cfg = _carry_cfg("Report on {{topic}}",
+                     node_overrides={"output_schema": {"properties": {"topic": {"type": "string"}}}})
+    assert not _has_carry_warn(cfg), lint_pipeline(cfg)
+
+
+def missing_carry_silent_when_key_in_provides() -> None:
+    # (4b) declaring the key in inline `provides` does the same (author-declared → complete).
+    cfg = _carry_cfg("Report on {{topic}}", node_overrides={"provides": ["topic"]})
+    assert not _has_carry_warn(cfg), lint_pipeline(cfg)
+
+
+def missing_carry_silent_when_key_present_in_pipeline_input_and_carried() -> None:
+    # (5) A pipeline-input key is only a silencer if it SURVIVES to the reading stage
+    # (an agent reset drops it unless carried). The lint doesn't know the input keys at
+    # load time, so "present in input" is honoured via carry/sticky — an input key the
+    # agent CARRIES reaches the render and is silent; an input key it DROPS is exactly
+    # the trap and warns. This pins the surviving-input case as silent.
+    cfg = _carry_cfg("Report on {{topic}}", node_overrides={"carry": ["topic"]})
+    assert not _has_carry_warn(cfg), lint_pipeline(cfg)
+
+
+def missing_carry_does_not_fire_on_a_join_output() -> None:
+    # (6a) NO REGRESSION / no false positive: a fork+fanin JOIN output is Flow(known,
+    # False, False) — the SAME neither-flag shape as the incomplete agent reset, but its
+    # `known` legitimately does not list keys the reduce provides. The producing stage is
+    # a fork/fanin, NOT an incomplete-agent-reset linear stage, so missing-carry must NOT
+    # fire (the existing fork_rejoin test already forbids render-key-unprovided here).
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False},
+        "b": {"type": "agent",
+              "output_schema": {"properties": {"finding": {"type": "string"}}}},
+        "r": {"type": "render", "template_text": "{{finding}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s0"},
+            "s0": {"fork": ["sb"], "then": "sr"},
+            "sb": {"node": "b", "then": "sf"},
+            "sf": {"fanin": {"expect": ["sb"]}},
+            "sr": {"node": "r"}}}}
+    validate_pipeline(cfg)
+    assert not _has_carry_warn(cfg), lint_pipeline(cfg)
+
+
+def missing_carry_does_not_fire_on_a_fanin_union_output() -> None:
+    # (6a-bis) the fan-in UNION reduce: the lattice meet INTERSECTS closed branch payloads,
+    # so a key only ONE branch carries falls out of `known` and the join output is
+    # Flow(known, False, False) — untainted neither-flag, like the incomplete reset. But the
+    # producer is a fanin, not an agent stage, so missing-carry must stay silent (mirrors
+    # fanin_reduce_union_not_provably_absent).
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False},
+        "p1": {"type": "agent", "parse": False},
+        "p2": {"type": "agent", "parse": False, "carry": ["extra"]},
+        "r": {"type": "render", "template_text": "{{extra}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s0"},
+            "s0": {"fork": ["sb1", "sb2"], "then": "sr"},
+            "sb1": {"node": "p1", "then": "sf"},
+            "sb2": {"node": "p2", "then": "sf"},
+            "sf": {"fanin": {"expect": ["sb1", "sb2"]}, "then": "sr"},
+            "sr": {"node": "r"}}}}
+    validate_pipeline(cfg)
+    assert not _has_carry_warn(cfg), lint_pipeline(cfg)
+
+
+def missing_carry_is_silent_multihop_through_a_preserve_transform() -> None:
+    # KNOWN LIMITATION (documented in dataflow._is_incomplete_reset_producer): the gate
+    # checks the IMMEDIATE producer. incomplete-agent → args-transform (PRESERVE) → render
+    # of a dropped key is a real bug, but the immediate producer is the preserve transform
+    # (not the incomplete reset), so it is NOT flagged. A conservative FALSE NEGATIVE (safe:
+    # under-warns, never false-positives on a working pipeline that would break --strict).
+    # Pins the accepted behaviour so a future change to widen it is a deliberate choice.
+    cfg = {"nodes": {
+        "a": {"type": "agent"},
+        "t": {"type": "transform", "target": "fn:m:f"},
+        "r": {"type": "render", "template_text": "{{topic}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "t", "then": "s3"},
+            "s3": {"node": "r"}}}}
+    assert not _has_carry_warn(cfg), lint_pipeline(cfg)
+
+
+def missing_carry_does_not_fire_through_an_undeclared_envelope_transform() -> None:
+    # (6b) NO REGRESSION: an UNDECLARED envelope-transform makes the consumer opaque —
+    # note_blocked already emits the consolidated `transform-provides-undeclared` nudge.
+    # missing-carry must NOT double-warn: the producer is a transform, not an agent reset.
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False},
+        "t": {"type": "transform", "target": "fn:m:f", "call": "envelope"},
+        "r": {"type": "render", "template_text": "{{verdict}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "t", "then": "s3"},
+            "s3": {"node": "r"}}}}
+    w = lint_pipeline(cfg)
+    assert any("transform-provides-undeclared" in m for m in w), w
+    assert not any("missing-carry" in m for m in w), w
+
+
+def missing_carry_does_not_fire_on_a_custom_opaque_node() -> None:
+    # (6c) NO REGRESSION: a custom (unknown) node type is OPAQUE — downstream uncheckable,
+    # not an incomplete agent reset. missing-carry must stay silent (matches
+    # custom_node_type_is_opaque_not_false_positive).
+    cfg = {"nodes": {
+        "a": {"type": "agent", "parse": False},
+        "x": {"type": "my_custom_node"},
+        "r": {"type": "render", "template_text": "{{custom_key}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "x", "then": "s3"},
+            "s3": {"node": "r"}}}}
+    assert not _has_carry_warn(cfg), lint_pipeline(cfg)
+
+
+def missing_carry_does_not_regress_closed_or_complete_paths() -> None:
+    # (6d) NO REGRESSION on the existing severities: a parse:false agent is CLOSED, so a
+    # render of an absent key is still a hard ERROR (render-key-absent), NOT a
+    # missing-carry warning; a `complete` (declared) agent still yields the
+    # render-key-unprovided WARNING, not missing-carry.
+    closed = {"nodes": {"a": {"type": "agent", "parse": False},
+                        "r": {"type": "render", "template_text": "{{verdict}}"}},
+              "graph": {"start": "s1", "stages": {
+                  "s1": {"node": "a", "then": "s2"}, "s2": {"node": "r"}}}}
+    try:
+        validate_pipeline(closed)
+        raise AssertionError("closed-path miss must still be a hard error")
+    except ValueError as e:
+        assert "render-key-absent" in str(e), str(e)
+    assert not _has_carry_warn(closed), lint_pipeline(closed)   # not a missing-carry
+    complete = _carry_cfg("{{verdict}}",
+                          node_overrides={"output_schema": {"properties": {"other": {"type": "string"}}}})
+    w = lint_pipeline(complete)
+    assert any("render-key-unprovided" in m for m in w), w
+    assert not any("missing-carry" in m for m in w), w   # complete path is render-key-unprovided
+
+
+def missing_carry_fires_on_a_branch_read_too() -> None:
+    # branch.on reads the agent's OUTPUT — same incomplete-reset producer, same trap.
+    cfg = {"nodes": {"a": {"type": "agent"}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "a", "branch": {"on": "verdict", "routes": {}}}}}}
+    validate_pipeline(cfg)
+    w = [m for m in lint_pipeline(cfg) if "missing-carry" in m]
+    assert w and "verdict" in w[0], lint_pipeline(cfg)
+
+
+def missing_carry_silent_on_a_provided_read() -> None:
+    # a render of {{raw}} (which the reset DOES provide) must not warn.
+    cfg = _carry_cfg("{{raw}}")
+    assert not _has_carry_warn(cfg), lint_pipeline(cfg)
+
+
+def missing_carry_render_read_names_render_unfilled_consequence() -> None:
+    # a render/consumes read of a dropped key really does die with
+    # render_unfilled_placeholders — the per-site consequence for render.
+    cfg = _carry_cfg("Report on {{topic}}")
+    w = [m for m in lint_pipeline(cfg) if "missing-carry" in m]
+    assert w, lint_pipeline(cfg)
+    assert "render_unfilled_placeholders" in w[0], w[0]
+
+
+def missing_carry_branch_read_names_branch_default_consequence() -> None:
+    # FALSIFIER (write-first): a branch.on read of a dropped key does NOT fail
+    # with render_unfilled_placeholders — branch.on absent silently takes
+    # branch.default EVERY run (harness._next_stage). The message must name that
+    # real consequence, not the render one.
+    cfg = {"nodes": {"a": {"type": "agent"}},
+           "graph": {"start": "s1", "stages": {
+               "s1": {"node": "a", "branch": {"on": "verdict", "routes": {}}}}}}
+    validate_pipeline(cfg)
+    w = [m for m in lint_pipeline(cfg) if "missing-carry" in m]
+    assert w, lint_pipeline(cfg)
+    m = w[0]
+    assert "branch.default" in m, m                        # names the real consequence
+    assert "render_unfilled_placeholders" not in m, m      # NOT the render wording
+    # remedies + trailer are unchanged from the shared message
+    assert "carry" in m and ("output_schema" in m or "provides" in m), m
+
+
+def missing_carry_foreach_read_names_foreach_input_consequence() -> None:
+    # a foreach carry/items read of a dropped key fails with foreach_input (or
+    # fans out without its carry), NOT render_unfilled_placeholders. Producer is
+    # an incomplete-reset agent so the read is neither closed nor complete.
+    cfg = {"nodes": {
+        "a": {"type": "agent"},
+        "w": {"type": "agent", "parse": False}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "w", "foreach": {"items": "raw", "carry": ["topic"]}}}}}
+    validate_pipeline(cfg)
+    w = [m for m in lint_pipeline(cfg) if "missing-carry" in m]
+    assert w, lint_pipeline(cfg)
+    m = w[0]
+    assert "foreach_input" in m, m
+    assert "render_unfilled_placeholders" not in m, m
+
+
+def missing_carry_fails_strict_with_exit_2() -> None:
+    # the whole point: --strict (the CI gate) would have caught the field-test trap.
+    cfg = _carry_cfg("Report on {{topic}}")
+    code, out, err = _validate_exit(cfg, strict=True)
+    assert code == 2, (code, err)
+    assert "missing-carry" in err, err
+    # ...and plain validate surfaces it but still passes (advisory), consistent with the
+    # other warn-tier lints.
+    code2, out2, err2 = _validate_exit(cfg, strict=False)
+    assert code2 == 0, (code2, err2)
+    assert "missing-carry" in err2 and "ok:" in out2, (out2, err2)
+
+
+def missing_carry_lint_never_raises_on_malformed() -> None:
+    for cfg in (
+        {"nodes": {"a": {"type": "agent", "carry": "not-a-list"},
+                   "r": {"type": "render", "template_text": "{{topic}}"}},
+         "graph": {"start": "s1", "stages": {"s1": {"node": "a", "then": "s2"},
+                                             "s2": {"node": "r"}}}},
+        {"nodes": {"a": {"type": "agent"}, "r": "not-a-dict"},
+         "graph": {"start": "s1", "stages": {"s1": {"node": "a"}}}},
+    ):
+        lint_pipeline(cfg)   # must not raise
+
+
 def main() -> None:
     warns_on_required_only_schema()
     quiet_on_typed_properties()
@@ -2008,6 +2355,12 @@ def main() -> None:
     untrusted_lint_never_raises_on_malformed()
     untrusted_hits_carry_one_floor_caveat()
     untrusted_strict_fails_with_exit_2()
+    render_untrusted_fires_without_allow_untrusted()
+    allow_untrusted_silences_the_render_site()
+    allow_untrusted_does_not_silence_a_gate_site()
+    allow_untrusted_only_silences_the_render_that_sets_it()
+    render_untrusted_message_names_allow_untrusted_remedy()
+    gate_untrusted_message_does_not_name_allow_untrusted()
     warns_reserved_feedback_in_node_provides()
     warns_reserved_priorattempt_in_node_provides()
     warns_reserved_in_output_schema_properties()
@@ -2033,6 +2386,25 @@ def main() -> None:
     quiet_non_idempotent_bare_clear()
     clear_rollback_multistage_warns_on_the_uncovered_stage()
     clear_rollback_lint_never_raises_on_malformed()
+    missing_carry_fires_on_the_exact_2026_07_07_trap()
+    missing_carry_silent_when_key_is_carried()
+    missing_carry_silent_when_key_is_sticky()
+    missing_carry_silent_when_key_in_output_schema()
+    missing_carry_silent_when_key_in_provides()
+    missing_carry_silent_when_key_present_in_pipeline_input_and_carried()
+    missing_carry_does_not_fire_on_a_join_output()
+    missing_carry_does_not_fire_on_a_fanin_union_output()
+    missing_carry_is_silent_multihop_through_a_preserve_transform()
+    missing_carry_does_not_fire_through_an_undeclared_envelope_transform()
+    missing_carry_does_not_fire_on_a_custom_opaque_node()
+    missing_carry_does_not_regress_closed_or_complete_paths()
+    missing_carry_fires_on_a_branch_read_too()
+    missing_carry_silent_on_a_provided_read()
+    missing_carry_render_read_names_render_unfilled_consequence()
+    missing_carry_branch_read_names_branch_default_consequence()
+    missing_carry_foreach_read_names_foreach_input_consequence()
+    missing_carry_fails_strict_with_exit_2()
+    missing_carry_lint_never_raises_on_malformed()
     print("ok")
 
 

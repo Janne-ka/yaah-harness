@@ -306,21 +306,22 @@ def main() -> None:
     _expect(_parse_subcommand(["list", R, "--json"]), action="list", root=R, json=True)
     # --json on the legacy form too
     _expect(_parse_cli([R, "--list", "--json"]), action="list", root=R, json=True)
-    # --json on a non-list action is an error
-    for bad in (["list", R, "--json", "--list"],):  # noise after the json flag
+    # --json is now valid on run and resume too (machine-readable outcome);
+    # position-independent, like --fake/--debug.
+    _expect(_parse_cli([R, "--json"]), action="run", root=R, json=True)
+    _expect(_parse_cli([R, "--json", "--resume", "b1"]), action="resume", root=R,
+            baton_id="b1", json=True)
+    _expect(_parse_cli([R, "--resume", "b1", "--json"]), action="resume", root=R,
+            baton_id="b1", json=True)
+    # --json on an action that has no machine-readable output IS still an error
+    for bad in (["list", R, "--json", "--list"],       # noise after the json flag
+                [R, "--clear", "--json"], [R, "--explain", "--json"]):
         try:
-            _parse_subcommand(bad)
+            (_parse_subcommand if bad[0] in ("list",) else _parse_cli)(bad)
         except SystemExit as e:
             assert e.code == 2, (bad, e.code)
         else:
             raise AssertionError("expected SystemExit for {!r}".format(bad))
-    for bad_legacy in ([R, "--json", "--resume", "b1"], [R, "--json"]):
-        try:
-            _parse_cli(bad_legacy)
-        except SystemExit as e:
-            assert e.code == 2, (bad_legacy, e.code)
-        else:
-            raise AssertionError("expected SystemExit for {!r}".format(bad_legacy))
     _expect(_parse_subcommand(["clear", R]), action="clear", root=R)
     _expect(_parse_subcommand(["explain", R]), action="explain", root=R)
     _expect(_parse_subcommand(["resume", R, "b1"]), action="resume", root=R,

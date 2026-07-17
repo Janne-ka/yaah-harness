@@ -79,6 +79,7 @@ def build(
     registry: Optional[Registry] = None,
     base_dir: Optional[str] = None,
     live_config_path: Optional[str] = None,
+    strict_resume: bool = True,
 ) -> Harness:
     validate_pipeline(config, base_path=base_dir)
     comms = comms or InProcessComms()
@@ -99,7 +100,8 @@ def build(
     for role, node, node_cfg in _built_nodes(config, registry, ctx, live):
         register(role, node, node_cfg)
     return Harness(comms, build_graph(config["graph"]),
-                   baton_store=baton_store, envelope_store=envelope_store, tracer=tracer)
+                   baton_store=baton_store, envelope_store=envelope_store, tracer=tracer,
+                   strict_resume=strict_resume)
 
 
 def _build_named(registry: Registry, spec: Dict[str, Any], ctx: BuildContext,
@@ -133,12 +135,14 @@ def _built_nodes(config: Dict[str, Any], registry: Registry, ctx: BuildContext,
 def harness_from_config(config: Dict[str, Any], comms: Comms,
                         *, baton_store: Optional[Any] = None,
                         envelope_store: Optional[Any] = None,
-                        tracer: Optional[Any] = None) -> Harness:
+                        tracer: Optional[Any] = None,
+                        strict_resume: bool = True) -> Harness:
     """Orchestrator side: build just the Graph + Harness over an existing Comms.
     Use with a distributed Comms whose nodes are served via serve_from_config()."""
     validate_pipeline(config)
     return Harness(comms, build_graph(config["graph"]),
-                   baton_store=baton_store, envelope_store=envelope_store, tracer=tracer)
+                   baton_store=baton_store, envelope_store=envelope_store, tracer=tracer,
+                   strict_resume=strict_resume)
 
 
 async def serve_from_config(

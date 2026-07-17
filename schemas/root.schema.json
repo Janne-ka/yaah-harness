@@ -230,6 +230,9 @@
       ],
       "type": "object"
     },
+    "strict_resume": {
+      "type": "boolean"
+    },
     "trace": {
       "additionalProperties": true,
       "properties": {

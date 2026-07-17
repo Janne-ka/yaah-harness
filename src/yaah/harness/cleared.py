@@ -15,7 +15,7 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Dict, Optional
 
 
 @dataclass
@@ -24,3 +24,10 @@ class Cleared:
     node: str                      # the stage/node that was cleared mid-flight
     clear_id: Optional[str] = None  # the address the clear matched (instance/node/'*')
     payload: dict = field(default_factory=dict)  # the clear envelope's payload
+
+    def to_json_dict(self) -> Dict[str, Any]:
+        """The machine-readable outcome shape for `run`/`resume --json` (CLI) and
+        the MCP run/resume handlers — the single source of truth both surfaces
+        emit, so their outcome JSON can't drift."""
+        return {"outcome": "cleared", "baton_id": self.baton_id,
+                "node": self.node, "payload": self.payload}

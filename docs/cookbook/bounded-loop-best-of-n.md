@@ -56,6 +56,25 @@ the rendered prompt as a "FEEDBACK (fix these and try again)" block
 notes would cause them to appear twice in the prompt — once via `{{feedback}}` in
 your template and once via the engine's auto-append. Use any non-reserved name.
 
+**Making the produce agent strict-render-safe.** `loop_feedback` is absent on the
+FIRST pass (the `tally` transform writes it only from the second iteration on), so a
+produce prompt with a bare `{{loop_feedback}}` cannot set `strict_render: true` — the
+first pass would fault with `render_unfilled_placeholders` before any loop has run.
+Mark the placeholder OPTIONAL with the `?` sigil so an early-pass absence renders
+empty instead of faulting:
+
+```
+Improve this artifact.
+
+{{?loop_feedback}}
+```
+
+Now the produce agent can run `strict_render: true` — it renders empty on pass 1,
+fills in from pass 2, and still faults loud on any genuinely-missing REQUIRED key
+(a bare `{{spec}}` you forgot to carry). `{{?key}}` is domain-free: it declares "this
+key is legitimately absent on early passes" at the exact use site, for any loop-seeded
+key, not just `loop_feedback`.
+
 ---
 
 ## The tally transform
@@ -231,7 +250,9 @@ Keep the guard rail in `tally` and ensure the script length matches `max_cycles`
    to the judge node — `carry` threads ONE key one hop; `sticky` threads MULTIPLE keys
    across the whole loop.
 4. Avoid naming your cross-loop feedback key `feedback` — see the reserved-key note in
-   the "two key payload fields" section.
+   the "two key payload fields" section. If you harden the produce agent with
+   `strict_render: true`, read the loop-seeded key with the optional sigil
+   (`{{?loop_feedback}}`) so the fresh first pass renders empty instead of faulting.
 5. Verify `tally`'s guard rail (`cycle > max_cycles → raise`) covers your loop bound.
 6. Run with the `fake_scripted` provider first — script enough entries for `max_cycles`
    calls each, and verify the final `best_artifact` is the highest-scoring attempt, not

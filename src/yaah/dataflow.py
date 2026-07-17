@@ -337,11 +337,100 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
     blocked_consumers: List[str] = []
     blocking_transforms: Set[str] = set()
 
-    def note_blocked(consumer: str) -> None:
+    def note_blocked(consumer: str) -> bool:
+        """Record the consolidated undeclared-envelope nudge for `consumer` if an opaque
+        transform upstream hid its provides. Returns True when it CLAIMED the consumer (a
+        culprit exists) — the missing-carry check below skips a consumer note_blocked owns,
+        so an opaque-blocked read is never ALSO flagged as a dropped carry."""
         culprits = tainted_ancestors(consumer)
         if culprits:
             blocked_consumers.append(consumer)
             blocking_transforms.update(culprits)
+            return True
+        return False
+
+    def _is_incomplete_reset_producer(pred: str) -> bool:
+        """Is stage `pred` a plain linear agent-style stage whose OUT-flow is an
+        incomplete RESET — the {raw}-only (+carry/+cwd) `parse:true` agent that carries
+        neither declaration nor proof of its parsed keys? That is the ONE producer shape
+        the missing-carry lint fires under. A parallel-shape stage (fork/fanin/fanout/
+        foreach) is EXCLUDED: its OUT-flow is `Flow(known, False, False)` too, but its
+        `known` is a join/merge intersection that legitimately omits keys a reduce/merge
+        delivers — firing there would false-positive on a working pipeline (runtime-probed
+        via the fork-rejoin case). Opaque producers (undeclared transforms, custom nodes)
+        are also excluded: their contract is `opaque`, not `reset`, so `note_blocked`
+        (undeclared transform) or a sound skip (custom) already owns them.
+
+        KNOWN LIMITATION (deliberate, conservative): this checks only the IMMEDIATE
+        producer. A multi-hop drop — incomplete-agent → args-transform (PRESERVE) →
+        render of the dropped key — is a real bug the immediate-producer gate misses
+        (the immediate predecessor is the preserve transform, not the reset). That is a
+        FALSE NEGATIVE (under-warn), never a false positive: widening to reverse-reachable
+        provenance would need a second taint class distinguishing agent-reset origins from
+        join/opaque origins (see the eval note), which is more machinery than the present
+        stakeholder needs. The direct agent→render/branch trap — the actual field-test
+        incident — IS caught."""
+        s = stages.get(pred)
+        if not isinstance(s, dict):
+            return False
+        if any(s.get(k) for k in ("fork", "fanin", "fanout", "foreach")):
+            return False
+        node_name = s.get("node")
+        if not isinstance(node_name, str):
+            return False
+        node = nodes.get(node_name)
+        if not isinstance(node, dict):
+            return False
+        c = resolve_contract(node.get("type"), node, contract_for=contract_for)
+        return c.mode == "reset" and not c.complete and not c.closed
+
+    # Per-consumer consequence of a DROPPED key — same message-selection
+    # discipline as render_msg/branch_msg/consumes_msg. Each read SITE fails
+    # differently, so carry_gap names the site's real consequence, not one
+    # blanket "render_unfilled_placeholders" (true only for render/consumes):
+    #   render/consumes -> the placeholder stays unfilled -> render_unfilled_placeholders
+    #   branch.on       -> absent field -> the run SILENTLY takes branch.default
+    #                      (harness._next_stage), every run
+    #   foreach         -> the fan-out fails with foreach_input (or fans out
+    #                      without its carry)
+    _CARRY_CONSEQUENCE = {
+        "render": "the read fails with render_unfilled_placeholders",
+        "branch": "the run SILENTLY takes branch.default every run (the absent "
+                  "field never matches a route)",
+        "foreach": "the fan-out fails with foreach_input (or fans out without "
+                   "its carry)",
+    }
+
+    def carry_gap(consumer: str, missing: List[str], known: "frozenset",
+                  producers: List[str], site: str = "render") -> Optional[str]:
+        """The missing-carry WARNING for a render/branch/consumes read whose flow is
+        neither `closed` nor `complete` (so the two severities above go silent) — the
+        2026-07-07 field-test trap: a read of a key an upstream `parse:true` agent
+        DROPPED (didn't carry, didn't declare). `producers` are the stages whose OUTPUT
+        this read sees (the CURRENT stage for `branch.on`, which reads its own node's
+        output; the reachable PREDECESSORS for a render/consumes read of the inbound
+        flow). `site` selects the per-consumer CONSEQUENCE clause (the read fails
+        differently at each site; only render/consumes dies with
+        render_unfilled_placeholders). Fires ONLY when EVERY producer is an
+        incomplete-reset agent stage (so a join/opaque consumer is not falsely flagged)
+        and returns None otherwise. WARNING, never an error: the model MAY re-emit the
+        key, so absence is probable-not-provable."""
+        live = [p for p in producers if pin.get(p) is not None]
+        if not live or not all(_is_incomplete_reset_producer(p) for p in live):
+            return None
+        who = ", ".join(sorted(repr(p) for p in live))
+        kept = sorted(known - {"raw"})
+        kept_clause = "RESETS the payload (keeping only raw)" if not kept else \
+                      "RESETS the payload to {}".format(kept)
+        consequence = _CARRY_CONSEQUENCE.get(site, _CARRY_CONSEQUENCE["render"])
+        return (
+            "stage {!r}: reads {} which the upstream agent stage(s) {} do NOT provide — a "
+            "`parse:true` agent with no output_schema/provides {}, so "
+            "the key is DROPPED and {} on any "
+            "run where the model doesn't happen to echo it. Add the key(s) to the agent's "
+            "`carry: [...]` if they should pass through unchanged, or declare them in the "
+            "agent's output_schema/`provides` if the model emits them. [lint: missing-carry]"
+            .format(consumer, missing, who, kept_clause, consequence))
 
     def branch_msg(s_name: str, on: str, known: "frozenset", hard: bool) -> str:
         if hard:
@@ -412,8 +501,12 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
             elif flow.complete:
                 if on not in flow.known:
                     warnings.append(branch_msg(s_name, on, flow.known, hard=False))
-            else:
-                note_blocked(s_name)
+            elif not note_blocked(s_name) and on not in flow.known:
+                # branch.on reads THIS stage's own node output → its producer is the
+                # stage itself, not its predecessors.
+                gap = carry_gap(s_name, [on], flow.known, [s_name], site="branch")
+                if gap:
+                    warnings.append(gap)
         # foreach reads payload[items] + each carry key from the stage's INBOUND flow
         # (ADR-0007 D5, design-eval #5). This is a STAGE-level read like branch.on —
         # the ENGINE fans out, not the per-item worker, so the node-consumes resolver
@@ -437,8 +530,11 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
                     "provides (provides {}). Declare an upstream provider. "
                     "[lint: foreach-key-unprovided]".format(
                         s_name, missing, sorted(pin_here.known - {"raw"})))
-            elif missing:
-                note_blocked(s_name)
+            elif missing and not note_blocked(s_name):
+                gap = carry_gap(s_name, missing, pin_here.known,
+                                preds.get(s_name, []), site="foreach")
+                if gap:
+                    warnings.append(gap)
         # a node's CONSUMES: keys it reads from the payload flowing INTO it (ADR-0006
         # symmetry — the node reports this, the checker holds no per-type knowledge). render
         # parses its `{{...}}`; a custom node declares `consumes: [...]`; others read nothing.
@@ -476,8 +572,12 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
                 missing = [k for k in needs if k not in pin_here.known]
                 if missing:
                     warnings.append(msg(s_name, missing, pin_here.known, hard=False))
-            else:
-                note_blocked(s_name)
+            elif not note_blocked(s_name):
+                missing = [k for k in needs if k not in pin_here.known]
+                if missing:
+                    gap = carry_gap(s_name, missing, pin_here.known, preds.get(s_name, []))
+                    if gap:
+                        warnings.append(gap)
 
     if blocked_consumers:
         warnings.append(

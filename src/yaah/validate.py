@@ -50,7 +50,7 @@ _ROOT_KEYS = frozenset({
     "transport", "trace", "state",
     "pipeline", "input",
     "decisions", "interactive", "run", "serve", "baton_ttl",
-    "live_config", "plugins",
+    "live_config", "plugins", "strict_resume",
 })
 
 
@@ -88,7 +88,7 @@ _STRING_KEYS = (
 )
 # `pipeline` (like `input`) is a path string OR an inline object — the schema,
 # the runtime, and `yaah validate` all accept both; checked separately below.
-_BOOL_KEYS = ("run", "interactive", "live_config")
+_BOOL_KEYS = ("run", "interactive", "live_config", "strict_resume")
 
 # Type enums and per-type spec keys are NOT hand-copied here: they are read from
 # the factory maps in `runtime_factories` (each entry is `(factory, spec-keys)`),
@@ -1317,6 +1317,14 @@ def _untrusted_msg(consumer: str, ntype: Any, key: str, producers: List[str]) ->
     ph = "{{" + key + "}}"
     fenced = "{{!" + key + "}}"
     prod = ", ".join(repr(p) for p in producers)
+    # A render can't fence at all (templating.fill leaves {{!key}} literal), so its
+    # ONLY per-site opt-out is `allow_untrusted: true` on the render node — the
+    # author's assertion that this output feeds a human/file, not a model prompt.
+    # A human_gate has no such flag (its ask goes to a human/AI operator to act on),
+    # so only render gets the extra remedy clause.
+    render_optout = (" — or, if the render's output feeds a human/file and not a "
+                     "model prompt, set allow_untrusted:true on the render"
+                     if ntype == "render" else "")
     return (
         "stage {c!r}: the {t} interpolates {ph} UNFENCED, but {k!r} is agent-authored "
         "(produced by {prod}). A {t} renders via the plain templater — it does NOT frame or "
@@ -1324,8 +1332,9 @@ def _untrusted_msg(consumer: str, ntype: Any, key: str, producers: List[str]) ->
         "the raw model text reaches the consumer (a human, an AI operator driving the gate, or "
         "a rendered document) as-is. HEURISTIC, not an injection-safety proof: sanitize the "
         "value in an upstream transform, or confirm the consumer cannot act on injected "
-        "instructions. [lint: untrusted-unfenced]".format(
-            c=consumer, t=ntype, ph=ph, k=key, prod=prod, fenced=fenced))
+        "instructions{optout}. [lint: untrusted-unfenced]".format(
+            c=consumer, t=ntype, ph=ph, k=key, prod=prod, fenced=fenced,
+            optout=render_optout))
 
 
 def _lint_untrusted_unfenced(nodes: Dict[str, Any], stages: Dict[str, Any],
@@ -1379,6 +1388,12 @@ def _lint_untrusted_unfenced(nodes: Dict[str, Any], stages: Dict[str, Any],
             continue
         text = _consumer_template(node, base_path)
         if not text:
+            continue
+        # `allow_untrusted: true` opts a RENDER site out (it can't fence, and its
+        # output feeds a human/file per the author's assertion). Only render honors
+        # it — a human_gate has no such opt-out (its ask goes to a human/AI operator
+        # to act on). A non-render node setting the key is simply ignored here.
+        if node.get("type") == "render" and node.get("allow_untrusted"):
             continue
         producers_of: Dict[str, List[str]] = {}
         for anc in _ancestors(preds, c_name):

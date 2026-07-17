@@ -18,7 +18,8 @@ from ..templating import fill as _fill
 
 class RenderNode(Node):
     def __init__(self, *, template: Optional[str] = None, template_file: Optional[str] = None,
-                 out_path: Optional[str] = None, allow_unfilled: bool = False) -> None:
+                 out_path: Optional[str] = None, allow_unfilled: bool = False,
+                 allow_untrusted: bool = False) -> None:
         if template is None and template_file is None:
             raise ValueError("RenderNode needs template= or template_file=")
         self._template = template
@@ -29,6 +30,16 @@ class RenderNode(Node):
         # is the project's worst fault class, so it must be loud, not observable.
         # Set allow_unfilled=true for a template with intentionally-optional fields.
         self._allow_unfilled = allow_unfilled
+        # allow_untrusted is a LINT-only opt-out (parallel to allow_unfilled): a
+        # render CANNOT fence — templating.fill leaves {{!key}} literal — so the
+        # untrusted-unfenced lint has no in-place remedy on a render. Setting this
+        # is the author's assertion that this render's output feeds a HUMAN/FILE,
+        # not a model prompt, so the untrusted-text warning doesn't apply. It has
+        # no RUNTIME effect (the render already never frames); it only silences the
+        # render's own untrusted-unfenced warnings. Held here so the field is
+        # visible on the node (symmetry with allow_unfilled) even though the check
+        # lives in validate._lint_untrusted_unfenced.
+        self._allow_untrusted = allow_untrusted
         self._cache: Optional[Tuple[float, str]] = None  # (mtime, content), mtime-aware (#5)
 
     async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
@@ -56,7 +67,10 @@ class RenderNode(Node):
                 "render_unfilled_placeholders",
                 "no payload value for: {}".format(", ".join(unfilled)),
                 "add a parse step before this render, or set allow_unfilled:true "
-                "if these fields are intentionally optional"
+                "if these fields are intentionally optional",
+                # the unfilled key LIST as machine data — a debugger reads the
+                # exact keys off `data` instead of re-parsing the prose message.
+                data={"unfilled": list(unfilled)},
             )).to_envelope(input)
         if self._out_path:
             try:

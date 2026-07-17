@@ -45,7 +45,20 @@ from .tool_loop import run_tool_loop
 # unguessable per-render token so a crafted value can't forge the closing fence and
 # break out into instructions. The ENGINE only provides the mechanism; the prompt
 # author (app) declares which fields are untrusted — the engine stays domain-free.
-_PLACEHOLDER = re.compile(r"{{\s*(!?)\s*(\w+)\s*}}")
+# A `?` prefix — {{?name}} — marks the placeholder OPTIONAL: a key legitimately absent
+# on early passes (the cross-loop `loop_feedback` convention is the canonical case — a
+# tally transform writes it only from the SECOND pass). An absent `{{?name}}` renders
+# EMPTY (like a present-but-empty value) instead of faulting under strict_render, so an
+# author can harden a feedback-loop agent with strict_render AND still fault on a
+# genuinely-missing REQUIRED key (bare {{name}}). Declared at the exact use site and
+# domain-free (no convention string baked into the engine), it generalizes the seam
+# beyond loop feedback. The two markers compose in EITHER order — {{?!name}} and
+# {{!?name}} both mean optional AND untrusted — because the sigils are a SET, not a
+# sequence: `optional = "?" in flags`, `untrusted = "!" in flags` (below). Accepting
+# both orders closes the unsafe gap where {{!?name}} slipped through unmatched and its
+# value landed UNFENCED. A degenerate double ({{??name}}/{{!!name}}) collapses to the
+# single sigil by the same membership test.
+_PLACEHOLDER = re.compile(r"{{\s*([?!]{0,2})\s*(\w+)\s*}}")
 
 # Keys the ENGINE manages (injects or special-cases), so strict_render must NEVER fault
 # on them even when absent: `tool_manifest` is injected (empty when a backend has
@@ -541,8 +554,18 @@ class Agent(Node):
         missing: list = []  # Y1: keys with no value, collected for a single loud failure
 
         def sub(m: "re.Match") -> str:
-            untrusted, key = m.group(1), m.group(2)
+            # sigils are a SET, not a sequence: {{?!k}} and {{!?k}} are identical,
+            # and a doubled sigil ({{??k}}/{{!!k}}) folds to its single meaning.
+            flags, key = m.group(1), m.group(2)
+            optional, untrusted = "?" in flags, "!" in flags
             if key not in ns:
+                # {{?key}}: the author declared this key legitimately-absent-on-early-
+                # passes. An absent optional renders EMPTY (like a present-but-empty
+                # value) and never faults — the same effect whether strict or not, since
+                # `?` is a render directive, not a strict-only exemption. This is the
+                # domain-free generalization of the {{feedback}} first-pass carve-out.
+                if optional:
+                    return ""
                 # Y1: under strict_render an unknown key (other than an engine-injected
                 # one) is a fault — record it; we raise once, after the full pass, so the
                 # error names every missing key. Default stays leave-literal.

@@ -230,30 +230,38 @@ def scenario_cli_parser() -> None:
     # documents itself via -h/--help.
     from yaah.runtime import _parse_cli
 
-    assert _parse_cli(["root.json"]) == {"action": "run", "root": "root.json", "fake": False, "debug": False}
+    # run/resume now carry a `json` flag (machine-readable outcome on stdout;
+    # additive — default False keeps the prose path byte-identical).
+    assert _parse_cli(["root.json"]) == {"action": "run", "root": "root.json", "fake": False, "debug": False, "json": False}
     assert _parse_cli(["root.json", "--list"]) == {"action": "list", "root": "root.json", "fake": False, "debug": False, "json": False}
     assert _parse_cli(["root.json", "--clear"]) == {"action": "clear", "root": "root.json", "fake": False, "debug": False}
     assert _parse_cli(["root.json", "--resume", "B"]) == {
-        "action": "resume", "root": "root.json", "fake": False, "debug": False,
+        "action": "resume", "root": "root.json", "fake": False, "debug": False, "json": False,
         "baton_id": "B", "approver": None, "decision_file": None}
     assert _parse_cli(["root.json", "--resume", "B", "d.json"]) == {
-        "action": "resume", "root": "root.json", "fake": False, "debug": False,
+        "action": "resume", "root": "root.json", "fake": False, "debug": False, "json": False,
         "baton_id": "B", "approver": None, "decision_file": "d.json"}
     # --approver: identity for the resume audit span; position-independent
     assert _parse_cli(["root.json", "--resume", "B", "d.json", "--approver", "alice"]) == {
-        "action": "resume", "root": "root.json", "fake": False, "debug": False,
+        "action": "resume", "root": "root.json", "fake": False, "debug": False, "json": False,
         "baton_id": "B", "approver": "alice", "decision_file": "d.json"}
     assert _parse_cli(["root.json", "--resume", "--approver", "bob", "B"]) == {
-        "action": "resume", "root": "root.json", "fake": False, "debug": False,
+        "action": "resume", "root": "root.json", "fake": False, "debug": False, "json": False,
         "baton_id": "B", "approver": "bob", "decision_file": None}
+    # --json is machine-readable output on run and resume (order-independent —
+    # stripped before the action parse, like --fake/--debug)
+    assert _parse_cli(["root.json", "--json"]) == {"action": "run", "root": "root.json", "fake": False, "debug": False, "json": True}
+    assert _parse_cli(["root.json", "--resume", "B", "--json"]) == {
+        "action": "resume", "root": "root.json", "fake": False, "debug": False, "json": True,
+        "baton_id": "B", "approver": None, "decision_file": None}
 
     # --fake / --debug are order-independent and compose with each action
-    assert _parse_cli(["root.json", "--fake"]) == {"action": "run", "root": "root.json", "fake": True, "debug": False}
-    assert _parse_cli(["root.json", "--debug"]) == {"action": "run", "root": "root.json", "fake": False, "debug": True}
+    assert _parse_cli(["root.json", "--fake"]) == {"action": "run", "root": "root.json", "fake": True, "debug": False, "json": False}
+    assert _parse_cli(["root.json", "--debug"]) == {"action": "run", "root": "root.json", "fake": False, "debug": True, "json": False}
     assert _parse_cli(["root.json", "--fake", "--list"]) == {"action": "list", "root": "root.json", "fake": True, "debug": False, "json": False}
     assert _parse_cli(["root.json", "--list", "--fake"]) == {"action": "list", "root": "root.json", "fake": True, "debug": False, "json": False}
     assert _parse_cli(["root.json", "--debug", "--fake", "--resume", "B"]) == {
-        "action": "resume", "root": "root.json", "fake": True, "debug": True,
+        "action": "resume", "root": "root.json", "fake": True, "debug": True, "json": False,
         "baton_id": "B", "approver": None, "decision_file": None}
 
     # unknown flag, missing root, extra args, --resume without id — all exit

@@ -294,7 +294,8 @@ def _build_render(spec: Dict[str, Any], ctx: BuildContext) -> Node:
     if out and not _os.path.isabs(out) and ctx.base_dir:
         out = _os.path.join(ctx.base_dir, out)
     return RenderNode(template=spec.get("template_text"), template_file=tfile, out_path=out,
-                      allow_unfilled=bool(spec.get("allow_unfilled", False)))
+                      allow_unfilled=bool(spec.get("allow_unfilled", False)),
+                      allow_untrusted=bool(spec.get("allow_untrusted", False)))
 
 
 def default_registry() -> Registry:

@@ -31,7 +31,7 @@ from .fork_coordinator import ForkCoordinator
 from .graph import Graph
 from .span_emitter import SpanEmitter
 from .stage import Stage
-from .stage_failed import StageFailed
+from .stage_failed import DecisionRejected, StageFailed
 from .suspended import Suspended
 
 Outcome = Union[Done, Suspended, Cleared]
@@ -128,9 +128,17 @@ class Harness:
                  wall_clock: Callable[[], float] = time.time,
                  baton_store: Optional[BatonStore] = None,
                  envelope_store: Optional[EnvelopeStore] = None,
-                 tracer: Optional[object] = None) -> None:
+                 tracer: Optional[object] = None,
+                 strict_resume: bool = True) -> None:
         self.comms = comms
         self.graph = graph
+        # DEFAULT-ON resume-time decision-form enforcement (N1, TIER-0): when a
+        # parked gate declared a `form`, a submitted decision is validated against
+        # that form's schema BEFORE it is merged/routed; a nonconforming decision
+        # raises DecisionRejected instead of silently falling to the branch
+        # default. `strict_resume=False` (root config) restores the old lenient
+        # blind-merge. The check is a no-op for a gate with no form declared.
+        self._strict_resume = strict_resume
         # Run state lives behind a BatonStore (default in-memory = today's behavior;
         # a durable StoreBackend extender makes parked gates survive restart and resumable
         # cross-process). The harness only calls save/load/delete/sweep/list.
@@ -270,6 +278,13 @@ class Harness:
                 "baton {!r} has no suspended stage (engine invariant violation: "
                 "a suspended baton should always carry its stage); this is a "
                 "bug — report with the corresponding trace".format(baton_id))
+        # ENFORCE the gate's decision form BEFORE any state mutation and BEFORE
+        # `_settle` (N1). A raise here evicts NOTHING: the persisted baton is
+        # untouched until `_settle.save/delete`, and `load` returned a detached
+        # copy — so a rejected decision leaves the gate PARKED and re-submittable.
+        # NEVER move this into `_drive`/`_settle`: a StageFailed there DELETES the
+        # baton (see `_settle`), which would strand a resumable run on a typo.
+        self._enforce_decision_form(baton_id, baton.pending, response)
         baton.status = "running"
         stage = self.graph.stages[baton.stage]
         pending = baton.pending  # the gate's EMITTED artifact, captured before the merge clears it
@@ -291,6 +306,44 @@ class Harness:
                                   decision_diff=self._decision_diff(pending, response))
         baton.stage = self._next_stage(stage, resume_input)
         return await self._settle(baton, resume_input)
+
+    def _enforce_decision_form(self, baton_id: str, pending: Optional[Envelope],
+                               response: Envelope) -> None:
+        """Reject a resume decision that violates the parked gate's declared form
+        (N1, TIER-0). No-op when strict_resume is off, when the gate parked
+        WITHOUT a prior artifact (a fanout/foreach member's bare AWAIT — nowhere
+        the form could have been stamped), or when no `form` was declared (legacy
+        gates are unchanged).
+
+        Validates the human's RAW decision (`response.payload`), NOT the merged
+        `resume_input`: the form describes what the human submits, and the merge
+        would fold in the gate's emitted artifact keys (`raw`, `findings`, ...)
+        which the form never described. `form`/`decision_schema` live on the
+        parked artifact (`pending.payload`) — HumanGate stamps them on the AWAIT
+        envelope, the harness parks that (same source `yaah baton-schema` reads).
+
+        The checker is `yaah.jsonschema.check_schema` (the exact one an agent's
+        `output_schema` uses) against `decision_forms.lookup(...)`'s schema — the
+        contract and checker already existed; this seam simply wires them. An
+        unknown/misconfigured form (lookup raises) FAILS LOUD as the SAME family
+        — only reachable via hand-edited durable state, since the builder rejects
+        unknown forms at load time (defense in depth)."""
+        if not self._strict_resume or pending is None:
+            return
+        form = pending.payload.get("form")
+        if form is None:
+            return  # legacy gate: no form declared → no validation
+        from ..jsonschema import check_schema
+        from .decision_forms import lookup
+        try:
+            resolved = lookup(form, inline_schema=pending.payload.get("decision_schema"))
+        except ValueError as e:
+            # the gate's OWN form is invalid (author bug via tampered state) —
+            # loud, same exception family, message names the form itself.
+            raise DecisionRejected(baton_id, form, [str(e)], form_invalid=True) from e
+        errors = check_schema(response.payload, resolved["schema"])
+        if errors:
+            raise DecisionRejected(baton_id, form, errors)
 
     @staticmethod
     def _merge_decision(pending: Optional[Envelope], response: Envelope) -> Envelope:

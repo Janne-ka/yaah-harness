@@ -54,9 +54,13 @@ pipeline either finished or never paused — there's nothing to drive.
 yaah baton-schema <root> <baton-id>
 ```
 
-This is the **single source of truth** for what `decision.json` must contain.
-Output is a JSON Schema; compose `decision.json` to match. The form falls in
-one of four shapes (the catalog from [ADR-0002](../../../docs/decisions/0002-decision-forms.md)):
+This is the **single source of truth** for what `decision.json` must contain —
+and it is now **binding**: the engine validates your decision against this schema
+at `resume` (root default `strict_resume: true`). A nonconforming decision is
+**rejected** (`decision_rejected`, exit 1); the gate stays parked, so fix
+`decision.json` and re-submit. Output is a JSON Schema; compose `decision.json`
+to match. The form falls in one of four shapes (the catalog from
+[ADR-0002](../../../docs/decisions/0002-decision-forms.md)):
 
 | Declared `form:` | What `decision.json` looks like |
 |---|---|

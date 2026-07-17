@@ -40,10 +40,7 @@ class Verdict:
         payload = {
             "status": self.status,
             "severity": self.severity,
-            "failures": [
-                {"code": f.code, "message": f.message, "fix_hint": f.fix_hint}
-                for f in self.failures
-            ],
+            "failures": [f.to_dict() for f in self.failures],
         }
         if in_reply_to is not None:  # preserve the correlation chain
             return in_reply_to.reply_with(Kind.VERDICT, payload)

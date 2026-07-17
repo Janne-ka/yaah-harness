@@ -143,9 +143,15 @@ class McpServer:
             with contextlib.redirect_stdout(io.StringIO()):
                 out = await tool["handler"](arguments)
         except Exception as e:  # tool-level failure -> isError result, session lives on
+            # A structured failure (StageFailed carries the verdict) serializes its
+            # machine-readable object as the content, so the client parses stage +
+            # failures[code/message/fix_hint/data] instead of a flattened str(e).
+            # Anything else keeps the prose "Type: message" — additive, no regression.
+            structured = getattr(e, "to_failure_json", None)
+            text = (json.dumps(structured(), default=str) if callable(structured)
+                    else "{}: {}".format(type(e).__name__, e))
             return _result(msg_id, {
-                "content": [{"type": "text",
-                             "text": "{}: {}".format(type(e).__name__, e)}],
+                "content": [{"type": "text", "text": text}],
                 "isError": True,
             })
         return _result(msg_id, {

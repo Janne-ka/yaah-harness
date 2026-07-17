@@ -162,6 +162,11 @@ async def _assemble_harness(root: Dict[str, Any], base: str, *, store: Any) -> A
                 "or drop live_config")
         live_path = _rel(base, pipeline_ref)
     roles = _resolve_serve(root.get("serve", "all"), pipeline)
+    # DEFAULT-ON resume-time decision-form enforcement (N1): a gate's declared
+    # `form` becomes BINDING at resume. `strict_resume: false` opts out (blind
+    # merge, the pre-enforcement behavior). Threaded into the Harness (both the
+    # in-proc build and the orchestrator-only harness_from_config).
+    strict_resume = bool(root.get("strict_resume", True))
 
     # One injected state store backs the resume-cursor (BatonStore) and
     # execute-once (IdempotencyStore); its lifecycle belongs to the caller's
@@ -178,13 +183,14 @@ async def _assemble_harness(root: Dict[str, Any], base: str, *, store: Any) -> A
                                          live_config_path=live_path)
         print("served:", served)
         return harness_from_config(pipeline, comms, baton_store=baton_store,
-                                   envelope_store=env_store, tracer=tracer)
+                                   envelope_store=env_store, tracer=tracer,
+                                   strict_resume=strict_resume)
     # in-process: build registers everything
     return build(pipeline, comms=comms, backend=backend, prompt_source=prompts,
                  data_source=data, data_sink=sink, mcp_source=mcp,
                  idempotency_store=idem_store, baton_store=baton_store,
                  envelope_store=env_store, tracer=tracer, base_dir=base,
-                 live_config_path=live_path)
+                 live_config_path=live_path, strict_resume=strict_resume)
 
 
 def _seed_task(root: Dict[str, Any], base: str) -> "Tuple[Envelope, Dict[str, Any]]":

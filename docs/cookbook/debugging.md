@@ -146,6 +146,86 @@ response capture is a planned trace contributor; until it ships, the
 state store + the agent's stage-attached input payload are how to see
 "what was actually said."
 
+## 7 — diagnose a dead run from JSON (`run --json`)
+
+When a run dies, you don't have to read the prose `pipeline failed: ...` line and
+guess. Add `--json` to `run` or `resume` and the failure comes back as one JSON
+object on stdout — the exit code is unchanged (still non-zero), so scripts and CI
+keep working.
+
+```bash
+yaah run root.json --json
+```
+
+A hard stage failure prints (this is a real blob from a run whose `test`
+validator exited non-zero):
+
+```json
+{
+  "outcome": "failed",
+  "stage": "build",
+  "failures": [
+    {
+      "code": "shell_exit",
+      "message": "exit 1 != expected 0",
+      "fix_hint": ""
+    }
+  ]
+}
+```
+
+The loop is: **parse `outcome` → read `stage` + `failures` → act on `code` +
+`fix_hint` → re-validate.**
+
+1. **`outcome`** is one of `failed` / `done` / `suspended` (and `cleared`).
+   Branch on it first.
+2. On `failed`, **`stage`** names the stage that died and **`failures[]`** is the
+   list of what broke. Each entry has `code` (a stable machine string you can
+   switch on), `message` (the human detail), `fix_hint` (what to do), and — for
+   codes that carry structured fields — an optional `data` object.
+3. **Act on the `code`.** `shell_exit` above means a validator command failed;
+   read `message` for the exit code. When a code carries `data`, use it instead
+   of re-parsing the prose — e.g. a render that failed on an unfilled placeholder
+   hands you the exact keys:
+
+   ```json
+   {
+     "outcome": "failed",
+     "stage": "render",
+     "failures": [
+       {
+         "code": "render_unfilled_placeholders",
+         "message": "no payload value for: title",
+         "fix_hint": "add a parse step before this render, or set allow_unfilled:true if these fields are intentionally optional",
+         "data": { "unfilled": ["title"] }
+       }
+     ]
+   }
+   ```
+
+   `data.unfilled` is the placeholder list the render couldn't fill — almost
+   always a missing parse step (an agent's reply is a string in `payload["raw"]`
+   until a `transform` parses and merges it).
+4. **Re-validate** after the fix: `yaah validate root.json` catches load-time
+   mistakes before you spend another run.
+
+A **succeeding** run prints `{"outcome": "done", "baton_id": ..., "payload":
+{...}}` — the final envelope's payload, structured, so you can read the result
+without scraping the `RESULT:` repr. A run that **parks at a gate** prints
+`{"outcome": "suspended", "baton_id": ..., "awaiting": ..., "concerns": [...],
+"ask": ...}` — the same fields the prose `GATE` line shows; drive it with
+`baton-schema` → `resume` (see §4). `resume --json` uses the identical shapes.
+Note the suspended outcome has no `stage` field (the outcome object doesn't
+carry one) — when you need the parking stage, `yaah list root.json --json`
+shows it per baton.
+
+Over MCP (`mcp-serve`) the `run` / `resume` tools return the same structured
+failure object in the `isError` content, so an agent client parses it the same
+way instead of scraping a flattened error string.
+
+Use when: a run failed and you want to act on the failure programmatically (a
+debugger agent, a CI gate, a repair loop) rather than eyeball the prose.
+
 ## Common patterns
 
 | Symptom | First check | If that's clean |
@@ -154,6 +234,7 @@ state store + the agent's stage-attached input payload are how to see
 | "It worked yesterday" | `yaah doctor` (env changed?) | `yaah explain` (config diverged?) |
 | Pipeline hangs / doesn't return | `yaah list` (parked at a gate?) | check NATS transport timeouts |
 | Run exits but output is wrong | `yaah trace --pretty --corr <id>` | inspect baton in `state.dir` |
+| Need the failure as data (script / agent / CI) | `yaah run root.json --json` | act on `code` + `fix_hint`, `data` when present |
 | Cost is higher than expected | `yaah trace --cost prices.json` | per-model rollup; look for retry loops |
 | Same task, two different results | `yaah trace --pretty --last 2` | compare stage trees + retry signal |
 | Some stage is slow | `yaah trace --pretty` | look at `duration_ms` per stage |

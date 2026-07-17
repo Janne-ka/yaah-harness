@@ -15,6 +15,14 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+# DELIBERATE NON-FEATURE: this render/gate templater does NOT recognize the
+# agent-prompt dialect's `?`/`!` sigils (agents/agent.py::_PLACEHOLDER — `{{?key}}`
+# optional, `{{!key}}` untrusted-fenced). Those sigils are not `\w`, so a `{{?key}}`
+# or `{{!key}}` in a render template does not match here and passes through as a
+# LITERAL. Per-key optionality and per-key fencing in render templates are a
+# deliberate non-feature until an author asks (a render output feeds a human/file,
+# not a model prompt, so fencing has no consumer here; whole-node optionality is
+# `allow_unfilled`). See .notes/deferred-ledger-2026-07-07.md §A.
 PLACEHOLDER = re.compile(r"{{\s*(\w+)\s*}}")
 
 

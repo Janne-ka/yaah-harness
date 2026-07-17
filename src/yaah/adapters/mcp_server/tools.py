@@ -23,7 +23,6 @@ import os
 import sys
 from typing import Any, Dict, List, Tuple
 
-from ...harness import Cleared, Done, Suspended
 from ...plugins import load_plugins
 from ...runtime_factories import _read_json
 from ...validate import split_diagnostics, split_lint_id, validate_config, validate_root
@@ -43,20 +42,16 @@ def _load_root(root_path: str) -> Tuple[Dict[str, Any], str]:
 
 
 def _outcome_json(out: Any) -> Dict[str, Any]:
-    """One JSON shape per Outcome type — what `run`/`resume` hand the client.
+    """The JSON shape `run`/`resume` hand the client — dispatched to the
+    Outcome's own `to_json_dict`, the single source of truth shared with
+    `yaah run --json` (cli._outcome_json) so the two surfaces can't drift.
     StageFailed is an EXCEPTION, not an Outcome; it propagates to the server's
-    tools/call wrapper and comes back as isError:true."""
-    if isinstance(out, Done):
-        return {"outcome": "done", "baton_id": out.baton_id,
-                "payload": out.output.payload}
-    if isinstance(out, Suspended):
-        return {"outcome": "suspended", "baton_id": out.baton_id,
-                "awaiting": out.awaiting,
-                "concerns": [dict(c) for c in out.concerns],
-                "ask": out.ask}
-    if isinstance(out, Cleared):
-        return {"outcome": "cleared", "baton_id": out.baton_id,
-                "node": out.node, "payload": out.payload}
+    tools/call wrapper and comes back as isError:true — with its structured
+    failure object (StageFailed.to_failure_json: {outcome:"failed", stage,
+    failures[]}) as the content, so a debugger parses it instead of str(e)."""
+    to_json = getattr(out, "to_json_dict", None)
+    if to_json is not None:
+        return to_json()
     return {"outcome": type(out).__name__.lower(), "detail": str(out)}
 
 
