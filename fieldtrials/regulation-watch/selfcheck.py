@@ -70,116 +70,120 @@ def _edit(path, old, new):
     open(path, "w", encoding="utf-8").write(s.replace(old, new))
 
 
-# --- L1: missing-carry warning present at validate --------------------------------------
+def _fixforward_l3(d):
+    """Fix L3 in a throwaway part-b: remove the phantom `reject` route from the
+    gate branch so `gate-route-not-in-form` no longer blocks validate/run.
+    This lets other checks exercise their own traps on the pristine project."""
+    ppath = os.path.join(d, "pipeline.json")
+    pj = json.load(open(ppath, encoding="utf-8"))
+    gate_branch = pj["graph"]["stages"]["gate"]["branch"]
+    gate_branch["routes"] = {k: v for k, v in gate_branch["routes"].items()
+                              if k != "reject"}
+    json.dump(pj, open(ppath, "w", encoding="utf-8"), indent=2)
+
+
+# --- L3: gate-route-not-in-form fires as a HARD ERROR at validate ---------------
+
+def check_l3_lint_rescued():
+    """L3 is now a lint-rescued trap (gate-route-not-in-form ERROR at validate).
+    Verifies:
+    1. The pristine project fails validate --json with a gate-route-not-in-form
+       error (not just a warning) — builders see it immediately.
+    2. The fix (dropping the phantom route) clears the error.
+    3. A `approve_or_revise` form upgrade (keeping both routes renamed) also works.
+    """
+    d = _fresh_partb()
+    v = _validate_json(d)
+
+    # 1. Hard error present, not merely a warning.
+    assert v["errors"], ("L3: expected gate-route-not-in-form to be a hard ERROR", v)
+    err_msgs = [e["message"] for e in v["errors"]]
+    assert any("gate-route-not-in-form" in m for m in err_msgs), (
+        "L3: expected gate-route-not-in-form in errors", v)
+    assert any("reject" in m for m in err_msgs), (
+        "L3: error should name the dead 'reject' route", v)
+    assert any("approve" in m for m in err_msgs), (
+        "L3: error should name the form that can't produce 'reject'", v)
+    # Exit code: validate --json exits 1 on errors.
+    rc, out, err = _cli(["validate", "root.local.json", "--json"], d)
+    assert rc == 1, ("L3: validate --json should exit 1 on hard error", rc)
+
+    # 2. Fix A — drop the phantom route: errors clear.
+    d2 = _fresh_partb()
+    _fixforward_l3(d2)
+    v2 = _validate_json(d2)
+    assert not v2["errors"], ("L3 fix-A: dropping reject route should clear errors", v2)
+
+    # 3. Fix B — upgrade form to approve_or_revise and rename route to `revise`.
+    d3 = _fresh_partb()
+    ppath = os.path.join(d3, "pipeline.json")
+    pj = json.load(open(ppath, encoding="utf-8"))
+    pj["nodes"]["role:gate"]["form"] = "approve_or_revise"
+    routes = pj["graph"]["stages"]["gate"]["branch"]["routes"]
+    routes["revise"] = routes.pop("reject")
+    json.dump(pj, open(ppath, "w", encoding="utf-8"), indent=2)
+    v3 = _validate_json(d3)
+    assert not v3["errors"], ("L3 fix-B: approve_or_revise + revise route should clear errors", v3)
+
+    print("PASS L3 — gate-route-not-in-form fires as a hard validate ERROR; "
+          "both fix paths (drop route / approve_or_revise + rename) clear it")
+
+
+# --- L1: missing-carry warning present at validate (after L3 is fixed) ----------
 
 def check_l1_missing_carry():
     d = _fresh_partb()
+    # L3 fires first as a hard error — fix it so validate can surface L1's warning.
+    _fixforward_l3(d)
     v = _validate_json(d)
     ids = [w["id"] for w in v["warnings"]]
-    assert "missing-carry" in ids, ("L1: expected a missing-carry warning", v)
+    assert "missing-carry" in ids, ("L1: expected a missing-carry warning after L3 fixed", v)
     msg = next(w["message"] for w in v["warnings"] if w["id"] == "missing-carry")
     assert "high_impact" in msg, ("L1: missing-carry should name high_impact", msg)
-    assert not v["errors"], ("L1: validate should have no hard errors", v["errors"])
-    print("PASS L1 — missing-carry warning present (names 'high_impact')")
+    assert not v["errors"], ("L1: validate should have no hard errors once L3 is fixed", v["errors"])
+    print("PASS L1 — missing-carry warning present after L3 fixed (names 'high_impact')")
 
 
-# --- L2: loop-key mismatch is SILENT (no lint) ------------------------------------------
+# --- L2: loop-key mismatch is SILENT (no lint) ----------------------------------
 
 def check_l2_silent():
+    # Structural check: draft.md reads the decoy key (the one tally never writes).
+    draft_path = os.path.join(PART_B, "prompts", "draft.md")
+    draft_text = open(draft_path, encoding="utf-8").read()
+    assert "{{?judge_notes}}" in draft_text, (
+        "L2 MISSING: draft.md should read {{?judge_notes}} (the decoy key tally never writes). "
+        "The L2 trap requires a key mismatch between the loop-guidance placeholder and the key "
+        "tally actually writes (loop_feedback). Restore the {{?judge_notes}} line to draft.md.")
+
+    # Confirm tally writes `loop_feedback`, not `judge_notes`.
+    tally_path = os.path.join(PART_B, "transforms.py")
+    tally_text = open(tally_path, encoding="utf-8").read()
+    assert '"loop_feedback"' in tally_text or "'loop_feedback'" in tally_text, (
+        "L2: tally should write loop_feedback (the key the prompt does NOT read)")
+    assert "judge_notes" not in tally_text, (
+        "L2: tally must NOT write judge_notes (that would defuse the decoy)")
+
+    # Runtime check: after fixing L3, validate shows only L1 as a warning.
+    # A new lint for the loop-key mismatch would add a second warning and break
+    # the trial's "L2 is doc-only" premise — detect that immediately.
     d = _fresh_partb()
+    _fixforward_l3(d)
     v = _validate_json(d)
     ids = [w["id"] for w in v["warnings"]]
-    # The only strict-blocking lint on the pristine project is L1. If a NEW lint
-    # ever fires (e.g. a loop-key-mismatch rule), L2 stops being doc-only and the
-    # answer key must change — so we assert the warning set is exactly {missing-carry}.
     assert set(ids) == {"missing-carry"}, (
         "L2: expected the only lint to be missing-carry (L2 is doc-only). "
-        "A new lint here may mean L2 is no longer silent — re-read answer-key.md.", ids)
-    print("PASS L2 — loop-key mismatch is silent (no lint beyond L1)")
-
-
-# --- L3: dead route is silent at validate; form IS enforced on resume -------------------
-
-def _fixforward_to_gate(d):
-    """Fix-forward L1/L4/L5 in a throwaway part-b so a run REACHES and parks at
-    the `gate` stage — leaving L3 (approve form + phantom reject route) intact.
-    Returns the parked baton id."""
-    # L1: declare classify output; L4: make {{loop_feedback}} optional in draft;
-    # L5: give the judge fake reply its required `notes` key.
-    ppath = os.path.join(d, "pipeline.json")
-    pj = json.load(open(ppath, encoding="utf-8"))
-    pj["nodes"]["role:classify"]["output_schema"] = {
-        "type": "object",
-        "properties": {"impact_area": {"type": "string"}, "high_impact": {"type": "boolean"}},
-        "required": ["impact_area", "high_impact"],
-    }
-    # sanity: the gate really is the approve-form + reject-route shape L3 describes
-    assert pj["nodes"]["role:gate"]["form"] == "approve", "L3 setup: gate form drifted"
-    assert "reject" in pj["graph"]["stages"]["gate"]["branch"]["routes"], "L3 setup: reject route gone"
-    json.dump(pj, open(ppath, "w", encoding="utf-8"), indent=2)
-    _edit(os.path.join(d, "prompts", "draft.md"), "{{loop_feedback}}", "{{?loop_feedback}}")
-    # the judge fake reply is a JSON STRING inside root.local.json, so its quotes
-    # are backslash-escaped on disk — match the escaped form to add `notes` (L5).
-    _edit(os.path.join(d, "root.local.json"),
-          '{\\"verdict\\": \\"pass\\"}', '{\\"verdict\\": \\"pass\\", \\"notes\\": \\"ok\\"}')
-    rc, out, err = _cli(["run", "root.local.json", "--json"], d)
-    o = json.loads(out)
-    assert o["outcome"] == "suspended", ("L3 setup: run should park at the gate", rc, o, err)
-    return o["baton_id"]
-
-
-def check_l3_form_enforced_on_resume():
-    d = _fresh_partb()
-    # 1. Silent at VALIDATE — the phantom reject route trips no lint (unchanged).
-    ppath = os.path.join(d, "pipeline.json")
-    pj = json.load(open(ppath, encoding="utf-8"))
-    pj["nodes"]["role:classify"]["output_schema"] = {
-        "type": "object",
-        "properties": {"impact_area": {"type": "string"}, "high_impact": {"type": "boolean"}},
-        "required": ["impact_area", "high_impact"],
-    }
-    json.dump(pj, open(ppath, "w", encoding="utf-8"), indent=2)
-    v = _validate_json(d)
-    ids = [w["id"] for w in v["warnings"]]
-    assert not v["errors"], ("L3: validate should not hard-error on the dead route", v["errors"])
-    assert "gate-decision-ignored" not in ids, (
-        "L3: gate-decision-ignored fires for the OPPOSITE shape and must NOT fire here", ids)
-    assert not any("reject" in w["message"] for w in v["warnings"]), (
-        "L3 REGRESSION: a lint now flags the dead reject route — update answer-key.md", v["warnings"])
-
-    # 2. LOUD at RESUME — the `approve` form is now BINDING (N1 enforcement). The
-    #    reject route is only reachable by a decision the form forbids, and the
-    #    engine now REJECTS it instead of silently taking the dead route.
-    d2 = _fresh_partb()
-    baton = _fixforward_to_gate(d2)
-    with open(os.path.join(d2, "decision.json"), "w", encoding="utf-8") as f:
-        json.dump({"decision": "reject"}, f)
-    rc, out, err = _cli(["resume", "root.local.json", baton, "decision.json", "--json"], d2)
-    assert rc == 1, ("L3: a form-violating decision must exit 1", rc, out, err)
-    o = json.loads(out)
-    assert o["outcome"] == "failed" and o["code"] == "decision_rejected", ("L3: wrong shape", o)
-    f0 = o["failures"][0]
-    assert f0["data"]["form"] == "approve" and f0["data"]["errors"], ("L3: data slot", f0)
-    assert "baton-schema" in f0["message"] and "strict_resume" in f0["message"], (
-        "L3: message must carry BOTH remedies", f0)
-
-    # 3. The gate stays PARKED and re-submittable; the conforming `approve`
-    #    decision then completes the run (the trap's fix is to send `approve`).
-    rc2, out2, _ = _cli(["list", "root.local.json", "--json"], d2)
-    assert len(json.loads(out2)["batons"]) == 1, "L3: rejected decision must NOT evict the baton"
-    with open(os.path.join(d2, "decision.json"), "w", encoding="utf-8") as f:
-        json.dump({"decision": "approve"}, f)
-    rc3, out3, err3 = _cli(["resume", "root.local.json", baton, "decision.json", "--json"], d2)
-    assert rc3 == 0 and json.loads(out3)["outcome"] == "done", ("L3: approve should complete", rc3, out3, err3)
-    print("PASS L3 — approve-form silent at validate, but LOUD (decision_rejected) at resume; "
-          "gate stays resumable and `approve` completes")
+        "A new lint here means L2 is no longer silent — re-read answer-key.md.", ids)
+    assert not v["errors"], ("L2: no hard errors expected after L3 fixed", v["errors"])
+    print("PASS L2 — loop-key mismatch is silent: draft.md reads {{?judge_notes}}, "
+          "tally writes loop_feedback; no lint beyond L1 after L3 fixed")
 
 
 # --- L4: strict_render + bare {{loop_feedback}} faults on first run ----------------------
 
 def check_l4_strict_render_fault():
     d = _fresh_partb()
-    # Fix L1 so validate doesn't gate the run path (run works regardless, but keep it clean).
+    # L3 must be fixed first — run aborts on gate-route-not-in-form otherwise.
+    _fixforward_l3(d)
     rc, o = _run_json(d)
     assert rc == 1 and o["outcome"] == "failed", ("L4: first run should fail", rc, o)
     assert o["stage"] == "draft", ("L4: fault should be at the draft stage", o)
@@ -193,8 +197,8 @@ def check_l4_strict_render_fault():
 
 def check_l5_schema_mismatch():
     d = _fresh_partb()
-    # Fix-forward past L4 only (make the loop_feedback placeholder optional), so the
-    # run reaches judge where the fake overlay omits the required 'notes' key.
+    # Fix L3 (gate error) and L4 (strict_render) so the run reaches judge.
+    _fixforward_l3(d)
     _edit(os.path.join(d, "prompts", "draft.md"),
           "{{loop_feedback}}", "{{?loop_feedback}}")
     rc, o = _run_json(d)
@@ -227,9 +231,9 @@ def check_fixtures_and_injections():
 
 def main() -> None:
     checks = [
-        check_l1_missing_carry,
-        check_l2_silent,
-        check_l3_form_enforced_on_resume,
+        check_l3_lint_rescued,     # L3 now fires first (hard error at validate)
+        check_l1_missing_carry,    # L1 surfaces after L3 is fixed
+        check_l2_silent,           # L2 is doc-only: structural + runtime check
         check_l4_strict_render_fault,
         check_l5_schema_mismatch,
         check_fixtures_and_injections,

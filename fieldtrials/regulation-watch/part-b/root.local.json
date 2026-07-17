@@ -1,6 +1,6 @@
 {
   "$schema": "../../../schemas/root.schema.json",
-  "_about": "Offline (fake) overlay for the Part-B broken pipeline. Deterministic, no API calls. NOTE (trial runner only): the `judge` model's scripted reply omits the required `notes` key on purpose — landmine L5 (schema_mismatch at runtime).",
+  "_about": "Offline (fake) overlay for the regulation-watch pipeline. Deterministic scripted responses, no API calls.",
   "transport": {"type": "inproc"},
   "providers": {"fake": {"type": "fake_scripted", "by_model": {
     "classify": ["{\"impact_area\": \"product-safety\", \"high_impact\": true}"],

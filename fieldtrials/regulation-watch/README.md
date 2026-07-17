@@ -50,19 +50,44 @@ Rules that keep the trial honest:
 
 - **Cold.** Each builder starts with no yaah context beyond its brief and what
   `yaah scaffold` ships. Do not coach. Do not answer mid-run questions.
-- **Fresh directory OUTSIDE this repo.** So the builder cannot read this kit's
-  `answer-key.md`, the engine's own docs tree, or another run's artifacts. For
-  Part B, copy `part-b/` to the working dir; do not hand over `answer-key.md`.
-- **yaah pip-installed from the repo path**, so the builder uses the same engine
-  under test but cannot browse `src/` casually:
+- **Copy trial files to a neutral directory well outside this repo.** The path
+  must not reveal the repo location (e.g. `/tmp/rw-trial-A/` not
+  `/home/user/yaah-harness/fieldtrials/trial-run/`). For Part B, copy `part-b/`
+  alone into the neutral dir — do NOT copy `answer-key.md`, `selfcheck.py`, or
+  `README.md`. Keeping the kit dir out of the agent's path is the primary guard
+  against accidental reads.
+- **State in the builder brief** that reading anything outside the working directory
+  is out-of-bounds and will be visible in the transcript. Exact wording to include:
+  > "Your working directory is `<WORKING_DIR>`. Reading files outside it (engine
+  > source, docs, or trial-kit files from another path) is out-of-bounds for this
+  > trial and will be flagged in scoring."
+- **Install yaah with a built wheel or non-editable install**, so the engine appears
+  under site-packages and its source path is not the repo tree:
 
   ```
+  # preferred: build a wheel first (one-time per branch)
+  python3 -m build --wheel /path/to/yaah-harness -o /tmp/yaah-wheels/
   python3 -m venv .venv && . .venv/bin/activate
-  pip install -e /path/to/yaah-harness
+  pip install /tmp/yaah-wheels/yaah_harness-*.whl
+
+  # acceptable: non-editable install from the repo path
+  python3 -m venv .venv && . .venv/bin/activate
+  pip install /path/to/yaah-harness
   ```
 
-  (Reading `src/` is still possible — and if a builder does it, that is a
-  red-flag event, see below.)
+  Do NOT use `pip install -e`. An editable install puts the repo root on
+  `sys.path`, which makes `src/yaah/`, the fieldtrials tree, and `answer-key.md`
+  accessible via relative traversal — round-1 evidence showed at least one builder
+  read `answer-key.md` mid-trial this way (transcript-verified). A non-editable
+  install limits source reads to site-packages (installed copies, not the live
+  repo). If a builder reads engine source under site-packages, that is still a
+  red-flag event; if they reach the REPO `src/` tree, that is an invalidating event.
+
+  **Distinguishing site-packages vs repo reads in the transcript:** look at the
+  file path in the Read tool call. A path under `.venv/lib/…/site-packages/yaah/`
+  is an installed-package read (elevated red flag). A path under the original repo
+  tree (`.../yaah-harness/src/yaah/`) is a repo read that should not have been
+  reachable — treat it as an isolation failure and discount the run accordingly.
 
 ---
 
@@ -96,20 +121,27 @@ retry loop, the gate, the digest). For each:
 
 ### Red-flag events (each is a usability defect, not a builder failure)
 
-- **Read yaah engine source (`src/yaah/…`)** to make progress → the DOC surface
-  failed. The docs/AGENTS.md/error messages should have carried the builder.
+- **Read the answer key or trial-kit files** (`answer-key.md`, `selfcheck.py`,
+  `README.md` from the kit) → **invalidating event**. Discard successes on any
+  trap the builder read the answer for; keep stumbles (the builder mis-read or
+  ignored it). Record the exact transcript moment and the file path. If the run
+  was enabled by an editable install (`pip install -e`), note the isolation failure
+  alongside; the trial scores as "compromised" and is informational only.
+- **Read yaah engine source** (repo `src/yaah/…` or site-packages `yaah/`) to make
+  progress → the DOC surface failed. The docs/AGENTS.md/error messages should have
+  carried the builder. Distinguish repo reads (isolation failure, more severe) from
+  site-packages reads (builder reached past the docs, less severe but still a flag).
+  Round-1 lesson: editable installs inflate engine-source reads because the repo
+  tree is on `sys.path`; use non-editable installs to distinguish genuine curiosity
+  from accidental accessibility.
 - **Ignored a lint warning** it had already seen (e.g. re-ran `validate`, saw
   `missing-carry`, moved on without fixing) → the message did not land / was not
   actionable enough.
 - **Deleted a state dir** (`rm -rf state`, or nuking `.yaah-state*`) to get
   unstuck → the parked-gate / resume model was confusing enough that the builder
   reached for the destructive reset. (Especially damning around the gate.)
-- **Silent trap shipped** (L2 left in the "fixed" deliverable, or L3's phantom
-  route left unreconciled) → the "runs but wrong" class went undetected. Note
-  whether the builder even suspected it. (L3 now fails LOUD at resume with
-  `decision_rejected` when the gate is driven with the form-forbidden value — a
-  builder who exercises the gate is rescued by the error; one who never drives it
-  still ships the inconsistency.)
+- **Silent trap shipped** (L2 left in the "fixed" deliverable) → the "runs but
+  wrong" class went undetected. Note whether the builder even suspected it.
 
 ### How to interpret
 
@@ -121,14 +153,19 @@ retry loop, the gate, the digest). For each:
   by `reasoning` or `AGENTS.md`-reading, or not at all, points at where a lint or
   a sharper error message would pay off. A trap rescued by `luck` is the worst
   outcome — it means the next builder won't be so lucky.
-- **The silent trap (L2) is the acid test.** It fires no signal on purpose. If a
-  builder catches it, note HOW (docs? reasoning? a hunch?). L3 is now a HALFWAY
-  trap: silent at validate, but loud at resume (`decision_rejected`) once the gate
-  is driven with the form-forbidden value. If a builder proposes a NEW lint for
-  either ("the engine should warn when a loop key the prompt reads is never
-  written", "…when a branch route can't match the gate's form AT AUTHOR TIME"),
-  that is a top-tier trial finding — forward it to the engine team; it is the
-  trial working as designed.
+- **The silent trap (L2) is the acid test.** It fires no signal on purpose — the
+  decoy placeholder renders empty with no lint and no fault. If a builder catches
+  it, note HOW (docs? reading the transform? reasoning?). If a builder proposes a
+  new "loop-key mismatch" lint ("the engine should warn when a prompt reads a key
+  the loop transform never writes"), that is a top-tier trial finding — forward it
+  to the engine team.
+- **L3 is now a lint-rescued trap.** The `gate-route-not-in-form` lint fires as a
+  hard error at `yaah validate`, so builders see it immediately. The interesting
+  measurement is WHICH FIX the builder picks: upgrade the form to `approve_or_revise`
+  and rename the `reject` route to `revise` (preserving the two-path behaviour), or
+  simply drop the dead route (simpler, but loses the loop-back path). Both clear the
+  lint; only the first is the semantically correct fix for a pipeline that should
+  loop back on rejection.
 - **Attempts-to-recovery** is secondary to rescuing-surface: a trap that took
   five cycles but was ultimately caught by a clear lint is healthier than one
   caught in one cycle by luck.
@@ -157,10 +194,16 @@ friction log. Deliverables: the working config(s), a raw run transcript
 (validate + run + the gate park/resume), and the friction log in the exact
 format brief-a.md specifies. The friction log is the point — be specific and
 honest about every place the engine slowed you down.
+
+Your working directory is <WORKING_DIR>. Reading files outside it (engine source,
+docs, or files from any other path) is out-of-bounds for this trial and will be
+flagged in scoring.
 ```
 
-(Copy `brief-a.md` and `fixtures/notices/` into `<WORKING_DIR>` first. Do NOT
-copy `answer-key.md`, `README.md`, `part-b/`, or `selfcheck.py`.)
+(Copy `brief-a.md` and `fixtures/notices/` into `<WORKING_DIR>`, which should be
+a neutral directory well outside the yaah-harness repo. Do NOT copy `answer-key.md`,
+`README.md`, `part-b/`, or `selfcheck.py`. Use a non-editable pip install — see
+the "install" rule above.)
 
 ### For a Part-B run
 
@@ -174,11 +217,17 @@ found it, in the exact format brief-b.md specifies. Your guidance is brief-b.md
 plus the project's own AGENTS.md and the yaah docs — do not ask me questions.
 Fix the pipeline, not the engine. If you think something is an engine bug rather
 than a config defect, write it down instead of changing it.
+
+Your working directory is <WORKING_DIR>. Reading files outside it (engine source,
+docs, or files from any other path) is out-of-bounds for this trial and will be
+flagged in scoring.
 ```
 
-(Copy the whole `part-b/` directory into `<WORKING_DIR>` first, EXCEPT
-`brief-b.md` stays but `../answer-key.md` must NOT be reachable. The simplest
-safe move: copy `part-b/` alone into a dir well outside this repo.)
+(Copy `part-b/` alone into `<WORKING_DIR>`, which should be a neutral directory
+well outside the yaah-harness repo (e.g. `/tmp/rw-trial-B-<date>/`). Do NOT copy
+`answer-key.md`, `selfcheck.py`, or `README.md` — these must not be reachable
+from the builder's working dir. See the "install" rule above for the non-editable
+pip install step.)
 
 ---
 
@@ -192,13 +241,13 @@ regulation-watch/
   selfcheck.py              standalone trap-integrity check (run before each trial)
   fixtures/
     notices/                7 fictional regulation-change notices (2 injection, 1 high-impact)
-  part-b/                   the broken project (Part B)
+  part-b/                   the broken project (Part B) — copy this dir to run
     brief-b.md              Part B debugging brief (given to the builder)
-    pipeline.json           nodes + graph (seeded L1-L5)
-    root.local.json         offline fake overlay (seeds L5)
+    pipeline.json           nodes + graph (with seeded defects, per answer-key.md)
+    root.local.json         offline fake overlay (with seeded defects, per answer-key.md)
     input.json              single-notice input
     transforms.py           the tally loop transform (writes loop_feedback)
-    prompts/                classify / draft / judge prompts (seed L2, L4)
+    prompts/                classify / draft / judge prompts (with seeded defects)
     templates/digest.md     final render template
     fixtures/notices/       a self-contained copy of the notices
 ```

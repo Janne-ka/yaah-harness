@@ -1,14 +1,9 @@
-"""Transforms for the Part-B (broken) regulation-watch pipeline.
+"""Transforms for the regulation-watch pipeline.
 
 One envelope-style transform (call: "envelope"):
   tally — after the judge scores the current draft, maintain the cycle count,
-          decide whether to loop back to `refine` or fall through to the gate,
+          decide whether to loop back to `draft` or fall through to the gate,
           and forward the judge's notes as loop guidance.
-
-NOTE for the trial runner: this transform writes the loop guidance under the key
-`loop_feedback` (the collision-safe name — the engine reserves `feedback`). One
-of the seeded landmines is that the `refine` prompt reads a DIFFERENT key, so the
-guidance never reaches the model. That mismatch is intentional; do not fix it here.
 
 Targets Python 3.9+.
 """
@@ -31,8 +26,8 @@ def tally(envelope, config) -> Dict[str, Any]:
       cycle         — incremented by 1
       loop_done      — "yes" to exit the loop (verdict pass OR max_cycles hit), else "no"
       loop_feedback  — judge's notes, forwarded as loop guidance to the draft agent
-      digest_summary — the current summary, RENAMED (a transform-provided key the gate
-                       and digest render read; the rename is deliberate, see _about)
+      digest_summary — the current summary, renamed so the gate and digest render
+                       read a transform-provided key rather than a raw agent key
 
     config.extras:
       max_cycles (int, default 3) — hard cap on refine attempts

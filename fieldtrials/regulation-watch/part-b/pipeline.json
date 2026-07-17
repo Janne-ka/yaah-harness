@@ -1,6 +1,6 @@
 {
   "$schema": "../../../schemas/pipeline.schema.json",
-  "_about": "BROKEN-ON-PURPOSE regulation-watch pipeline for Part B of the field trial. Five seeded landmines (L1-L5). The builder's job is to make this strict-clean and offline-green and document every problem found. Do NOT read answer-key.md — that is for the trial runner.",
+  "_about": "Regulation-watch pipeline: classify a notice, draft a summary with a judge-loop, park at a human gate for high-impact notices, and render a digest.",
 
   "nodes": {
     "role:classify": {

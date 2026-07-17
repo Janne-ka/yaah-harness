@@ -6,6 +6,8 @@ NOTICE:
 
 Reviewer feedback from the previous round: {{feedback}}
 
-Loop guidance: {{loop_feedback}}
+Loop guidance from previous judge: {{?judge_notes}}
+
+Previous round notes: {{loop_feedback}}
 
 Return JSON: {"summary": "<one paragraph>", "confidence": "<low|medium|high>"}
