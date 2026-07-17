@@ -42,6 +42,16 @@ a literal, and under `strict_render` it does NOT fault. This lets a feedback-loo
 agent set `strict_render: true` and still fault on a genuinely-missing REQUIRED
 key. The markers compose as `{{?!key}}` (optional AND untrusted).
 
+**Placeholder key names are single flat payload keys — dot-paths are not
+supported.** `{{item.text}}` does NOT match the regex (`\w+` only); it passes
+through as the literal string `{{item.text}}` in the rendered prompt, silently.
+The `?`/`!` sigils (above) are an agent-prompt-only dialect; `render` and
+`human_gate` templates use the plain templater, which recognises `\w+` only and
+ignores sigils entirely (`{{!key}}` is a literal there).
+If an upstream `foreach` stage delivers per-item dicts under `results`, add a
+`transform` step to flatten the fields you need into top-level scalar keys before
+passing them to an agent or render node.
+
 Config: `template` *or* `prompt` (required), `model`, `stage` (trace/event
 label), `cwd_from`, `carry` (payload keys forwarded into the reply — agents
 REPLACE the payload otherwise; prefer graph `sticky` for run-wide keys),
@@ -212,7 +222,8 @@ rendered via the plain templater, so the value is inserted **unframed** — the
 below), `awaiting` (tag, default `"human"`), `form` (optional — names a generic
 decision shape; one of `approve` / `approve_or_revise` / `free_text` /
 `json_schema`), `decision_schema` (required iff `form: "json_schema"`; inline
-JSON Schema for the one-off escape hatch — forbidden with the built-in forms).
+JSON Schema for the one-off escape hatch — forbidden with the built-in forms),
+`allow_untrusted` (lint-only opt-out, see the `untrusted-unfenced` note below).
 Returns an AWAIT envelope; the harness parks the baton (artifact + the gate's
 rendered question; the gate's keys win a collision) until `resume()` merges the
 decision payload back (decision keys win). Route the decision with
@@ -221,6 +232,18 @@ gate. When `form` is declared, `yaah baton-schema <root> <baton_id>` surfaces
 the matching JSON Schema so a driver skill composes `decision.json`
 mechanically; see [decision-forms.md](decision-forms.md) for the catalog and
 the extension story.
+
+When a gate declares a `form` with a `decision` enum (e.g. `approve`,
+`approve_or_revise`) and routes on it, every `branch` route key must be a value
+the enum admits: a route keyed on a decision the form can never produce (e.g.
+routing `reject` off `form: "approve"`) is **dead under resume enforcement** —
+the harness rejects a non-conforming decision (`decision_rejected`), so that
+branch can never fire. `yaah validate` catches it: an **ERROR**
+(`gate-route-not-in-form`) under the default `strict_resume: true`, downgraded to
+a **warning** under `strict_resume: false` (where the lenient blind-merge makes
+the forbidden decision reachable again). Fix by using a form whose decisions
+include the route key — `approve_or_revise`, or a `json_schema` form — or drop
+the dead route.
 
 ## `worktree` — git worktree isolation
 
@@ -251,8 +274,11 @@ Two opt-out flags (both default `false`):
   the `untrusted-unfenced` lint has no in-place remedy on a render. Set it `true`
   to assert this render's output feeds a **human/file**, not a model prompt, so
   unfenced agent-authored text is legitimate — it silences ONLY this render's own
-  `untrusted-unfenced` warnings (agent-prompt and `human_gate` sites unaffected).
-  No runtime effect; a lint-only opt-out parallel to `allow_unfilled`.
+  `untrusted-unfenced` warnings. No runtime effect; a lint-only opt-out parallel
+  to `allow_unfilled`. The **same flag works on a `human_gate`** (its `ask`
+  likewise can't fence): there it means "the human decision-maker is the firewall
+  — agent text is meant to reach the reviewer as-is." Per-node in both cases —
+  it silences only the node that sets it, never agent-prompt fencing.
 
 ## Lint: `untrusted-unfenced` — agent-authored text at an unframed consumer
 
@@ -277,7 +303,11 @@ quiet.
 
 Remediation is **not** `{{!key}}` at the consumer (a no-op literal there):
 sanitize the value in an upstream `transform`, or confirm the consumer cannot act
-on injected instructions. Known blind spot: a `transform` that RENAMES agent text
+on injected instructions. Both unframed consumers also have an in-place
+**acknowledgment** opt-out — `allow_untrusted: true` on the node — for when the
+exposure is intended: a `render` whose output feeds a human/file, or a
+`human_gate` whose human reviewer is the firewall. It silences only that node's
+sites. Known blind spot: a `transform` that RENAMES agent text
 (e.g. folds a judge's `reason` into `refix_reason`) breaks the provenance chain,
 so a renamed key is not attributed — declare intent with an inline `provides` on
 the producing agent, or fence at the agent-prompt boundary. Because renames can

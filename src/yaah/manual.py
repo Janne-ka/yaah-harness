@@ -61,6 +61,97 @@ _RULES = """\
   `yaah validate <root> --json` before handing it over.
 """
 
+_FOREACH = """\
+## foreach — dynamic per-item fan-out
+
+`foreach` is the third parallel shape (beside `fanout` and `fork`/`fanin`): it
+maps **one node over every element of a runtime-sized list**, bounded to K
+concurrent. Use it when the item count is not known at author time.
+
+```
+"swarm": {
+  "node": "skeptic",
+  "foreach": {"items": "requirements", "into": "item",
+              "carry": ["doc", "task"], "max_concurrent": 3},
+  "min_success": 5,
+  "then": "consolidate"
+}
+```
+
+Key facts for authors:
+
+- **One node, one hop.** Each element is processed by the same node role once.
+  There is no per-item sub-graph; multi-stage-per-item work requires a cursor
+  back-edge loop over the list instead.
+- **Per-item input is replace + named carries only.** The item payload is
+  `{ <into>: items[i], "item_index": i, <carry keys>, <graph.sticky keys> }` —
+  NOT a copy of the full inbound payload (a 50 KB doc × 200 items would be an
+  invisible 200× cost). Name every key you need in `foreach.carry`.
+- **Output.** The merged stage output = inbound payload PLUS `results`
+  (list of `{"item_index": int, "payload": dict}` pairs, in item order) and
+  `failed_items` (list of indexes that failed). Pairs, not bare payloads —
+  a reset agent drops `item_index` from its output, so bare compaction would
+  misalign.
+- **An AWAIT item parks the whole stage.** Per-item gates are a v1 non-goal;
+  if one item suspends, the entire `foreach` stage parks.
+- **`feedback` keys are not threaded into per-item inputs.** The retry
+  feedback is the whole prior merged swarm, semantically odd per item — v1
+  documented limitation. Use `min_success` for partial-failure tolerance.
+- **For multi-stage-per-item work**, use a cursor back-edge loop over the list:
+  a `transform` pops the next item from a list key and writes it to a scratch
+  key, the stage processes it, a branch checks whether the list is exhausted,
+  and the backward edge loops back.
+"""
+
+_PLACEHOLDERS = """\
+## Placeholders — flat keys only
+
+Template substitution in agent prompts, `render` templates, and `human_gate`
+`ask` strings uses `{{key}}` syntax.
+
+**Key names are single flat payload keys.** The regex is `\\w+` — dot-paths
+are not supported. `{{item.text}}` NEVER matches; it passes through as the
+literal string `{{item.text}}` in the rendered output, silently. If you need
+a nested value, flatten it to a top-level key with an upstream `transform`.
+
+**Agent-prompt dialect (agent node only):**
+- `{{?key}}` — optional; renders EMPTY when absent instead of faulting under
+  `strict_render`. Use for keys that are only present on later passes (e.g.
+  `{{?loop_feedback}}`).
+- `{{!key}}` — untrusted; the value is fenced with an unguessable token to
+  block instruction injection. Use for any agent-authored or user-supplied text.
+- `{{?!key}}` or `{{!?key}}` — optional AND untrusted (order doesn't matter).
+
+**`render` and `human_gate` templates use the plain templater**: `?`/`!` sigils
+are NOT recognised there — `{{!key}}` is a literal. Only `{{key}}` (`\\w+`)
+substitutes. This is deliberate: a render's output feeds a human or a file,
+not a model prompt, so fencing has no consumer.
+"""
+
+_FAKE_SCRIPTED = """\
+## Offline scripted replies — fake_scripted contract
+
+`fake_scripted` delivers canned strings per model name. Calls consume replies
+in order. **Lists are exhausted, not cycled.** When the list runs out:
+
+- default — returns empty string (causes `not_json` failure downstream for
+  parse-mode agents; useful to catch under-sized lists in CI).
+- `on_exhaustion: "repeat_last"` — returns the final entry for every
+  subsequent call. Use for loops, backward edges, or any run that may
+  re-enter the scripted stage.
+- `on_exhaustion: "raise"` — raises IndexError loud. Reserve for
+  deterministic single-pass runs only; a mid-run gate park + cross-process
+  resume will replay from entry 0 and raise instead of completing.
+
+**Size for the worst case.** A retry loop over a 7-item foreach that may
+retry once needs 14 entries, not 7.
+
+**The cursor is process-local.** It resets to 0 when a new process starts.
+A run that parks at a human gate and resumes in a new process replays from
+the beginning. Practical rule: order gated work last so no scripted agent
+stage runs after a gate, or drive the gate in the same process.
+"""
+
 _FOOTER = """\
 ## Repair loop
 
@@ -231,6 +322,9 @@ def build_manual() -> str:
     parts.extend(_node_section())
     parts.extend(_root_section())
     parts.extend(_pipeline_section())
+    parts.append(_FOREACH)
+    parts.append(_PLACEHOLDERS)
+    parts.append(_FAKE_SCRIPTED)
     parts.append(_RULES)
     parts.extend(_example_section())
     parts.append(_FOOTER)

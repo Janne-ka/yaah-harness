@@ -66,5 +66,6 @@ yaah resume <run> decision.json
 
 ---
 
-Full docs live in the yaah repo: `AGENTS.md`, `docs/archetypes.md`,
+Run `yaah manual` for offline docs (works without the repo; ships with the
+package). Full docs live in the yaah repo: `AGENTS.md`, `docs/archetypes.md`,
 `docs/node-reference.md`.

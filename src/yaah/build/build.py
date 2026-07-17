@@ -81,7 +81,12 @@ def build(
     live_config_path: Optional[str] = None,
     strict_resume: bool = True,
 ) -> Harness:
-    validate_pipeline(config, base_path=base_dir)
+    # strict_resume MUST be forwarded to validate_pipeline: it tiers the
+    # gate-route-not-in-form finding (ERROR when this harness will enforce the
+    # declared form at resume, WARNING when lenient). A construction path that
+    # builds with the root's strict_resume:false but validated with the default
+    # True would hard-fail a route that is actually reachable at ITS runtime.
+    validate_pipeline(config, base_path=base_dir, strict_resume=strict_resume)
     comms = comms or InProcessComms()
     registry = registry or default_registry()
     ctx = BuildContext(comms=comms, backend=backend, prompt_source=prompt_source,
@@ -139,7 +144,7 @@ def harness_from_config(config: Dict[str, Any], comms: Comms,
                         strict_resume: bool = True) -> Harness:
     """Orchestrator side: build just the Graph + Harness over an existing Comms.
     Use with a distributed Comms whose nodes are served via serve_from_config()."""
-    validate_pipeline(config)
+    validate_pipeline(config, strict_resume=strict_resume)
     return Harness(comms, build_graph(config["graph"]),
                    baton_store=baton_store, envelope_store=envelope_store, tracer=tracer,
                    strict_resume=strict_resume)

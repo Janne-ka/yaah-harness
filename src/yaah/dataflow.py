@@ -177,7 +177,7 @@ def _edges(stages: Dict[str, Any]) -> Dict[str, List[str]]:
     for name, s in stages.items():
         if s.get("then"):
             add(name, s["then"])
-        b = s.get("branch") or {}
+        b = s.get("branch") if isinstance(s.get("branch"), dict) else {}
         for dst in (b.get("routes") or {}).values():
             if isinstance(dst, str):
                 add(name, dst)

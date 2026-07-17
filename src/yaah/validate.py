@@ -594,7 +594,8 @@ def _check_constraints(cons: Any, start: Any, stages: Dict[str, Any],
 
 def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None, *,
                       contract_for: Optional[Any] = None,
-                      consumes_for: Optional[Any] = None) -> None:
+                      consumes_for: Optional[Any] = None,
+                      strict_resume: bool = True) -> None:
     """Fail fast on a malformed pipeline at BUILD time instead of mid-run. Every
     cross-reference must resolve: graph.start, each `then`, branch routes/default
     → a declared stage; each stage's node, validators, fanout roles → a declared
@@ -610,7 +611,15 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None, *
     `contract_for` / `consumes_for` (ADR-0006 D7.2): an embedding app's registry
     contract sources (`Registry.contract_source()` / `consumes_source()`) so its
     CUSTOM node types get the same ERROR-grade data-flow checking as built-ins.
-    None (the default) = built-ins + inline declarations only, byte-identical."""
+    None (the default) = built-ins + inline declarations only, byte-identical.
+
+    `strict_resume` (default True, matching the harness/runtime default) tiers ONE
+    finding: a human_gate branch route the form's decision enum can never produce is
+    PROVABLY DEAD under resume enforcement (decision_rejected) → an ERROR here. With
+    strict_resume=False the lenient blind-merge makes the forbidden decision reachable
+    again, so that finding downgrades to a lint WARNING (see `lint_pipeline`) and is NOT
+    raised here. `build()` passes the harness's own strict_resume so the load-time verdict
+    matches the run's actual enforcement."""
     nodes = set(config.get("nodes", {}))
     g = config.get("graph") or {}
     stages = g.get("stages", {})
@@ -783,7 +792,11 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None, *
         then = s.get("then")
         if then is not None and then not in stages:
             errs.append("stage {!r}: then {!r} is not a stage".format(name, then))
-        b = s.get("branch") or {}
+        _branch_raw = s.get("branch")
+        b = _branch_raw if isinstance(_branch_raw, dict) else {}
+        if _branch_raw is not None and not isinstance(_branch_raw, dict):
+            errs.append("stage {!r}: branch must be an object "
+                        "{{on, routes?, default?}}, got {}".format(name, type(_branch_raw).__name__))
         for val, dest in (b.get("routes") or {}).items():
             if dest not in stages:
                 errs.append("stage {!r}: branch route {!r} -> {!r} is not a stage".format(name, val, dest))
@@ -876,6 +889,16 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None, *
                                         contract_for=contract_for,
                                         consumes_for=consumes_for)
         errs.extend(df_errors)
+        # A human_gate branch route the form's decision enum can never produce is PROVABLY DEAD
+        # under resume enforcement — an ERROR (like the provably-wrong dataflow findings above),
+        # but ONLY when strict_resume enforces the form. With strict_resume off, the lenient
+        # blind-merge reaches it again → downgraded to a lint WARNING in lint_pipeline, not here.
+        # Gated on `not errs` for the same reason: the detector reads branch.routes shapes the
+        # structural checks above must first have vouched for.
+        if strict_resume:
+            errs.extend(_gate_dead_route_msg(st, key, form, enum, lenient=False)
+                        for st, key, form, enum in _gate_dead_routes(config.get("nodes") or {},
+                                                                     stages))
     if errs:
         raise ValueError("invalid pipeline:\n  - " + "\n  - ".join(errs))
 
@@ -904,7 +927,8 @@ def _augment_provides_from_code(nodes: Dict[str, Any],
 def lint_pipeline(config: Dict[str, Any], base_path: Optional[str] = None,
                   resolve: Optional[Callable[[Any], Optional[List[str]]]] = None, *,
                   contract_for: Optional[Any] = None,
-                  consumes_for: Optional[Any] = None) -> List[str]:
+                  consumes_for: Optional[Any] = None,
+                  strict_resume: bool = True) -> List[str]:
     """Advisory lint over a VALID pipeline config — returns WARNINGS, never raises.
 
     Catches valid-but-RISKY shapes that otherwise bite deep in a run, each rule traced
@@ -912,6 +936,13 @@ def lint_pipeline(config: Dict[str, Any], base_path: Optional[str] = None,
     a config can be perfectly valid yet weak enough that a run dies far from the cause.
     Callers surface these (e.g. `yaah validate` prints them) WITHOUT blocking the run;
     `yaah validate --strict` fails (exit 2) on any warning for CI.
+
+    `strict_resume` (default True) mirrors `validate_pipeline`'s tiering of the
+    `gate-route-not-in-form` finding: when True the dead-route check is an ERROR raised by
+    validate_pipeline (so it is NOT re-emitted here — that would double-report). When False
+    the route is reachable via the lenient blind-merge, so it appears HERE as a warning with
+    the "enforcement is off" note. Passed down from `validate_config` (which reads the root's
+    `strict_resume`).
 
     `base_path` is the directory the pipeline's `template_file` paths resolve against — the
     ROOT config's dir, which the runtime passes to `build` as `base_dir` (so it must match
@@ -949,6 +980,13 @@ def lint_pipeline(config: Dict[str, Any], base_path: Optional[str] = None,
     _lint_weak_output_schema(nodes, warnings)
     _lint_attach_undeclared_keys(nodes, warnings)
     _lint_gate_ignores_rejection(nodes, stages, warnings)
+    # gate-route-not-in-form: only the LENIENT tier surfaces here (a WARNING). Under
+    # strict_resume the same finding is a validate_pipeline ERROR (raised, not linted) — so
+    # emitting it here too would double-report. When strict_resume is off the route is reachable
+    # via the blind-merge, so it is a genuine advisory-only warning with the enforcement caveat.
+    if not strict_resume:
+        for st, key, form, enum in _gate_dead_routes(nodes, stages):
+            warnings.append(_gate_dead_route_msg(st, key, form, enum, lenient=True))
     _lint_rollback_without_effects(nodes, stages, warnings)
     _lint_reserved_key_collision(nodes, stages, sticky, warnings)
     _lint_clear_is_not_rollback(nodes, stages, warnings)
@@ -1042,10 +1080,20 @@ def _lint_attach_undeclared_keys(nodes: Dict[str, Any], warnings: List[str]) -> 
 
 
 def _gate_decision_outcomes(node: Dict[str, Any], forms: Dict[str, Any]) -> Optional[int]:
-    """How many values a human_gate's `decision` may take, per its declared form (the built-in
-    catalog, or the inline `decision_schema` for form 'json_schema'). None when the form declares
-    no `decision` enum — free_text (key is `answer`), an unconstrained decision, or no form — so
-    there is nothing to branch on. A count >= 2 means the gate needs the decision routed."""
+    """How many values a human_gate's `decision` may take, per its declared form. None when the
+    form declares no `decision` enum (free_text, an unconstrained decision, or no form) — nothing
+    to branch on. A count >= 2 means the gate needs the decision routed. Thin wrapper over
+    `_gate_decision_enum` (the shared form-schema resolver)."""
+    enum = _gate_decision_enum(node, forms)
+    return len(enum) if enum is not None else None
+
+
+def _gate_decision_enum(node: Dict[str, Any], forms: Dict[str, Any]) -> Optional[List[str]]:
+    """The list of values a human_gate's `decision` may take, per its declared form (or the
+    inline `decision_schema` for form 'json_schema'). None when the form declares no `decision`
+    enum — free_text (key is `answer`), a json_schema `decision` with a `type` but no enum, an
+    unconstrained decision, or no form. A returned list is the CLOSED set of decisions resume
+    enforcement will accept, so a branch route key outside it can never fire under enforcement."""
     form = node.get("form")
     if form == "json_schema":
         schema = node.get("decision_schema")
@@ -1056,7 +1104,61 @@ def _gate_decision_outcomes(node: Dict[str, Any], forms: Dict[str, Any]) -> Opti
     props = schema.get("properties") if isinstance(schema, dict) else None
     dec = props.get("decision") if isinstance(props, dict) else None
     enum = dec.get("enum") if isinstance(dec, dict) else None
-    return len(enum) if isinstance(enum, list) else None
+    return [v for v in enum if isinstance(v, str)] if isinstance(enum, list) else None
+
+
+def _gate_dead_routes(nodes: Dict[str, Any], stages: Dict[str, Any]) -> List[Tuple[str, str, str, List[str]]]:
+    """Every (stage, route_key, form, enum) where a human_gate stage BRANCHES on its own
+    `decision` and a NAMED route key falls outside the form's decision enum — a route provably
+    unreachable under resume enforcement (the human can never submit that decision). Only NAMED
+    routes are checked; `default` (the catch-all) is never dead. Forms with no decision enum
+    (free_text, an un-enum'd json_schema) contribute nothing. Never raises: a malformed
+    branch/routes shape (validate_pipeline's to reject) contributes no finding.
+
+    Shared by the ERROR path (`validate_pipeline`, strict_resume on → provably dead) and the
+    WARNING path (`lint_pipeline`, strict_resume off → only reachable via the lenient blind
+    merge). ONE detector so the two tiers can never diverge on WHAT is dead."""
+    from .harness.decision_forms import FORMS
+    out: List[Tuple[str, str, str, List[str]]] = []
+    for name, s in stages.items():
+        if not isinstance(s, dict):
+            continue
+        ref = s.get("node")
+        node = nodes.get(ref) if isinstance(ref, str) else None
+        if not (isinstance(node, dict) and node.get("type") == "human_gate"):
+            continue
+        b = s.get("branch")
+        if not (isinstance(b, dict) and b.get("on") == "decision"):
+            continue
+        routes = b.get("routes")
+        if not isinstance(routes, dict):
+            continue
+        enum = _gate_decision_enum(node, FORMS)
+        if enum is None:
+            continue   # no enum constraint → nothing to check (free_text, un-enum'd json_schema)
+        allowed = set(enum)
+        for key in routes:
+            if isinstance(key, str) and key not in allowed:
+                out.append((name, key, str(node.get("form")), enum))
+    return out
+
+
+def _gate_dead_route_msg(stage: str, key: str, form: str, enum: List[str], *,
+                         lenient: bool) -> str:
+    """The house-style message for a gate route the form can never produce. Names the stage, the
+    dead route key, the form + its enum, and the remedy. The `lenient` tail (strict_resume off)
+    explains the route is only reachable because enforcement is off — downgrading the finding's
+    force to a warning while keeping the same diagnosis."""
+    tail = (" This is reachable ONLY because strict_resume is false (the lenient blind-merge "
+            "accepts a non-conforming decision); under enforcement it is dead."
+            if lenient else "")
+    return (
+        "stage {s!r}: branch routes on `decision` {k!r}, but the human_gate form {f!r} admits "
+        "only {enum} — the human can never submit {k!r}, so the route can never fire under resume "
+        "enforcement (decision_rejected). Use a form whose decisions include {k!r} — e.g. "
+        "approve_or_revise (approve/revise) or a json_schema form with {k!r} in the decision "
+        "enum — or drop the dead route.{tail} [lint: gate-route-not-in-form]".format(
+            s=stage, k=key, f=form, enum=enum, tail=tail))
 
 
 def _lint_gate_ignores_rejection(nodes: Dict[str, Any], stages: Dict[str, Any],
@@ -1075,8 +1177,10 @@ def _lint_gate_ignores_rejection(nodes: Dict[str, Any], stages: Dict[str, Any],
     negative — acceptable while gates share one `decision` key."""
     from .harness.decision_forms import FORMS
     branches_on_decision = any(
-        (s.get("branch") or {}).get("on") == "decision" for s in stages.values()
-        if isinstance(s, dict))   # non-dict stage value: validate's to reject, not a lint crash
+        isinstance(s.get("branch"), dict) and s["branch"].get("on") == "decision"
+        for s in stages.values()
+        # non-dict stage value OR non-dict branch value: validate's to reject, not a lint crash
+        if isinstance(s, dict))
     if branches_on_decision:
         return
     for name, s in stages.items():
@@ -1317,14 +1421,21 @@ def _untrusted_msg(consumer: str, ntype: Any, key: str, producers: List[str]) ->
     ph = "{{" + key + "}}"
     fenced = "{{!" + key + "}}"
     prod = ", ".join(repr(p) for p in producers)
-    # A render can't fence at all (templating.fill leaves {{!key}} literal), so its
-    # ONLY per-site opt-out is `allow_untrusted: true` on the render node — the
-    # author's assertion that this output feeds a human/file, not a model prompt.
-    # A human_gate has no such flag (its ask goes to a human/AI operator to act on),
-    # so only render gets the extra remedy clause.
-    render_optout = (" — or, if the render's output feeds a human/file and not a "
-                     "model prompt, set allow_untrusted:true on the render"
-                     if ntype == "render" else "")
+    # Neither consumer can fence (templating.fill leaves {{!key}} literal), so the
+    # per-site opt-out is `allow_untrusted: true` on the consumer node — the author's
+    # acknowledgment that the value reaches its consumer unfenced BY DESIGN. The
+    # wording differs by consumer: a render's output feeds a human/file (not a model
+    # prompt); a human_gate's `ask` reaches a human decision-maker who IS the firewall
+    # (ITEM 2 — the reviewer is meant to see the agent text as-is and act on it).
+    if ntype == "render":
+        render_optout = (" — or, if the render's output feeds a human/file and not a "
+                         "model prompt, set allow_untrusted:true on the render")
+    elif ntype == "human_gate":
+        render_optout = (" — or, if the human reviewer is meant to see this agent text "
+                         "as-is (the decision-maker is the firewall), set "
+                         "allow_untrusted:true on the gate")
+    else:
+        render_optout = ""
     return (
         "stage {c!r}: the {t} interpolates {ph} UNFENCED, but {k!r} is agent-authored "
         "(produced by {prod}). A {t} renders via the plain templater — it does NOT frame or "
@@ -1344,6 +1455,12 @@ def _lint_untrusted_unfenced(nodes: Dict[str, Any], stages: Dict[str, Any],
     interpolates `{{key}}` UNFENCED where an AGENT stage on some path to it AUTHORS `key`. Agent
     output is untrusted text; those two consumer types render it UNFRAMED (see
     `_UNTRUSTED_PLACEHOLDER`), so a crafted value reaches a human / AI operator / document as-is.
+
+    Per-site opt-out (`allow_untrusted: true`): on EITHER consumer, the author's acknowledgment
+    that the value reaches its consumer unfenced by design — a render whose output feeds a
+    human/file, or a human_gate whose human reviewer is the firewall (ITEM 2). Neither can fence
+    ({{!key}} is a literal there), so this flag is the in-place remedy; it silences ONLY the node
+    that sets it. Set on any other node (e.g. the producing agent) it is ignored.
 
     Provenance is graph reachability, NOT the data-flow lattice: an agent ancestor that authors
     the key taints the consumer EVEN THROUGH an opaque parse-transform (the client's real shape:
@@ -1389,11 +1506,12 @@ def _lint_untrusted_unfenced(nodes: Dict[str, Any], stages: Dict[str, Any],
         text = _consumer_template(node, base_path)
         if not text:
             continue
-        # `allow_untrusted: true` opts a RENDER site out (it can't fence, and its
-        # output feeds a human/file per the author's assertion). Only render honors
-        # it — a human_gate has no such opt-out (its ask goes to a human/AI operator
-        # to act on). A non-render node setting the key is simply ignored here.
-        if node.get("type") == "render" and node.get("allow_untrusted"):
+        # `allow_untrusted: true` opts a CONSUMER site out (neither render nor gate can
+        # fence). On a render it asserts the output feeds a human/file; on a human_gate
+        # (ITEM 2) it acknowledges the human decision-maker is the firewall — the agent
+        # text is meant to reach them unfenced. Honored on those two consumer types only;
+        # the key on any other node (e.g. the producing agent) is ignored here.
+        if node.get("type") in ("render", "human_gate") and node.get("allow_untrusted"):
             continue
         producers_of: Dict[str, List[str]] = {}
         for anc in _ancestors(preds, c_name):
@@ -1518,8 +1636,13 @@ def validate_config(root: Dict[str, Any], base_path: str,
     builds with, so `template_file` lint paths match `_build_render`'s
     resolution). An inline pipeline dict is validated as-is; an absent/bad
     `pipeline` key is validate_root's to report. `resolve` is the opt-in
-    `--from-code` @provides resolver, passed through to lint_pipeline."""
+    `--from-code` @provides resolver, passed through to lint_pipeline.
+
+    The root's `strict_resume` (default True) is threaded to both validate_pipeline and
+    lint_pipeline so the `gate-route-not-in-form` finding is tiered against the SAME
+    enforcement the deployment runs with — ERROR when on, WARNING when off."""
     validate_root(root)
+    strict_resume = bool(root.get("strict_resume", True))
     pipeline_ref = root.get("pipeline")
     if isinstance(pipeline_ref, str):
         from .runtime_factories import _read_json, _rel
@@ -1528,7 +1651,7 @@ def validate_config(root: Dict[str, Any], base_path: str,
         pipeline_cfg = pipeline_ref
     else:
         return []   # no pipeline to check; root validation already vouched for the shape
-    validate_pipeline(pipeline_cfg, base_path=base_path)
+    validate_pipeline(pipeline_cfg, base_path=base_path, strict_resume=strict_resume)
     # ADR-0008 D2 + ADR-0009 D1 cross-file ERRORs (root + pipeline in scope):
     # rollback / an armed on_failure saga needs a persisted file trace sink, and
     # an armed saga needs a rollback-declaring node. Also enforced in
@@ -1537,7 +1660,8 @@ def validate_config(root: Dict[str, Any], base_path: str,
     rb_errs = check_rollback_trace_sink(root, pipeline_cfg)
     if rb_errs:
         raise ValueError("invalid config:\n  - " + "\n  - ".join(rb_errs))
-    return lint_pipeline(pipeline_cfg, base_path=base_path, resolve=resolve)
+    return lint_pipeline(pipeline_cfg, base_path=base_path, resolve=resolve,
+                         strict_resume=strict_resume)
 
 
 def split_diagnostics(exc_text: str) -> List[Dict[str, Any]]:

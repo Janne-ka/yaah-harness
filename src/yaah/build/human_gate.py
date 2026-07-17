@@ -18,7 +18,8 @@ from ..templating import fill
 class HumanGate(Node):
     def __init__(self, ask: str = "", awaiting: Optional[str] = None,
                  form: Optional[str] = None,
-                 decision_schema: Optional[Dict[str, Any]] = None) -> None:
+                 decision_schema: Optional[Dict[str, Any]] = None,
+                 allow_untrusted: bool = False) -> None:
         # `form` names a generic decision shape from harness.decision_forms
         # (approve, approve_or_revise, free_text, json_schema). It rides on the
         # AWAIT envelope so `yaah baton-schema` can surface the matching schema
@@ -29,6 +30,15 @@ class HumanGate(Node):
         self._awaiting = awaiting
         self._form = form
         self._decision_schema = decision_schema
+        # allow_untrusted is a LINT-only opt-out (parallel to the render node's own):
+        # a gate CANNOT fence — its `ask` renders via templating.fill, which leaves
+        # {{!key}} literal — so the untrusted-unfenced lint has no in-place remedy at a
+        # gate. Setting this is the author's acknowledgment that the human decision-maker
+        # is the firewall: agent-authored text is meant to reach the reviewer as-is. It
+        # has NO runtime effect (the gate already never frames); it only silences this
+        # gate's own untrusted-unfenced warnings (validate._lint_untrusted_unfenced).
+        # Held here for symmetry/visibility even though the check lives in validate.
+        self._allow_untrusted = allow_untrusted
 
     async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
         # Render the question against the parked artifact (e.g. "{{spec}}") so the

@@ -176,7 +176,8 @@ def _build_human_gate(spec: Dict[str, Any], ctx: BuildContext) -> Node:
             "human_gate 'decision_schema' is only allowed when form == 'json_schema' "
             "(got form={!r}) — for a built-in form, omit decision_schema".format(form))
     return HumanGate(ask=spec.get("ask", ""), awaiting=spec.get("awaiting"),
-                     form=form, decision_schema=decision_schema)
+                     form=form, decision_schema=decision_schema,
+                     allow_untrusted=bool(spec.get("allow_untrusted", False)))
 
 
 def _build_shell(spec: Dict[str, Any], ctx: BuildContext) -> Node:

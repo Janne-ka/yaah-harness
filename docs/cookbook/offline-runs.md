@@ -149,12 +149,42 @@ The canned-reply backend the patterns above bind to:
 
 - `by_model` is keyed by model name (matched against the pipeline's
   `model: "provider:name"` value's `name` half).
-- Each key's value is a list of replies; calls consume them in order. Lists
-  cycle, so one entry suffices for stages called once.
+- Each key's value is a list of replies; calls consume them **in order and
+  are exhausted, not cycled**. When the list runs out, the default behaviour
+  is to return an empty string — which typically causes a `not_json`
+  validator failure downstream. Size lists for the **worst-case call count**,
+  including retry attempts and loop re-passes (a retry loop that runs a
+  7-item foreach twice needs 14 entries, not 7).
+- Two `on_exhaustion` modes change that behaviour:
+  - `"repeat_last"` — returns the final list entry for every subsequent call.
+    Use this when the node may be re-entered (a backward edge or a loop) or
+    when a cross-process resume might replay from earlier in the script.
+  - `"raise"` — raises `IndexError` loud on any call past the end. Reserve
+    this for deterministic single-pass runs only; if the run parks at a gate
+    and resumes in a new process (see cursor note below), the resume will hit
+    the provider again and raise instead of completing.
+  - Default (`"default"`) — return the empty string on exhaustion.
 - The reply is just a string. For agent stages with parse-by-default, that
   string should be valid JSON — the parsed keys become the agent's NEW
   payload, alongside `raw` and the node's `carry:` keys
   (see [decisions/0004-parse-by-default.md](../decisions/0004-parse-by-default.md)).
 
+**Cursor is process-local.** The in-process cursor is an integer in memory;
+it resets to 0 when a new process starts. A run that parks at a human gate
+and resumes in a new process (`yaah resume ...`) replays from entry 0. In
+practice: order gated work last so no scripted agent stage runs after the
+gate, or drive the gate in the same process (the supported pattern is the
+in-process gate-driver, not a cross-process `--resume` with a scripted
+agent that follows the gate).
+
 For non-deterministic scenarios (test that retry works, simulate a failure
 chain, etc.), the reply list can mix valid + invalid JSON.
+
+**Quick decision table — which `on_exhaustion` to use:**
+
+| Scenario | Use |
+|---|---|
+| Single-pass, no gate after the scripted stage | `"raise"` (loud on bugs) |
+| Loop or backward-edge re-entry | `"repeat_last"` |
+| Cross-process resume with scripted stage after the gate | `"repeat_last"` or reorder so the scripted stage runs before the gate |
+| One-shot CI run with no replays | default or `"raise"` |

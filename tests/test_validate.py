@@ -672,6 +672,35 @@ def test_min_success_rules() -> None:
         assert "fanout" in str(e), str(e)
 
 
+def _branch_non_dict_cfg(branch_val: Any) -> Dict[str, Any]:
+    return {"nodes": {"a": {"type": "agent", "parse": False}},
+            "graph": {"start": "s1", "stages": {"s1": {"node": "a", "branch": branch_val}}}}
+
+
+def test_branch_string_is_a_clean_structural_error() -> None:
+    """A string `branch` must produce a named structural error, never AttributeError."""
+    for val in ("oops", [], 42):
+        try:
+            validate_pipeline(_branch_non_dict_cfg(val))
+            raise AssertionError("branch={!r} must be rejected".format(val))
+        except ValueError as e:
+            msg = str(e)
+            assert "'s1'" in msg, msg
+            assert "branch" in msg, msg
+        except AttributeError as exc:
+            raise AssertionError(
+                "branch={!r} crashed with AttributeError instead of a clean error: {}".format(
+                    val, exc))
+
+
+def test_branch_non_dict_does_not_crash_dataflow() -> None:
+    """dataflow._edges is documented NEVER raises — a non-dict branch must be tolerated."""
+    from yaah.dataflow import _edges
+    for val in ("oops", [], 42):
+        # must not raise anything
+        _edges({"s1": {"node": "a", "branch": val}})
+
+
 def main() -> None:
     test_valid_root_passes()
     test_validator_main_node_render_status_ok_inbound_fails()
@@ -716,7 +745,9 @@ def main() -> None:
     test_budget_fork_wait_smaller_than_branch_node_timeout()
     test_stage_error_retries_is_a_known_key()
     test_min_success_rules()
-    print("test_validate: PASS (42 scenarios)")
+    test_branch_string_is_a_clean_structural_error()
+    test_branch_non_dict_does_not_crash_dataflow()
+    print("test_validate: PASS (44 scenarios)")
 
 
 if __name__ == "__main__":

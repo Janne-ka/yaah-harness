@@ -14,7 +14,7 @@ import io
 import sys
 
 from yaah.cli import _dispatch_validate
-from yaah.validate import lint_pipeline, validate_pipeline
+from yaah.validate import _gate_dead_routes, lint_pipeline, validate_pipeline
 
 
 def _node(schema=None, parse=True, type_="agent"):
@@ -898,6 +898,136 @@ def quiet_gate_json_schema_single_outcome() -> None:
     assert not _has(_gate_cfg(node), "gate-decision-ignored")
 
 
+# ── ITEM 1: a branch route the gate's form can never produce (dead under enforcement) ──
+# [lint: gate-route-not-in-form]. The trial trap: a gate with form:"approve" (enum
+# ["approve"]) whose branch routes {approve, reject}. `reject` is not in the enum, so
+# under resume enforcement (strict_resume default true) the human can NEVER submit it —
+# the route is provably dead. ERROR tier by default (matches provably-wrong dataflow);
+# WARNING when strict_resume:false makes the lenient blind-merge reach it again.
+
+_GRTF = "gate-route-not-in-form"
+
+
+def _gate_route_cfg(form, routes, *, decision_schema=None, default=None, on="decision"):
+    """gate stage whose branch routes on `on` with the given route dests, all -> `done`."""
+    gate = {"type": "human_gate", "form": form}
+    if decision_schema is not None:
+        gate["decision_schema"] = decision_schema
+    branch = {"on": on, "routes": {k: "done" for k in routes}}
+    if default is not None:
+        branch["default"] = "done"
+    return {"nodes": {"g": gate, "d": {"type": "agent", "parse": False}},
+            "graph": {"start": "s", "stages": {
+                "s": {"node": "g", "branch": branch},
+                "done": {"node": "d", "then": None}}}}
+
+
+def gate_dead_route_is_a_hard_error_under_strict_resume() -> None:
+    # the trial's EXACT shape: approve form, routes {approve, reject}. `reject` can never fire.
+    cfg = _gate_route_cfg("approve", ["approve", "reject"])
+    try:
+        validate_pipeline(cfg)   # strict_resume defaults true -> ERROR tier -> raises
+        raise AssertionError("expected the dead 'reject' route to fail validate")
+    except ValueError as e:
+        m = str(e)
+        assert _GRTF in m, m
+        assert "reject" in m and "approve" in m, m   # names the route key AND the enum
+
+
+def gate_dead_route_message_names_stage_form_and_remedy() -> None:
+    cfg = _gate_route_cfg("approve", ["approve", "reject"])
+    try:
+        validate_pipeline(cfg)
+        raise AssertionError("expected raise")
+    except ValueError as e:
+        m = str(e)
+        assert "'s'" in m, m                     # names the stage
+        assert "approve" in m, m                 # names the form / enum member
+        assert "approve_or_revise" in m, m       # remedy suggests a form with reject-like outcome
+
+
+def gate_route_in_form_enum_passes() -> None:
+    # approve_or_revise (enum approve/revise) with routes {approve, revise} — every route valid.
+    cfg = _gate_route_cfg("approve_or_revise", ["approve", "revise"])
+    validate_pipeline(cfg)                        # must NOT raise
+    assert not _has(cfg, _GRTF), lint_pipeline(cfg)
+
+
+def gate_json_schema_inline_enum_mismatch_is_a_hard_error() -> None:
+    schema = {"type": "object", "required": ["decision"],
+              "properties": {"decision": {"enum": ["ship", "block"]}}}
+    cfg = _gate_route_cfg("json_schema", ["ship", "hold"], decision_schema=schema)
+    try:
+        validate_pipeline(cfg)
+        raise AssertionError("expected the dead 'hold' route to fail validate")
+    except ValueError as e:
+        assert _GRTF in str(e) and "hold" in str(e), str(e)
+
+
+def gate_free_text_answer_key_is_unchecked() -> None:
+    # free_text has no `decision` enum (its key is `answer`) -> no membership check, silent pass.
+    cfg = _gate_route_cfg("free_text", ["anything", "at", "all"], on="answer")
+    validate_pipeline(cfg)                        # must NOT raise
+    assert not _has(cfg, _GRTF), lint_pipeline(cfg)
+
+
+def gate_json_schema_without_enum_is_unchecked() -> None:
+    # a json_schema decision property with a `type` but NO enum -> unconstrained -> no check.
+    schema = {"type": "object", "required": ["decision"],
+              "properties": {"decision": {"type": "string"}}}
+    cfg = _gate_route_cfg("json_schema", ["a", "b"], decision_schema=schema)
+    validate_pipeline(cfg)
+    assert not _has(cfg, _GRTF), lint_pipeline(cfg)
+
+
+def gate_default_route_is_not_flagged() -> None:
+    # only NAMED route keys are checked; `default` (the catch-all) is never a dead route.
+    cfg = _gate_route_cfg("approve", ["approve"], default="done")
+    validate_pipeline(cfg)
+    assert not _has(cfg, _GRTF), lint_pipeline(cfg)
+
+
+def gate_dead_route_downgrades_to_warning_when_strict_resume_false() -> None:
+    # strict_resume:false -> the lenient blind-merge makes the forbidden decision reachable
+    # again, so the route is no longer provably dead -> WARNING, not a load ERROR.
+    cfg = _gate_route_cfg("approve", ["approve", "reject"])
+    validate_pipeline(cfg, strict_resume=False)   # must NOT raise
+    w = lint_pipeline(cfg, strict_resume=False)
+    hit = [m for m in w if _GRTF in m]
+    assert hit, w
+    assert "enforcement is off" in hit[0] or "strict_resume" in hit[0], hit[0]
+
+
+def gate_route_non_decision_branch_is_unchecked() -> None:
+    # a branch routing on some OTHER key (not the gate's decision) is out of scope.
+    cfg = _gate_route_cfg("approve", ["x", "y"], on="tag")
+    validate_pipeline(cfg)
+    assert not _has(cfg, _GRTF), lint_pipeline(cfg)
+
+
+def gate_route_lint_never_crashes_on_malformed() -> None:
+    # the detector NEVER raises on odd-but-dict shapes (gather-all contract): a non-string form,
+    # a non-dict routes, a null/non-list enum, a non-string route key. Each contributes no
+    # finding rather than crashing. (A non-dict `branch` VALUE is a validate_pipeline structural
+    # ERROR upstream, so the lint never sees it — not exercised here.)
+    for cfg in (
+        {"nodes": {"g": {"type": "human_gate", "form": 5}},
+         "graph": {"start": "s", "stages": {
+             "s": {"node": "g", "branch": {"on": "decision", "routes": None}}}}},
+        {"nodes": {"g": {"type": "human_gate", "form": "json_schema",
+                         "decision_schema": {"properties": {"decision": {"enum": None}}}}},
+         "graph": {"start": "s", "stages": {
+             "s": {"node": "g", "branch": {"on": "decision", "routes": {"x": "done"}}},
+             "done": {"node": "g"}}}},
+        {"nodes": {"g": {"type": "human_gate", "form": "approve"}},
+         "graph": {"start": "s", "stages": {
+             "s": {"node": "g", "branch": {"on": "decision", "routes": {5: "done"}}},
+             "done": {"node": "g"}}}},
+    ):
+        lint_pipeline(cfg, strict_resume=False)   # must not raise
+        _gate_dead_routes(cfg["nodes"], cfg["graph"]["stages"])   # detector direct, no crash
+
+
 # ── parallel-shape stages: fanout / fork / fanin model the ENGINE's merged payload ──
 # Runtime truth (harness._produce_fanout): a fanout stage's output is
 # `dict(input.payload)` updated with exactly `results`, `roles`, `failed_roles` —
@@ -1663,11 +1793,36 @@ def allow_untrusted_silences_the_render_site() -> None:
     assert not _ut(cfg), lint_pipeline(cfg)
 
 
-def allow_untrusted_does_not_silence_a_gate_site() -> None:
-    # the opt-out is per-RENDER-node: a human_gate site is a different consumer and
-    # stays flagged even if some unrelated render sets allow_untrusted.
+def allow_untrusted_silences_a_gate_site() -> None:
+    # ITEM 2: `allow_untrusted: true` on a human_gate acknowledges that agent text
+    # reaches the human decision-maker unfenced (the human is the firewall). It
+    # silences the gate's own site exactly as it does a render's.
     cfg = _gate_ask_cfg("Answer: {{question}}", schema={"required": ["question"]})
-    cfg["nodes"]["g"]["allow_untrusted"] = True   # not a render → must NOT silence
+    cfg["nodes"]["g"]["allow_untrusted"] = True
+    assert not _ut(cfg), lint_pipeline(cfg)
+
+
+def allow_untrusted_on_gate_does_not_silence_other_gate_sites() -> None:
+    # per-NODE opt-out: a second gate WITHOUT the flag, reading the same authored key,
+    # stays flagged. (Falsifies a pipeline-wide silence.)
+    cfg = {"nodes": {
+        "a": {"type": "agent", "output_schema": {"required": ["question"]}},
+        "g1": {"type": "human_gate", "ask": "{{question}}", "allow_untrusted": True},
+        "g2": {"type": "human_gate", "ask": "{{question}}"}},
+        "graph": {"start": "s1", "stages": {
+            "s1": {"node": "a", "then": "s2"},
+            "s2": {"node": "g1", "then": "s3"},
+            "s3": {"node": "g2"}}}}
+    site_hits = [m for m in _ut(cfg) if "FLOOR" not in m]
+    assert len(site_hits) == 1, _ut(cfg)
+    assert "'s3'" in site_hits[0], site_hits[0]
+
+
+def allow_untrusted_on_agent_does_not_silence_agent_prompt_fencing() -> None:
+    # the flag is a CONSUMER-SITE (render/gate) opt-out, NOT an agent-node key. Setting it
+    # on the producing AGENT must not silence its downstream gate/render untrusted warning.
+    cfg = _gate_ask_cfg("Answer: {{question}}", schema={"required": ["question"]})
+    cfg["nodes"]["p"]["allow_untrusted"] = True   # on the agent producer, not the gate
     assert _ut(cfg), lint_pipeline(cfg)
 
 
@@ -1696,11 +1851,15 @@ def render_untrusted_message_names_allow_untrusted_remedy() -> None:
     assert "heuristic" in m.lower() and "sanitize" in m.lower(), m
 
 
-def gate_untrusted_message_does_not_name_allow_untrusted() -> None:
-    # allow_untrusted is a RENDER remedy — the gate message must not prescribe it.
+def gate_untrusted_message_names_allow_untrusted_remedy() -> None:
+    # ITEM 2: the gate site now HAS an in-place opt-out, so its message names it with
+    # gate-specific wording (the human reviewer is the firewall). Still a heuristic,
+    # still points at sanitize as the alternative.
     cfg = _gate_ask_cfg("Answer: {{question}}", schema={"required": ["question"]})
     m = [x for x in _ut(cfg) if "FLOOR" not in x][0]
-    assert "allow_untrusted" not in m, m
+    assert "allow_untrusted" in m, m
+    assert "human" in m.lower(), m           # gate-specific wording, not the render one
+    assert "heuristic" in m.lower() and "sanitize" in m.lower(), m
 
 
 # ── [lint: reserved-key-collision] — author declares an engine-injected key as their own ──
@@ -2307,6 +2466,16 @@ def main() -> None:
     quiet_gate_free_text_has_no_decision()
     warns_gate_json_schema_two_outcomes()
     quiet_gate_json_schema_single_outcome()
+    gate_dead_route_is_a_hard_error_under_strict_resume()
+    gate_dead_route_message_names_stage_form_and_remedy()
+    gate_route_in_form_enum_passes()
+    gate_json_schema_inline_enum_mismatch_is_a_hard_error()
+    gate_free_text_answer_key_is_unchecked()
+    gate_json_schema_without_enum_is_unchecked()
+    gate_default_route_is_not_flagged()
+    gate_dead_route_downgrades_to_warning_when_strict_resume_false()
+    gate_route_non_decision_branch_is_unchecked()
+    gate_route_lint_never_crashes_on_malformed()
     opaque_nodes_provide_their_real_keys()
     quiet_render_default_into_for_get_and_post()
     custom_node_type_is_opaque_not_false_positive()
@@ -2357,10 +2526,12 @@ def main() -> None:
     untrusted_strict_fails_with_exit_2()
     render_untrusted_fires_without_allow_untrusted()
     allow_untrusted_silences_the_render_site()
-    allow_untrusted_does_not_silence_a_gate_site()
+    allow_untrusted_silences_a_gate_site()
+    allow_untrusted_on_gate_does_not_silence_other_gate_sites()
+    allow_untrusted_on_agent_does_not_silence_agent_prompt_fencing()
     allow_untrusted_only_silences_the_render_that_sets_it()
     render_untrusted_message_names_allow_untrusted_remedy()
-    gate_untrusted_message_does_not_name_allow_untrusted()
+    gate_untrusted_message_names_allow_untrusted_remedy()
     warns_reserved_feedback_in_node_provides()
     warns_reserved_priorattempt_in_node_provides()
     warns_reserved_in_output_schema_properties()
