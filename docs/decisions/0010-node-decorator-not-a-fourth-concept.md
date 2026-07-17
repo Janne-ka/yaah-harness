@@ -1,6 +1,9 @@
 # 0010 — The node decorator: name the wrapper pattern, don't grow a `wrap:` key
 
-**Status:** Proposed — design-only. The maintainer decides; do NOT read this as Accepted.
+**Status:** Accepted — 2026-07-07 (maintainer). Option A: the pattern is named "Node
+decorator" with the transparency invariant; no `wrap:` key (`wrap:` stays in the deferred
+ledger with its trigger). The `agent_contract`/`attach:` fix this ADR recommended is
+SHIPPED on the same branch (see the FIXED note below).
 **Date:** 2026-07-07
 **Answers:** the parked `.notes/todos.md` item "Wrapper-as-fourth-concept ADR — form-plan
 eval finding. `OnceNode + CarriageBoundaryNode + AttachingAgent` is an unnamed pattern.
@@ -70,6 +73,39 @@ payload keys). For `AttachingAgent` it is a **latent soundness gap**:
   ERROR** (`validate` fail-loud) even though the attacher supplies `usage` at runtime. **No
   such config exists in the repo** — so this is latent, not a live bug.
 
+> **FIXED 2026-07-07** (same branch, on this ADR's recommendation) — **note amended after a
+> verified code review that found the first cut defective; the text below describes what NOW
+> ships.** Four moves, each honest about its ceiling:
+>
+> 1. **Contract.** `agent_contract` detects a *valid non-empty* `attach` list (via
+>    `_as_key_set`, not `bool(cfg.get("attach"))` — the old truthiness read let a bare-string
+>    `attach: "fn:x"` silently drop `closed`). A real attach list drops `closed`
+>    (`complete=True`): attacher keys are fn: code, unenumerable statically, so the set is a
+>    *declared* contract, not a runtime proof.
+> 2. **Declare-to-see.** The declared attacher keys reach the contract through
+>    `resolve_contract`, which augments *any* known node's `provides` (it does **not** live in
+>    `agent_contract`'s parse:false branch — verified). So `parse:false` + `attach:` +
+>    `provides: ["usage"]` + `render "{{usage}}"` validates **clean** (the key is `complete` →
+>    no warning); an *undeclared* read or a typo `{{usgae}}` is a `[lint: render-key-unprovided]`
+>    **WARNING**. That warning **fails `--strict` (exit 2)** — the honest ceiling, not merely
+>    "advises": an attacher can emit *any* key at runtime, so a hard ERROR would be a
+>    false-positive and the typo is genuinely only warnable, but it does still block the CI gate.
+> 3. **Malformed attach** (`attach:` a non-list, or a non-string/empty item) is now a
+>    **validate-time hard ERROR** — it used to slip past load (the schema's
+>    `additionalProperties`) and explode in `_build_agent` only after paid model calls.
+>    `attach` is pinned array-of-strings in `schema_gen.py` too.
+> 4. **Proactive nudge.** A `parse:false` agent with `attach:` but no `provides:` earns a
+>    `[lint: attach-undeclared-keys]` warning on the node itself (attacher keys are invisible
+>    to the data-flow lint until declared). Scoped to parse:false — a parse:true agent is
+>    never `closed`, so its undeclared attach key is already caught by the ordinary downstream
+>    `-unprovided` warning, and nudging there would newly flag the shipped parse:true+attach
+>    examples (which route attach keys into opaque transforms). Empty `attach: []` attaches
+>    nothing → stays `closed` → the honest hard error for a provably-absent key is preserved.
+>
+> Tests: `test_node_contract.py` (attach detection incl. malformed→no-attach and the
+> declared-provides augment) and `test_lint_pipeline.py` (the whole set end-to-end through
+> `validate_pipeline`/`lint_pipeline` + the `--strict` exit-2 teeth).
+
 This is exactly the false-positive class ADR-0006 worked to design out for custom nodes,
 re-opened by a wrapper that changes the payload behind `describe()`'s back. It is the single
 strongest technical argument in this whole decision — and, verified, it has **no present
@@ -110,7 +146,7 @@ subpipeline node, added and retired in 24h, is the standing precedent).
 
 ### The two options, pinned concretely
 
-**Option A (recommended) — today's shape, named and governed.** No config change.
+**Option A (ACCEPTED) — today's shape, named and governed.** No config change.
 
 ```json
 "role:commit": {"type": "shell", "command": "git commit …", "idempotent": true},
@@ -195,13 +231,17 @@ constructor signature; the Python duck-typed `Node` is sufficient. No base class
 - The `AttachingAgent` payload-contract gap is on the record with a bounded, direct fix,
   instead of lurking as an undocumented latent false-positive.
 
-**What this commits us to (if A is accepted)**
+**What this commits us to (A accepted 2026-07-07 — every commitment discharged same day)**
 - A one-paragraph "Node decorator" section in `AGENTS.md` / the engine map, stating the
   transparency invariant and listing the three decorators + their triggers.
+  **DONE 2026-07-07** — AGENTS.md "Editing the engine — invariants", convention tier.
 - Either fix `agent_contract` to read `attach` (preferred — makes the invariant true), or
   document the parse=false+attach+render caveat where `attach:` is described. **This ADR
   recommends the fix**; it is small and removes a real (if latent) unsoundness.
-- A deferred-ledger row (`.notes/deferred-ledger-2026-07-07.md`, section A):
+  **DONE 2026-07-07** — shipped on this branch; see the FIXED note in the violation
+  section above. The invariant now holds with no known violations.
+- A deferred-ledger row (`.notes/deferred-ledger-2026-07-07.md`).
+  **DONE 2026-07-07** — the row lives in the ledger's §A2 with this trigger:
 
   | Deferred | Use case it would serve | Why deferred / trigger |
   |---|---|---|
@@ -226,4 +266,4 @@ constructor signature; the Python duck-typed `Node` is sufficient. No base class
   `AttachingAgent` gap re-opens.
 - `src/yaah/build/builders.py` (`_build_agent`, `_wrap_node`) — where all three decorators are
   wired; the build-order and trigger facts above come from here.
-- `.notes/deferred-ledger-2026-07-07.md` — where the `wrap:` trigger row lands if A is accepted.
+- `.notes/deferred-ledger-2026-07-07.md` — holds the `wrap:` trigger row (§A2, added 2026-07-07).

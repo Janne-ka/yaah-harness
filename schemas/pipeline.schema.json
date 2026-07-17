@@ -168,6 +168,13 @@
       "additionalProperties": {
         "additionalProperties": true,
         "properties": {
+          "attach": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array"
+          },
           "provides": {
             "items": {
               "minLength": 1,

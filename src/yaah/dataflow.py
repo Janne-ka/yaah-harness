@@ -355,8 +355,9 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
         return (
             "stage {!r}: branches on {!r}, but nothing on the path to it provides that key "
             "(provides {}). The branch then depends on UNDECLARED output — it falls through to "
-            "branch.default on any run where {!r} is absent. Declare {!r} (in the producing "
-            "agent's output_schema, a transform's `provides`, or graph `sticky`). "
+            "branch.default on any run where {!r} is absent. Declare {!r} (on the producing "
+            "agent as `provides: [...]` — the general remedy, incl. attach-supplied keys; or "
+            "its output_schema for parsed keys; a transform's `provides`; or graph `sticky`). "
             "[lint: branch-key-unprovided]".format(s_name, on, sorted(known - {"raw"}), on, on))
 
     def render_msg(s_name: str, missing: List[str], known: "frozenset", hard: bool) -> str:
@@ -371,9 +372,11 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
         return (
             "stage {!r}: render template needs {} which nothing on the path to it provides "
             "(provides {}). The render then depends on undeclared output — it FAILS with "
-            "render_unfilled_placeholders on any run where they're absent. Declare them (in the "
-            "producing agent's output_schema, a transform's `provides`, or graph `sticky`), or set "
-            "allow_unfilled:true if intentionally literal. [lint: render-key-unprovided]".format(
+            "render_unfilled_placeholders on any run where they're absent. Declare them (on the "
+            "producing agent as `provides: [...]` — the general remedy, incl. attach-supplied "
+            "keys; or its output_schema for parsed keys; a transform's `provides`; or graph "
+            "`sticky`), or set allow_unfilled:true if intentionally literal. "
+            "[lint: render-key-unprovided]".format(
                 s_name, missing, sorted(known - {"raw"})))
 
     def consumes_msg(s_name: str, missing: List[str], known: "frozenset", hard: bool) -> str:
@@ -388,7 +391,9 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
                     s_name, missing, sorted(known - {"raw"})))
         return (
             "stage {!r}: node reads {} (its `consumes`) which nothing on the path to it "
-            "provides (provides {}). Declare an upstream provider or drop them from `consumes`. "
+            "provides (provides {}). Declare it on an upstream producer (an agent `provides: "
+            "[...]` — incl. attach-supplied keys; or its output_schema; a transform's "
+            "`provides`; or graph `sticky`) or drop them from `consumes`. "
             "[lint: input-key-unprovided]".format(s_name, missing, sorted(known - {"raw"})))
 
     for s_name, s in stages.items():

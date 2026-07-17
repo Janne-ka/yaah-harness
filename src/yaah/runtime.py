@@ -365,22 +365,49 @@ _validate_root = validate_root        # back-compat alias for older test imports
 
 
 def _trace_extends_chain(root_path: str) -> list:
-    """Walk a root file's `_extends` chain top-down, returning a list of
-    (basename, raw_dict) starting with the user's own file and following each
-    `_extends` link. Used by `explain_root` to attribute each top-level key to
-    its source file (R13 provenance)."""
+    """Walk a root file's `_extends` declaration, returning a list of
+    (basename, raw_dict) starting with the user's own file followed by each
+    base in RESOLUTION-WINNER order: the explain loop attributes a key to the
+    FIRST chain entry that has it, so entries appear later-base-first (a later
+    list entry wins over an earlier one, and a child wins over its own bases).
+    Used by `explain_root` for R13 provenance.
+
+    Handles both forms, matching `_load_with_extends`' semantics: a string is
+    a single parent; a list is base-first with later entries winning; either
+    kind of entry may itself carry `_extends` (walked recursively). Known
+    limitation (both forms, pre-existing): `yaah:` package refs are not
+    resolved here — provenance shows the nearest file, never inside the
+    packaged seed. Never raises on a malformed/missing base: provenance
+    degrades to the files it could read (the LOADER owns error reporting).
+    """
     chain = []
     seen = set()
-    p = os.path.abspath(root_path)
-    while p not in seen:
+
+    def _walk(path: str) -> None:
+        p = os.path.abspath(path)
+        if p in seen:
+            return
         seen.add(p)
-        with open(p, "r", encoding="utf-8") as f:
-            raw = json.load(f)
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except (OSError, ValueError):
+            return  # loader reports; provenance just degrades
         chain.append((os.path.basename(p), raw))
         ext = raw.get("_extends") if isinstance(raw, dict) else None
         if not ext:
-            break
-        p = ext if os.path.isabs(ext) else os.path.normpath(os.path.join(os.path.dirname(p), ext))
+            return
+        base_dir = os.path.dirname(p)
+        refs = ext if isinstance(ext, list) else [ext]
+        # later entries win → walk them first so the winner sits earlier in
+        # the chain (first-match attribution in the explain loop).
+        for entry in reversed(refs):
+            if not isinstance(entry, str) or entry.startswith("yaah:"):
+                continue  # loader validates entries; yaah: seeds unresolvable here
+            _walk(entry if os.path.isabs(entry)
+                  else os.path.normpath(os.path.join(base_dir, entry)))
+
+    _walk(root_path)
     return chain
 
 

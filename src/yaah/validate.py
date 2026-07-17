@@ -637,6 +637,18 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None, *
                                  or not all(isinstance(k, str) and k for k in prov)):
             errs.append("node {!r}: 'provides' must be a list of non-empty payload-key "
                         "strings (the keys this node guarantees on the payload)".format(role))
+        # ADR-0010 attach: a list of `fn:` attachers merged onto an agent's output. The SHAPE
+        # is checked here (a hard ERROR at LOAD, not mid-build) — a non-list / non-string item
+        # otherwise fell through the contract's truthiness read (silently dropping the `closed`
+        # proof) and exploded in `_build_agent` only AFTER paid model calls. The fn:-target
+        # grammar + Attacher-subclass check stay in the builder (they import consumer code).
+        att = n.get("attach")
+        if att is not None and (not isinstance(att, list)
+                                or not all(isinstance(a, str) and a for a in att)):
+            errs.append("node {!r}: 'attach' must be a list of non-empty 'fn:module:func' "
+                        "attacher strings (each merges post-invoke keys onto the agent's "
+                        "output payload; declare those keys in `provides` so the data-flow "
+                        "lint can see them)".format(role))
         # M7 ladder: escalate_model's trigger is a PARSED `help` key, so it needs
         # the parse path — with parse:false it would silently never fire (the
         # silent-misconfig class); reject loud instead.
@@ -935,6 +947,7 @@ def lint_pipeline(config: Dict[str, Any], base_path: Optional[str] = None,
     elif any(not isinstance(s, dict) for s in stages.values()):
         stages = {k: s for k, s in stages.items() if isinstance(s, dict)}
     _lint_weak_output_schema(nodes, warnings)
+    _lint_attach_undeclared_keys(nodes, warnings)
     _lint_gate_ignores_rejection(nodes, stages, warnings)
     _lint_rollback_without_effects(nodes, stages, warnings)
     _lint_reserved_key_collision(nodes, stages, sticky, warnings)
@@ -988,6 +1001,44 @@ def _lint_weak_output_schema(nodes: Dict[str, Any], warnings: List[str]) -> None
                 "type/enum). A parseable-but-wrong value then passes check_schema and "
                 "surfaces far downstream — declare type/enum on each so bad output is "
                 "caught here. [lint: weak-output-schema]".format(role, required, untyped))
+
+
+def _lint_attach_undeclared_keys(nodes: Dict[str, Any], warnings: List[str]) -> None:
+    """Rule `attach-undeclared-keys` (ADR-0010). A `parse:false` agent with a non-empty
+    `attach:` merges attacher-supplied keys (fn: code, unenumerable statically) onto its
+    output — but the data-flow lint cannot see them, so a downstream `render`/`branch` reading
+    one surfaces as an `-unprovided` warning that looks like a bug. Declaring the keys in the
+    agent's own `provides:` makes them visible (`resolve_contract` augments provides uniformly).
+
+    Scoped to `parse:false`: there the agent is otherwise CLOSED {raw} (runtime-exact), so
+    attach is the SOLE loosener and declaring its keys is the whole remedy. A `parse:true`
+    agent is never closed (its parsed keys are already only `complete`), so an undeclared
+    attach key there is caught by the ordinary downstream `-unprovided` warning without a
+    separate node-level nudge (and firing here would newly flag the shipped parse:true+attach
+    examples, which route their attach keys into opaque transforms — noise, not a finding).
+
+    It is NOT redundant with the downstream `-unprovided` warning: that warning fires only when
+    a checkable consumer (a render/branch) reads an attach key — when the keys flow into an
+    OPAQUE transform (or nothing reads them), no downstream warning fires, and this nudge is the
+    only signal for the exact silent gap ADR-0010 named. Fires only when NO `provides` is
+    declared; ANY declared `provides` list silences it — so `provides: []` is the explicit
+    opt-out for an author who intends an open-ended attach with no lint-visible keys."""
+    for role, node in nodes.items():
+        if role.startswith("_") or not isinstance(node, dict):
+            continue
+        if node.get("type") != "agent" or node.get("parse") is not False:
+            continue
+        attach = node.get("attach")
+        if not (isinstance(attach, list)
+                and any(isinstance(a, str) and a for a in attach)):
+            continue  # absent / empty / malformed (malformed is a validate_pipeline ERROR)
+        if isinstance(node.get("provides"), list):
+            continue  # already declared → keys are visible to the lint
+        warnings.append(
+            "node {!r}: `attach:` merges attacher-supplied keys onto the payload, but they "
+            "are invisible to the data-flow lint (fn: code) — a downstream render/branch that "
+            "reads one warns as unprovided. Declare them in this agent's `provides: [...]` so "
+            "the lint can check them. [lint: attach-undeclared-keys]".format(role))
 
 
 def _gate_decision_outcomes(node: Dict[str, Any], forms: Dict[str, Any]) -> Optional[int]:

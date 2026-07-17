@@ -327,6 +327,110 @@ def scenario_read_json_extends() -> None:
         assert _read_json(p) == {"q": "p"}
 
 
+def scenario_read_json_extends_list() -> None:
+    """List-form `_extends: ["a", "b"]` — the FLATTENING of a chain. Bases merge
+    left-to-right (later base wins over earlier), then the child merges on top
+    (child wins over all). Guards the crash where the loader called `.startswith`
+    on the raw list value (AttributeError) while the schema advertised the array
+    form: the schema promised what the loader couldn't do.
+    """
+    from yaah.runtime_factories import _read_json
+
+    def _w(td: str, name: str, obj: object) -> str:
+        p = os.path.join(td, name)
+        with open(p, "w") as f:
+            json.dump(obj, f)
+        return p
+
+    # (1) two-base list: later base wins on a scalar; deep-merge on nested objects.
+    with tempfile.TemporaryDirectory() as td:
+        _w(td, "a.json", {"x": 1, "shared": "from_a", "nested": {"p": 1, "q": 1}})
+        _w(td, "b.json", {"y": 2, "shared": "from_b", "nested": {"q": 2, "r": 2}})
+        c = _w(td, "c.json", {"_extends": ["a.json", "b.json"]})
+        assert _read_json(c) == {
+            "x": 1, "y": 2, "shared": "from_b",       # rightmost base wins the scalar
+            "nested": {"p": 1, "q": 2, "r": 2},        # nested objects deep-merge
+        }, _read_json(c)
+
+        # list-form == chain flattening (child -> b -> a). Same result, proven equal.
+        _w(td, "bchain.json", {"_extends": "a.json", "y": 2, "shared": "from_b",
+                               "nested": {"q": 2, "r": 2}})
+        chain = _w(td, "chain.json", {"_extends": "bchain.json"})
+        assert _read_json(chain) == _read_json(c), (_read_json(chain), _read_json(c))
+
+    # (2) child overrides BOTH bases.
+    with tempfile.TemporaryDirectory() as td:
+        _w(td, "a.json", {"k": "a", "only_a": 1})
+        _w(td, "b.json", {"k": "b", "only_b": 2})
+        c = _w(td, "c.json", {"_extends": ["a.json", "b.json"], "k": "child"})
+        assert _read_json(c) == {"k": "child", "only_a": 1, "only_b": 2}, _read_json(c)
+
+    # (3) a list entry that ITSELF extends another file (recursion within an entry).
+    with tempfile.TemporaryDirectory() as td:
+        _w(td, "grand.json", {"g": 1, "shared": "grand"})
+        _w(td, "a.json", {"_extends": "grand.json", "a": 1, "shared": "a"})
+        _w(td, "b.json", {"b": 1})
+        c = _w(td, "c.json", {"_extends": ["a.json", "b.json"]})
+        # a expands to {g:1, a:1, shared:"a"}; b adds {b:1}; nothing overrides shared.
+        assert _read_json(c) == {"g": 1, "a": 1, "shared": "a", "b": 1}, _read_json(c)
+
+    # (4) a cycle reached THROUGH a list entry raises the cycle error.
+    with tempfile.TemporaryDirectory() as td:
+        _w(td, "a.json", {"_extends": ["b.json"], "x": 1})
+        _w(td, "b.json", {"_extends": "a.json", "y": 2})
+        try:
+            _read_json(os.path.join(td, "a.json"))
+        except ValueError as e:
+            assert "cycle" in str(e), str(e)
+        else:
+            raise AssertionError("expected cycle through a list to raise")
+
+    # (5) empty list = no bases (just the child, minus the _extends key).
+    with tempfile.TemporaryDirectory() as td:
+        c = _w(td, "c.json", {"_extends": [], "only": "me"})
+        assert _read_json(c) == {"only": "me"}, _read_json(c)
+
+    # (6) a non-string entry raises an actionable ValueError naming the index.
+    with tempfile.TemporaryDirectory() as td:
+        _w(td, "a.json", {"x": 1})
+        c = _w(td, "c.json", {"_extends": ["a.json", {"type": "file"}]})
+        try:
+            _read_json(c)
+        except ValueError as e:
+            msg = str(e)
+            assert "_extends[1]" in msg, msg          # names the offending index
+            assert "path string" in msg, msg          # says what was expected
+            assert "dict" in msg, msg                  # names what it got
+        else:
+            raise AssertionError("expected non-string list entry to raise ValueError")
+    # ... and a non-string, non-list `_extends` also raises actionably.
+    with tempfile.TemporaryDirectory() as td:
+        c = _w(td, "c.json", {"_extends": 42})
+        try:
+            _read_json(c)
+        except ValueError as e:
+            assert "path string or a list" in str(e), str(e)
+        else:
+            raise AssertionError("expected scalar-int _extends to raise ValueError")
+
+    # (7) a `yaah:` package ref works INSIDE a list (uses the shipped seed bases).
+    with tempfile.TemporaryDirectory() as td:
+        c = _w(td, "c.json", {"_extends": ["yaah:bases/local.base.json",
+                                           "yaah:bases/trace-audit.base.json"]})
+        got = _read_json(c)
+        # local.base gives transport/state; trace-audit's trace block wins (rightmost).
+        assert got["transport"] == {"type": "inproc"}, got
+        assert got["trace"]["capture"] == ["phase", "cost", "tools"], got["trace"]
+        assert any(s.get("type") == "file" for s in got["trace"]["sinks"]), got["trace"]
+
+    # (8) REGRESSION: single-string behavior unchanged (rebuilds the 3-level chain).
+    with tempfile.TemporaryDirectory() as td:
+        _w(td, "a.json", {"x": 1, "y": 2, "z": 3})
+        _w(td, "b.json", {"_extends": "a.json", "y": 20})
+        c = _w(td, "c.json", {"_extends": "b.json", "z": 30})
+        assert _read_json(c) == {"x": 1, "y": 20, "z": 30}, _read_json(c)
+
+
 def scenario_read_json_bad_json_names_file() -> None:
     """Usability-gap §7 fix: a JSONDecodeError surfaces with the file path
     prefixed so the operator knows WHICH file is malformed. Without this, a
@@ -510,6 +614,48 @@ def scenario_main_catches_import_error() -> None:
     assert "yaah_app_demo" in msg, msg
 
 
+
+def scenario_trace_extends_chain_forms() -> None:
+    """R13 provenance tracer handles every _extends shape the LOADER accepts:
+    flat list (later entry wins -> appears earlier in the chain), a list entry
+    carrying its own _extends (walked, not treated as a leaf), legacy string
+    chain (regression), yaah: refs skipped without crashing, and a missing
+    base degrading silently (the loader owns error reporting)."""
+    import json as _json
+    import tempfile
+    from yaah.runtime import _trace_extends_chain
+
+    d = tempfile.mkdtemp(prefix="yaah-explain-chain-")
+    def w(name, obj):
+        fp = os.path.join(d, name)
+        with open(fp, "w") as f:
+            _json.dump(obj, f)
+        return fp
+
+    w("c.json", {"k_c": 1})
+    w("b.json", {"_extends": "c.json", "k_b": 1})
+    w("a.json", {"k_a": 1})
+    root = w("root.json", {"_extends": ["a.json", "b.json"], "k_root": 1})
+
+    names = [n for n, _ in _trace_extends_chain(root)]
+    # first-match attribution order == loader precedence: root > b > c > a
+    assert names == ["root.json", "b.json", "c.json", "a.json"], names
+
+    # legacy single-string chain regression: root2 -> b -> c
+    root2 = w("root2.json", {"_extends": "b.json", "k": 1})
+    assert [n for n, _ in _trace_extends_chain(root2)] == \
+        ["root2.json", "b.json", "c.json"]
+
+    # yaah: ref skipped (not resolvable here), no crash; sibling still walked
+    root3 = w("root3.json", {"_extends": ["yaah:bases/local.base.json", "a.json"]})
+    assert [n for n, _ in _trace_extends_chain(root3)] == ["root3.json", "a.json"]
+
+    # missing base degrades silently (loader reports; provenance just shrinks)
+    root4 = w("root4.json", {"_extends": ["nope.json", "a.json"]})
+    assert [n for n, _ in _trace_extends_chain(root4)] == ["root4.json", "a.json"]
+    print("PASS explain tracer: list / nested / string / yaah-skip / missing-base")
+
+
 def main() -> None:
     scenario_resolve_serve()
     scenario_validate_root()
@@ -522,6 +668,8 @@ def main() -> None:
     scenario_stats_sink_price_map_file()
     scenario_cli_parser()
     scenario_read_json_extends()
+    scenario_read_json_extends_list()
+    scenario_trace_extends_chain_forms()
     scenario_read_json_bad_json_names_file()
     scenario_data_flow_contract_load_time()
     scenario_main_catches_import_error()

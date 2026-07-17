@@ -85,3 +85,10 @@ Until those triggers fire, the cookbook stays read-only-by-design.
   and the branch cascade (escalates on an external validator verdict),
   with a table for choosing. Reference implementation in
   `examples/model-cascade/`.
+- [operator-loop.md](operator-loop.md) — an AI improves a running
+  pipeline under a safety envelope: read run evidence → propose ONE
+  config revision → `validate --strict` + surface/anti-parroting gate
+  → run, score, keep-or-rollback. Proven 33%→96% in two iterations on
+  real models. Includes the risk→verb envelope table, the recipe, six
+  use cases, and the claim discipline ("gated operator loop", never
+  "self-improving pipeline").
