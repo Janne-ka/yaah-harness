@@ -1,0 +1,9 @@
+NOTICE RW-2031-074 — Quarterly Emissions Reporting Format
+Issuing body: Fictional Environmental Reporting Board (FERB)
+Effective: 2032-02-01
+
+The quarterly emissions return moves from a spreadsheet upload to a structured
+form with three additional fields (source category, measurement method,
+uncertainty band). Historical data need not be restated.
+
+Impact note: reporting team maps existing data to the new fields before Q1 close.

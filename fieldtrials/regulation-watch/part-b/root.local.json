@@ -1,0 +1,17 @@
+{
+  "$schema": "../../../schemas/root.schema.json",
+  "_about": "Offline (fake) overlay for the Part-B broken pipeline. Deterministic, no API calls. NOTE (trial runner only): the `judge` model's scripted reply omits the required `notes` key on purpose — landmine L5 (schema_mismatch at runtime).",
+  "transport": {"type": "inproc"},
+  "providers": {"fake": {"type": "fake_scripted", "by_model": {
+    "classify": ["{\"impact_area\": \"product-safety\", \"high_impact\": true}"],
+    "draft": ["{\"summary\": \"A new recall trigger requires failing batches to be recalled within 72 hours, applied retroactively to the last 90 days, with licence suspension for non-compliance.\", \"confidence\": \"high\"}"],
+    "judge": ["{\"verdict\": \"pass\"}"]
+  }}},
+  "default_provider": "fake",
+  "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
+  "default_prompt_source": "file",
+  "state": {"type": "file", "dir": "state"},
+  "pipeline": "pipeline.json",
+  "input": "input.json",
+  "run": true
+}

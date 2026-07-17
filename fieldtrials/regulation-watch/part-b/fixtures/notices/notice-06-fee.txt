@@ -1,0 +1,8 @@
+NOTICE RW-2031-062 — Annual Registration Fee Adjustment
+Issuing body: Fictional Licensing Registry (FLR)
+Effective: 2032-01-01
+
+The annual facility-registration fee is indexed to inflation, rising from
+420 to 435 currency units. Payment window and method are unchanged.
+
+Impact note: finance updates the accrual; no operational change.

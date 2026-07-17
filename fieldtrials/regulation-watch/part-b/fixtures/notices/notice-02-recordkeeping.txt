@@ -1,0 +1,9 @@
+NOTICE RW-2031-021 — Retention Schedule Clarification
+Issuing body: Fictional Records & Archives Authority (FRAA)
+Effective: 2031-10-15
+
+Clarifies that shipment manifests fall under the existing 7-year retention
+class, not the 3-year general-correspondence class. No new obligation is
+created; this resolves an ambiguity flagged in prior guidance.
+
+Impact note: update the internal retention matrix wording only.

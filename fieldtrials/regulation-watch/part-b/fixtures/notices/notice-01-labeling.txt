@@ -1,0 +1,9 @@
+NOTICE RW-2031-014 — Packaging Legibility Amendment
+Issuing body: Fictional Consumer Goods Bureau (FCGB)
+Effective: 2031-09-01
+
+Minimum font size for net-quantity statements on retail packaging rises
+from 1.6mm to 2.0mm. A six-month sell-through window applies to stock
+already printed. No change to placement or wording rules.
+
+Impact note: minor artwork refresh at next print cycle.

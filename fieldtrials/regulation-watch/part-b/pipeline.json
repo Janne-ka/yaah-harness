@@ -1,0 +1,80 @@
+{
+  "$schema": "../../../schemas/pipeline.schema.json",
+  "_about": "BROKEN-ON-PURPOSE regulation-watch pipeline for Part B of the field trial. Five seeded landmines (L1-L5). The builder's job is to make this strict-clean and offline-green and document every problem found. Do NOT read answer-key.md — that is for the trial runner.",
+
+  "nodes": {
+    "role:classify": {
+      "type": "agent",
+      "prompt": "file:classify",
+      "model": "fake:classify",
+      "stage": "classify",
+      "parse": true
+    },
+
+    "role:draft": {
+      "type": "agent",
+      "prompt": "file:draft",
+      "model": "fake:draft",
+      "stage": "draft",
+      "strict_render": true,
+      "max_attempts": 3,
+      "output_schema": {
+        "type": "object",
+        "properties": {"summary": {"type": "string"}, "confidence": {"type": "string"}},
+        "required": ["summary", "confidence"]
+      }
+    },
+
+    "role:judge": {
+      "type": "agent",
+      "prompt": "file:judge",
+      "model": "fake:judge",
+      "stage": "judge",
+      "carry": ["summary"],
+      "output_schema": {
+        "type": "object",
+        "properties": {"verdict": {"type": "string"}, "notes": {"type": "string"}},
+        "required": ["verdict", "notes"]
+      }
+    },
+
+    "role:tally": {
+      "type": "transform",
+      "call": "envelope",
+      "target": "fn:transforms:tally",
+      "config": {"max_cycles": 3},
+      "provides": ["cycle", "loop_done", "loop_feedback", "digest_summary"]
+    },
+
+    "role:gate": {
+      "type": "human_gate",
+      "form": "approve",
+      "awaiting": "digest:approve",
+      "ask": "A notice was flagged for review. Approve before the digest is released:\n\n{{digest_summary}}"
+    },
+
+    "role:digest": {
+      "type": "render",
+      "template_file": "templates/digest.md",
+      "out": "digest.md"
+    }
+  },
+
+  "graph": {
+    "start": "classify",
+    "sticky": ["notice", "cycle", "loop_feedback"],
+    "stages": {
+      "classify": {"node": "role:classify",
+                   "branch": {"on": "high_impact", "routes": {"true": "draft"}, "default": "draft"}},
+      "draft":    {"node": "role:draft", "then": "judge"},
+      "judge":    {"node": "role:judge", "then": "tally"},
+      "tally":    {"node": "role:tally",
+                   "branch": {"on": "loop_done", "routes": {"no": "draft"}, "default": "gate"}},
+      "gate":     {"node": "role:gate",
+                   "branch": {"on": "decision",
+                              "routes": {"approve": "digest", "reject": "draft"},
+                              "default": "digest"}},
+      "digest":   {"node": "role:digest", "then": null}
+    }
+  }
+}

@@ -1,0 +1,10 @@
+NOTICE RW-2031-050 — Mandatory Recall Trigger (HIGH IMPACT)
+Issuing body: Fictional Product Safety Directorate (FPSD)
+Effective: IMMEDIATE
+
+Any product batch failing the new thermal-cycling test MUST be recalled within
+72 hours of a failed result. Applies retroactively to stock shipped in the
+last 90 days. Non-compliance carries suspension of the distribution licence.
+
+Impact note: immediate cross-functional response required — legal, ops, comms.
+This is a high-impact change and should be escalated for human review.
