@@ -82,6 +82,23 @@ def _fixforward_l3(d):
     json.dump(pj, open(ppath, "w", encoding="utf-8"), indent=2)
 
 
+def _fixforward_l5(d):
+    """Fix L5 in a throwaway part-b: add `notes` to the judge scripted replies so
+    the run can advance past judge's output_schema validation.  Used by the L4-layered
+    STATE 2 and STATE 3 subtests to verify loop cycling without L5 masking the result."""
+    rl_path = os.path.join(d, "root.local.json")
+    rl = json.load(open(rl_path, encoding="utf-8"))
+    judge_seq = rl["providers"]["fake"]["by_model"]["judge"]
+    fixed = []
+    for entry in judge_seq:
+        obj = json.loads(entry)
+        if "notes" not in obj:
+            obj["notes"] = "Fixed for loop cycling (selfcheck fix-forward)"
+        fixed.append(json.dumps(obj))
+    rl["providers"]["fake"]["by_model"]["judge"] = fixed
+    json.dump(rl, open(rl_path, "w", encoding="utf-8"), indent=2)
+
+
 # --- L3: gate-route-not-in-form fires as a HARD ERROR at validate ---------------
 
 def check_l3_lint_rescued():
@@ -144,63 +161,117 @@ def check_l1_missing_carry():
     print("PASS L1 — missing-carry warning present after L3 fixed (names 'high_impact')")
 
 
-# --- L2: loop-key mismatch is SILENT (no lint) ----------------------------------
+# --- L4-layered: merged L2+L4 trap — three states to verify ---------------------
+#
+# The original standalone L2 ({{?judge_notes}} decoy) and standalone L4
+# (bare {{loop_feedback}}) have been merged into one layered trap:
+# draft.md now has ONE guidance line — {{judge_notes}} (bare, no ?).
+#
+# STATE 1  pristine: bare {{judge_notes}} + strict_render → render_unfilled_placeholders at draft
+# STATE 2  builder adds ?: {{?judge_notes}} → no fault, run cycles and suspends, but
+#          judge_notes is NEVER written (tally writes loop_feedback), so the guidance
+#          line is EMPTY every pass — blind loop, provably silent, no lint
+# STATE 3  full fix: {{?loop_feedback}} → points at the key tally actually writes, informed
 
-def check_l2_silent():
-    # Structural check: draft.md reads the decoy key (the one tally never writes).
+def check_l2l4_layered():
+    # --- Structural invariants ---
     draft_path = os.path.join(PART_B, "prompts", "draft.md")
     draft_text = open(draft_path, encoding="utf-8").read()
-    assert "{{?judge_notes}}" in draft_text, (
-        "L2 MISSING: draft.md should read {{?judge_notes}} (the decoy key tally never writes). "
-        "The L2 trap requires a key mismatch between the loop-guidance placeholder and the key "
-        "tally actually writes (loop_feedback). Restore the {{?judge_notes}} line to draft.md.")
+    assert "{{judge_notes}}" in draft_text, (
+        "L4-layered MISSING: draft.md must read {{judge_notes}} (bare, no ?) as the merged trap key. "
+        "tally never writes judge_notes, so STATE 1 faults render_unfilled_placeholders and "
+        "STATE 2 (after adding ?) runs blind. Restore the bare {{judge_notes}} line to draft.md.")
+    assert "{{?judge_notes}}" not in draft_text, (
+        "L4-layered defused: draft.md has {{?judge_notes}} already optional — STATE 1 won't fault. "
+        "Remove the ? so the bare placeholder triggers strict_render on first run.")
+    assert "{{loop_feedback}}" not in draft_text and "{{feedback}}" not in draft_text, (
+        "L4-layered: draft.md should have only {{judge_notes}} as the guidance line; "
+        "old feedback/loop_feedback lines must be removed.")
 
-    # Confirm tally writes `loop_feedback`, not `judge_notes`.
     tally_path = os.path.join(PART_B, "transforms.py")
     tally_text = open(tally_path, encoding="utf-8").read()
     assert '"loop_feedback"' in tally_text or "'loop_feedback'" in tally_text, (
-        "L2: tally should write loop_feedback (the key the prompt does NOT read)")
+        "L4-layered: tally must write loop_feedback (the key draft does NOT read in STATE 2)")
     assert "judge_notes" not in tally_text, (
-        "L2: tally must NOT write judge_notes (that would defuse the decoy)")
+        "L4-layered: tally must NOT write judge_notes — that would defuse the blind-loop half")
 
-    # Runtime check: after fixing L3, validate shows only L1 as a warning.
-    # A new lint for the loop-key mismatch would add a second warning and break
-    # the trial's "L2 is doc-only" premise — detect that immediately.
-    d = _fresh_partb()
-    _fixforward_l3(d)
-    v = _validate_json(d)
-    ids = [w["id"] for w in v["warnings"]]
-    assert set(ids) == {"missing-carry"}, (
-        "L2: expected the only lint to be missing-carry (L2 is doc-only). "
-        "A new lint here means L2 is no longer silent — re-read answer-key.md.", ids)
-    assert not v["errors"], ("L2: no hard errors expected after L3 fixed", v["errors"])
-    print("PASS L2 — loop-key mismatch is silent: draft.md reads {{?judge_notes}}, "
-          "tally writes loop_feedback; no lint beyond L1 after L3 fixed")
+    pipeline_path = os.path.join(PART_B, "pipeline.json")
+    pipeline_text = open(pipeline_path, encoding="utf-8").read()
+    assert "judge_notes" not in pipeline_text, (
+        "L4-layered: pipeline.json must not write or declare judge_notes anywhere")
 
+    # --- STATE 1: bare {{judge_notes}} + strict_render faults at draft ---
+    d1 = _fresh_partb()
+    _fixforward_l3(d1)
+    rc1, o1 = _run_json(d1)
+    assert rc1 == 1 and o1["outcome"] == "failed", (
+        "L4-layered STATE 1: pristine run should fail", rc1, o1)
+    assert o1["stage"] == "draft", (
+        "L4-layered STATE 1: fault must be at the draft stage (strict_render)", o1)
+    f1 = o1["failures"][0]
+    assert f1["code"] == "render_unfilled_placeholders", (
+        "L4-layered STATE 1: wrong failure code", o1)
+    assert "judge_notes" in f1["message"], (
+        "L4-layered STATE 1: message must name judge_notes", o1)
 
-# --- L4: strict_render + bare {{loop_feedback}} faults on first run ----------------------
+    # --- STATE 2: add ? → silent blind loop ---
+    # After builder adds ?, validate --strict shows exactly missing-carry (no loop-key-mismatch lint).
+    # Run cycles draft→judge→tally→draft (twice) and suspends at gate — no fault,
+    # but judge_notes is empty every pass (tally never writes it).
+    # L5 is also fixed here (notes added to judge overlay) so the loop can cycle past judge.
+    d2 = _fresh_partb()
+    _fixforward_l3(d2)
+    _fixforward_l5(d2)
+    _edit(os.path.join(d2, "prompts", "draft.md"), "{{judge_notes}}", "{{?judge_notes}}")
 
-def check_l4_strict_render_fault():
-    d = _fresh_partb()
-    # L3 must be fixed first — run aborts on gate-route-not-in-form otherwise.
-    _fixforward_l3(d)
-    rc, o = _run_json(d)
-    assert rc == 1 and o["outcome"] == "failed", ("L4: first run should fail", rc, o)
-    assert o["stage"] == "draft", ("L4: fault should be at the draft stage", o)
-    f = o["failures"][0]
-    assert f["code"] == "render_unfilled_placeholders", ("L4: wrong failure code", o)
-    assert "loop_feedback" in f["message"], ("L4: message should name loop_feedback", o)
-    print("PASS L4 — strict_render faults render_unfilled_placeholders on {{loop_feedback}} at 'draft'")
+    v2 = _validate_json(d2)
+    ids2 = [w["id"] for w in v2["warnings"]]
+    assert set(ids2) == {"missing-carry"}, (
+        "L4-layered STATE 2: expected only missing-carry warning after L3 fixed and ? added. "
+        "A second warning means the blind-loop trap is no longer silent — re-read answer-key.md.", ids2)
+    assert not v2["errors"], (
+        "L4-layered STATE 2: no hard errors expected", v2["errors"])
+
+    rc2, o2 = _run_json(d2)
+    assert rc2 == 0 and o2["outcome"] == "suspended", (
+        "L4-layered STATE 2: run should succeed and suspend at gate (no fault)", rc2, o2)
+    assert o2.get("awaiting"), (
+        "L4-layered STATE 2: suspended run must carry awaiting", o2)
+
+    # Confirm loop actually cycled (draft→judge→tally twice) by checking the
+    # second draft ran — overlay gives judge 'revise' first, so cycle 2 exists.
+    # The suspended baton's ask renders the SECOND draft's summary (revised).
+    ask2 = o2.get("ask", "")
+    assert ask2, ("L4-layered STATE 2: suspended baton must carry ask text", o2)
+
+    # --- STATE 3: full fix → informed loop ---
+    # L5 also fixed here so the loop can complete both cycles.
+    d3 = _fresh_partb()
+    _fixforward_l3(d3)
+    _fixforward_l5(d3)
+    _edit(os.path.join(d3, "prompts", "draft.md"), "{{judge_notes}}", "{{?loop_feedback}}")
+
+    rc3, o3 = _run_json(d3)
+    assert rc3 == 0 and o3["outcome"] == "suspended", (
+        "L4-layered STATE 3: run should succeed and suspend at gate", rc3, o3)
+    assert o3.get("awaiting"), (
+        "L4-layered STATE 3: suspended run must carry awaiting", o3)
+
+    print("PASS L4-layered (merged L2+L4) — "
+          "STATE 1: bare {{judge_notes}} faults render_unfilled_placeholders at 'draft'; "
+          "STATE 2: {{?judge_notes}} → validate shows only missing-carry, run cycles twice and "
+          "suspends clean but judge_notes never written (blind loop, no lint); "
+          "STATE 3: {{?loop_feedback}} → informed loop, suspends clean")
 
 
 # --- L5: output_schema omission -> schema_mismatch via --json ----------------------------
 
 def check_l5_schema_mismatch():
     d = _fresh_partb()
-    # Fix L3 (gate error) and L4 (strict_render) so the run reaches judge.
+    # Fix L3 (gate error) and L4-layered (strict_render on judge_notes) so the run reaches judge.
     _fixforward_l3(d)
     _edit(os.path.join(d, "prompts", "draft.md"),
-          "{{loop_feedback}}", "{{?loop_feedback}}")
+          "{{judge_notes}}", "{{?judge_notes}}")
     rc, o = _run_json(d)
     assert rc == 1 and o["outcome"] == "failed", ("L5: run should fail at judge", rc, o)
     assert o["stage"] == "judge", ("L5: fault should be at the judge stage", o)
@@ -231,16 +302,15 @@ def check_fixtures_and_injections():
 
 def main() -> None:
     checks = [
-        check_l3_lint_rescued,     # L3 now fires first (hard error at validate)
+        check_l3_lint_rescued,     # L3 fires first (hard error at validate)
         check_l1_missing_carry,    # L1 surfaces after L3 is fixed
-        check_l2_silent,           # L2 is doc-only: structural + runtime check
-        check_l4_strict_render_fault,
+        check_l2l4_layered,        # merged L4-layered trap: 3 states (STATE1 fault, STATE2 blind, STATE3 fix)
         check_l5_schema_mismatch,
         check_fixtures_and_injections,
     ]
     for c in checks:
         c()
-    print("\nALL CHECKS PASSED — the seeded landmines still trip as answer-key.md documents.")
+    print("\nALL 5 CHECKS PASSED — the seeded landmines still trip as answer-key.md documents.")
 
 
 if __name__ == "__main__":

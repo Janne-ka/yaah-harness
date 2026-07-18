@@ -11,28 +11,34 @@ All output below was captured on branch `feat/post-taskpack`. The engine now
 includes `gate-route-not-in-form` (added after round 1), so L3 surfaces as a
 hard validate ERROR — update this file if the engine changes again.
 
+**Round-3 change:** standalone L2 (silent `{{?judge_notes}}` decoy) has been
+retired and merged into L4. The kit now has **4 traps** (L1, L3, L4-layered,
+L5). L4 is now a two-state layered trap — see the L4 section below. Historical
+round1/round2 records that reference L1–L5 remain coherent: L1/L3/L5 are
+unchanged; L2 is retired/merged; L4 is the merged layered trap.
+
 ---
 
 ## Surfacing order (important for scoring)
 
-The five landmines do not all appear at once — they chain by dependency, which
+The four landmines do not all appear at once — they chain by dependency, which
 is realistic and intended. A builder fixes one, reruns, and meets the next:
 
 | When | Surface | Landmine |
 |------|---------|----------|
 | `yaah validate` (before any run) | `gate-route-not-in-form` **ERROR** | **L3** |
 | after L3 fixed, `yaah validate --strict` | `missing-carry` warning | **L1** |
-| after L1 fixed (or run despite warning), `yaah run` | `render_unfilled_placeholders` at `draft` | **L4** |
-| after L4 fixed, next `yaah run` | `schema_mismatch` at `judge` | **L5** |
-| never fires a signal | silent | **L2** |
+| after L1 fixed (or run despite warning), `yaah run` | `render_unfilled_placeholders` at `draft` | **L4 STATE 1** |
+| after L4 STATE 1 fixed (add `?`), next `yaah run` | suspends clean — but loop is blind (silent) | **L4 STATE 2** |
+| after L4 STATE 2 + L5 fixed so run reaches gate, `yaah run` | `schema_mismatch` at `judge` | **L5** |
 
-L3 now surfaces FIRST as a hard error — the `gate-route-not-in-form` lint
-(added after round 1) fires at `yaah validate` (exit 1 in `--json` mode, exit 2
-in plain/strict). L2 produces NO lint and NO fault — it is the pure "runs but
-wrong" trap. The interesting L3 measurement is now WHICH FIX the builder
-picks: upgrade the form to `approve_or_revise` + rename the route (preserving
-the loop-back intent), or just delete the phantom route (simpler but drops the
-reject path entirely).
+L3 surfaces FIRST as a hard error — the `gate-route-not-in-form` lint fires at
+`yaah validate` (exit 1 in `--json` mode, exit 2 in plain/strict). L4 is the
+merged layered trap: STATE 1 is loud (render fault), STATE 2 is silent (blind
+loop). The interesting L4 measurement is whether the builder sees both states —
+a builder who only adds `?` has cleared the fault but left the loop blind. The
+interesting L3 measurement is WHICH FIX the builder picks: upgrade the form to
+`approve_or_revise` + rename the route, or just delete the phantom route.
 
 ---
 
@@ -66,39 +72,13 @@ transform/gate) trips `render-key-unprovided` instead — same fix family.
 
 ---
 
-## L2 — loop writes `loop_feedback`, prompt reads `{{?judge_notes}}`
+## L2 — retired (merged into L4-layered)
 
-- **Site:** `transforms.py::tally` writes the judge's notes under `loop_feedback`.
-  The `draft` prompt (`prompts/draft.md`) reads `{{?judge_notes}}` (the `?` sigil
-  makes it optional) on its "Loop guidance from previous judge" line. `judge_notes`
-  is a key `tally` never writes, so on every loop pass (pass 2+) the guidance line
-  renders **empty** — the model sees no feedback from the previous judge.
-- **Why the `?` sigil matters:** an optional placeholder (`{{?key}}`) renders
-  empty when the key is absent instead of faulting. The lint does NOT check whether
-  agent-prompt reads match transform-written keys — it only checks `branch`/`render`
-  reads against `provides`. So this trap fires NO lint and NO fault.
-- **Intended discovery signal:** NONE. The builder must read `transforms.py` and
-  compare what `tally` writes (`loop_feedback`) against what `draft.md` reads
-  (`{{?judge_notes}}`), or reason that "loop guidance from previous judge" should
-  be the judge's notes forwarded by `tally`.
-- **Proof the trap is real:** on a revise loop, `tally` writes `loop_feedback`
-  (line 47 of `transforms.py`). The `draft` prompt's "Loop guidance from previous
-  judge" line reads `{{?judge_notes}}`. `judge_notes` is never set anywhere in the
-  pipeline — so the rendered prompt on pass 2 has an empty guidance line regardless
-  of how many cycles run.
-- **Intended fix:** change `{{?judge_notes}}` to `{{?loop_feedback}}` in `draft.md`
-  — point the prompt at the key `tally` actually writes. The `?` sigil is correct:
-  `loop_feedback` is absent on the first pass (L4 is the trap for forgetting that).
-- **Observed behavior (verified):** no lint fires after L3 is fixed (validate
-  shows only L1 as a warning). The `{{?judge_notes}}` read is exempt from
-  `render_unfilled_placeholders` because of the `?` sigil. The `missing-carry` lint
-  does not fire on agent-prompt reads (it only checks branch/render). The loop runs
-  blind on every revise cycle.
-- **Scoring:** a builder who catches L2 did so from reading transforms.py /
-  draft.md side by side — not from any tool signal. Weight it as a high-value
-  reasoning catch. If a builder proposes a "loop-key mismatch" lint ("warn when an
-  agent prompt reads a key no upstream transform writes"), that is a top-tier
-  trial finding — forward it to the engine team.
+**L2 is retired as a standalone trap** as of round 3. The key mismatch between
+the loop-guidance placeholder and the key `tally` writes has been merged into the
+L4 layered trap. Historical references to L2 in round1/round2 records (where it
+described a `{{?judge_notes}}` decoy read by `draft.md`) remain correct for those
+rounds. In round 3, look at L4-layered for the equivalent signal.
 
 ---
 
@@ -153,17 +133,23 @@ transform/gate) trips `render-key-unprovided` instead — same fix family.
 
 ---
 
-## L4 — `strict_render: true` agent reads `{{loop_feedback}}` bare
+## L4 — layered trap: `strict_render` bare key → blind loop (merged L2+L4)
 
-- **Site:** `role:draft` sets `strict_render: true` and its prompt reads
-  `{{loop_feedback}}` bare. `draft` is the first stage in the loop body, so on
-  the first pass `loop_feedback` has never been written by `tally` yet.
-- **Intended discovery signal:** a `render_unfilled_placeholders` fault at the
-  `draft` stage on the very first run, surfaced structurally via `yaah run --json`.
-- **Intended fix:** the `{{?loop_feedback}}` optional sigil — an absent optional
-  placeholder renders empty instead of faulting, so the agent stays
-  strict-clean AND still faults on a genuinely-missing REQUIRED key.
-- **Observed behavior (verified):** first `yaah run --json`:
+This is a two-state layered trap. STATE 1 is loud and tool-visible. STATE 2 is
+silent — a builder who only clears the loud signal has not finished the fix.
+
+**Site:** `role:draft` sets `strict_render: true`. Its prompt reads
+`{{judge_notes}}` bare on the "Loop guidance from previous judge" line.
+`judge_notes` is a key that `tally` NEVER writes (tally writes `loop_feedback`).
+So: on the very first run, `{{judge_notes}}` is absent and strict_render faults.
+After a builder adds `?`, the fault clears — but `judge_notes` is STILL never
+written, so the guidance line renders empty on every loop pass. The loop runs
+blind. `tally` writes `loop_feedback`; the prompt must read `{{?loop_feedback}}`
+to be informed.
+
+**STATE 1 (pristine, after L3 fixed):**
+- Signal: `render_unfilled_placeholders` at `draft` naming `judge_notes`.
+- `yaah run --json`:
 
 ```json
 {
@@ -172,16 +158,46 @@ transform/gate) trips `render-key-unprovided` instead — same fix family.
   "failures": [
     {
       "code": "render_unfilled_placeholders",
-      "message": "no value for placeholder(s) loop_feedback at stage 'draft'",
+      "message": "no value for placeholder(s) judge_notes at stage 'draft'",
       "fix_hint": "add the key to a 'carry' list from an upstream stage, set it in a prior transform, give it an 'extras' default, or remove the placeholder (engine-injected keys exempt: feedback, tool_manifest)"
     }
   ]
 }
 ```
 
-  Applying `{{?loop_feedback}}` clears the fault; the run then advances to
-  `judge` (where L5 waits). Note the strict-render fault happens DURING render,
-  before the model call, so it masks anything downstream on the same agent.
+**STATE 2 (builder adds `?` → `{{?judge_notes}}`):**
+- No lint fires (`validate --strict` shows only `missing-carry` from L1; no
+  loop-key-mismatch lint exists — the engine only checks `branch`/`render` reads
+  against `provides`, not agent-prompt reads against transform-written keys).
+- Run cycles twice (draft→judge→tally→draft→judge→tally→gate) and suspends
+  clean — no fault. But on pass 2, the guidance line rendered EMPTY because
+  `judge_notes` was never written. The loop is **provably blind and silent**.
+- `yaah run --json` (after also fixing L5 so judge output satisfies its schema):
+
+```json
+{
+  "outcome": "suspended",
+  "baton_id": "<id>",
+  "awaiting": "digest:approve",
+  "concerns": [],
+  "ask": "A notice was flagged for review. Approve before the digest is released:\n\nA new recall trigger..."
+}
+```
+
+  Trace confirms two full cycles: `classify ok → draft ok → judge ok → tally ok
+  → draft ok → judge ok → tally ok → gate suspended`.
+
+**Intended fix (STATE 3 — full fix):** change `{{?judge_notes}}` to
+`{{?loop_feedback}}` in `draft.md`. Now `tally`'s `loop_feedback` key reaches
+the draft prompt on pass 2+, and the loop is informed. The `?` sigil is correct:
+`loop_feedback` is absent on the first pass.
+
+**Scoring:** A builder who only adds `?` (STATE 2) has cleared the fault but
+missed the blind loop. That is a partial fix — score it as "tool-signal found,
+root-cause missed." A builder who reads `transforms.py` and notices the
+`loop_feedback` / `{{?judge_notes}}` mismatch and corrects to `{{?loop_feedback}}`
+has the full fix. Weight this as the highest-value reasoning catch in the kit — it
+requires reading the transform alongside the prompt, not just reacting to a signal.
 
 ---
 
@@ -221,19 +237,19 @@ transform/gate) trips `render-key-unprovided` instead — same fix family.
 
 ## Fully-fixed reference state
 
-Applying all five intended fixes (reconcile gate form/branch; declare classify
-output; point draft at `{{?loop_feedback}}` for the real loop guidance AND fix
-`{{?judge_notes}}` to `{{?loop_feedback}}`; give judge's fake output a `notes`
-key) yields a project that:
+Applying all four intended fixes (reconcile gate form/branch; declare classify
+output; change `{{judge_notes}}` to `{{?loop_feedback}}` in `draft.md`; give
+judge's fake overlay a `notes` key) yields a project that:
 
 - passes `yaah validate --strict` clean (exit 0), and
 - runs offline to the gate, parks (`awaiting: "digest:approve"`), and on
   `resume` with `{"decision": "approve"}` completes and writes `digest.md`.
 
-Note: L4's fix is `{{loop_feedback}}` → `{{?loop_feedback}}` (add the `?` sigil
-on the bare `{{loop_feedback}}` line); L2's fix is `{{?judge_notes}}` →
-`{{?loop_feedback}}` (point the decoy line at the key tally actually writes).
-Both edits are in `draft.md`.
+Note: L4's full fix is `{{judge_notes}}` → `{{?loop_feedback}}` (one edit in
+`draft.md` — change the bare wrong key to the optional correct key). A partial
+fix (`{{judge_notes}}` → `{{?judge_notes}}`) clears the render fault but leaves
+the loop blind; the full fix points the placeholder at the key `tally` actually
+writes.
 
 ## Non-landmine finding you may see: `untrusted-unfenced`
 
@@ -257,17 +273,24 @@ and don't score it as a missed trap.
   classify agent's own output — the exact shape the `missing-carry` lint fires
   under (immediate incomplete-reset producer).
 - **L4 must be on a loop-PRODUCER, not a post-tally agent.** An early design put
-  the strict-render `{{loop_feedback}}` read on an agent that ran AFTER `tally`
-  (which sets `loop_feedback`), so it never faulted — `loop_feedback` was always
-  present by then. Verified empirically (the run suspended cleanly). L4 was moved
-  onto `draft`, the first agent in the loop body, so the first pass runs with
-  `loop_feedback` genuinely absent.
+  the strict-render bare-key read on an agent that ran AFTER `tally` (which sets
+  `loop_feedback`), so it never faulted. Verified empirically. L4 is on `draft`,
+  the first agent in the loop body, so the first pass runs with the trap key
+  genuinely absent.
 - **L3 was silent at validate in the original kit; shipped broken by both round-1
   B builders.** The `gate-route-not-in-form` lint was added after round 1. L3 now
   surfaces as a hard validate error (the first signal the builder sees), so the
   measurement shifts from "does the builder drive the gate with a bad decision?" to
   "which fix path does the builder pick?"
-- **L2 was vestigial in round 1** — `draft.md` read `{{loop_feedback}}` correctly.
-  Re-seeded this round with `{{?judge_notes}}` as the decoy key on the loop-guidance
-  line. The `?` sigil makes it optional (no fault, no lint), so the trap is
-  genuinely silent again.
+- **L2 history:** round 1 — vestigial (`draft.md` read `{{loop_feedback}}`
+  correctly, L2 measured nothing). Round 2 — re-seeded with `{{?judge_notes}}` as
+  a standalone silent decoy. Round 3 — merged with L4 into the layered trap: L2
+  retired as standalone; the key-mismatch half is now STATE 2 of L4-layered.
+  The merge drops the trap count from 5 to 4 and makes L4 measurably harder:
+  a builder who only fixes the loud signal misses the silent blind-loop state.
+- **Loop cycling in the offline overlay (added round 3).** The original overlay
+  gave `judge` a single `{"verdict":"pass"}` reply — the loop never cycled
+  offline. The overlay now scripts two judge replies (first `revise`, then `pass`)
+  with `on_exhaustion: repeat_last` on `draft`. The loop runs twice in all three
+  L4 states (verify via stderr trace: draft→judge→tally×2 before gate). Without
+  cycling, STATE 2's blind-loop claim was untestable offline.

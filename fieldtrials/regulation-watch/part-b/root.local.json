@@ -1,11 +1,17 @@
 {
   "$schema": "../../../schemas/root.schema.json",
-  "_about": "Offline (fake) overlay for the regulation-watch pipeline. Deterministic scripted responses, no API calls.",
+  "_about": "Offline (fake) overlay for the regulation-watch pipeline. Deterministic scripted responses, no API calls. judge is scripted with two replies (revise then pass) so the draft→judge→tally loop cycles twice offline, exercising the L4-layered trap on a real revise cycle.",
   "transport": {"type": "inproc"},
-  "providers": {"fake": {"type": "fake_scripted", "by_model": {
+  "providers": {"fake": {"type": "fake_scripted", "on_exhaustion": "repeat_last", "by_model": {
     "classify": ["{\"impact_area\": \"product-safety\", \"high_impact\": true}"],
-    "draft": ["{\"summary\": \"A new recall trigger requires failing batches to be recalled within 72 hours, applied retroactively to the last 90 days, with licence suspension for non-compliance.\", \"confidence\": \"high\"}"],
-    "judge": ["{\"verdict\": \"pass\"}"]
+    "draft": [
+      "{\"summary\": \"A new recall trigger requires failing batches to be recalled within 72 hours, applied retroactively to the last 90 days, with licence suspension for non-compliance.\", \"confidence\": \"high\"}",
+      "{\"summary\": \"A new recall trigger requires failing batches to be recalled within 72 hours (retroactive 90 days); non-compliance results in licence suspension.\", \"confidence\": \"high\"}"
+    ],
+    "judge": [
+      "{\"verdict\": \"revise\"}",
+      "{\"verdict\": \"pass\"}"
+    ]
   }}},
   "default_provider": "fake",
   "prompt_sources": {"file": {"type": "file", "dir": "prompts"}},
