@@ -128,12 +128,12 @@ payload-derived**), `node:role` (another node over Comms), or `http(s)://url`
 - `call: "args"` (default): `fn(args)` where args = payload (or `args_from`
   key); result lands under `into` (default `"result"`) — enrich, don't replace.
 - `call: "envelope"` (fn: only): `fn(envelope, config)`; the returned dict
-  SPREADS over the payload top-level — the config-aware deterministic step.
-  **Gotcha:** "spread" here means "the returned dict IS the new payload" —
-  multi-stage pipelines must explicitly carry prior keys forward, e.g.
-  `return {**envelope.payload, "new_key": value}`. The hello-yaah and
-  review-pipeline examples don't trip on this because each is a one-key
-  pipeline; arch-drift (multi-stage) does it explicitly at every transform.
+  REPLACES the payload entirely — the config-aware deterministic step. The fn
+  must copy any prior keys it wants to keep:
+  `return {**envelope.payload, "new_key": value}`. A returned Envelope passes
+  through unchanged. The hello-yaah and review-pipeline examples are single-key
+  pipelines (prior keys don't matter); arch-drift (multi-stage) copies explicitly
+  at every transform.
 
 ```json
 "role:flatten": {"type": "transform", "call": "envelope",

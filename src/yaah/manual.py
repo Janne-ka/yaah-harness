@@ -61,6 +61,35 @@ _RULES = """\
   `yaah validate <root> --json` before handing it over.
 """
 
+_TRANSFORM_CONVENTIONS = """\
+## Transform calling conventions
+
+A `transform` node has two call modes, set by `call:` (default `"args"`):
+
+**`call: "args"` (default)** — enriching. fn signature: `func(args)` — one
+argument. `args` = the whole payload dict, or the value at `args_from` key if
+declared. Return value: anything; nested under `into` (default `"result"`).
+Existing payload keys are kept — the result is ADDED, not replacing.
+
+  `{"type": "transform", "target": "fn:app.transforms:classify", "into": "category"}`
+
+  After invoke: `{"raw": "...", "category": <return value>, ...prior keys}`.
+
+**`call: "envelope"` (fn: only)** — replacing. fn signature:
+`func(envelope, config)` — two arguments. Return a dict or an Envelope.
+A returned dict BECOMES the new payload entirely (does not merge into the old
+one). Copy prior keys explicitly if needed:
+`return {**envelope.payload, "new_key": value}`.
+A returned Envelope passes through unchanged.
+
+  `{"type": "transform", "call": "envelope", "target": "fn:app.transforms:merge_findings"}`
+
+  `transforms.py`: `def merge_findings(envelope, config): return {**envelope.payload, "report": build(envelope.payload["results"])}`
+
+Use `"args"` for pure computations (the common case). Use `"envelope"` when the
+fn needs `config.extras` or must control the full output shape.
+"""
+
 _FOREACH = """\
 ## foreach — dynamic per-item fan-out
 
@@ -97,10 +126,56 @@ Key facts for authors:
 - **`feedback` keys are not threaded into per-item inputs.** The retry
   feedback is the whole prior merged swarm, semantically odd per item — v1
   documented limitation. Use `min_success` for partial-failure tolerance.
-- **For multi-stage-per-item work**, use a cursor back-edge loop over the list:
-  a `transform` pops the next item from a list key and writes it to a scratch
-  key, the stage processes it, a branch checks whether the list is exhausted,
-  and the backward edge loops back.
+- **For multi-stage-per-item work**, use a cursor back-edge loop. See the
+  recipe below — the cursor step MUST be `call:"envelope"`, not the default
+  `call:"args"`. Read the pitfall note carefully before authoring.
+
+### Cursor back-edge loop recipe
+
+Shape: `advance` (envelope-transform) → `process` (agent or transform) →
+`collect` (envelope-transform) → back to `advance`; exits when
+`advance` sets `loop_done:"yes"`.
+
+```
+advance → branch on loop_done
+  "yes" → report  (terminal)
+  default → process → collect → advance  (back-edge)
+```
+
+**Stage wiring** (inline keys, no extra JSON fences):
+
+`"advance": {"node": "role:advance", "branch": {"on": "loop_done", "routes": {"yes": "report"}, "default": "process"}}`
+
+`"process": {"node": "role:process", "then": "collect"}`
+
+`"collect": {"node": "role:collect", "then": "advance"}`
+
+**Node config for advance** — `call:"envelope"`, `provides` declared:
+
+`{"type": "transform", "call": "envelope", "target": "fn:transforms:advance", "provides": ["cursor", "current_text", "loop_done"]}`
+
+**Advance function** (`transforms.py`, copy verbatim):
+
+`def advance(envelope, config):`
+`    p = envelope.payload`
+`    items, cursor = list(p.get("items") or []), int(p.get("cursor", 0))`
+`    if cursor < len(items):`
+`        return {**p, "cursor": cursor + 1, "current_text": items[cursor], "loop_done": "no"}`
+`    return {**p, "current_text": "", "loop_done": "yes"}`
+
+**`graph.sticky`** must list every key that must survive a payload-replacing
+stage (agents replace the payload): `["items", "cursor", "collected", "current_text"]`.
+
+**Seed these in `input`:** `{"items": [...], "cursor": 0, "collected": []}`.
+
+**Critical pitfall — call:"args" spins forever.** The default `call:"args"`
+transform nests its return dict UNDER an `into` key (default `"result"`). A
+branch that reads `{{loop_done}}` gets a missing key, falls through to
+`default` every pass, and the loop never terminates (verified: 3334+
+iterations until the 10,000-step livelock backstop fires). A `call:"envelope"`
+transform's return dict BECOMES the new payload (spread flat), so
+`{{loop_done}}` resolves immediately. Rule: every cursor step in a back-edge
+loop MUST use `call:"envelope"` and copy prior keys with `{**envelope.payload, ...}`.
 """
 
 _PLACEHOLDERS = """\
@@ -322,6 +397,7 @@ def build_manual() -> str:
     parts.extend(_node_section())
     parts.extend(_root_section())
     parts.extend(_pipeline_section())
+    parts.append(_TRANSFORM_CONVENTIONS)
     parts.append(_FOREACH)
     parts.append(_PLACEHOLDERS)
     parts.append(_FAKE_SCRIPTED)

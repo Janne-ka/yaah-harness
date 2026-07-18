@@ -767,6 +767,25 @@ class Harness:
             "node {!r} replied ERROR: {}".format(role, env.payload.get("error", env.payload)),
             "see the node's logs/trace for the exception; the error payload is the artifact"))
 
+    @staticmethod
+    def _not_a_checker_verdict(role: str, env: Envelope) -> Verdict:
+        """A role listed in a stage's `validators:[]` replied with a non-verdict
+        envelope (kind {!r} here, not 'verdict') — it is an agent/other node, not a
+        checker. `Verdict.from_envelope` would read that reply as a fail with an EMPTY
+        failures list, so the stage died with an opaque "no failure detail". Name the
+        real cause: WHICH validator, WHAT it replied, and the fix. Detection is the
+        structural contract (only a checker replies Kind.VERDICT), NOT a hardcoded
+        checker-type set — so a custom checker registered via the contract seam is
+        unaffected as long as it returns a Verdict.""".format(env.kind)
+        return Verdict.failed(Failure(
+            "validator_not_a_checker",
+            "validator {!r} replied kind {!r}, not a verdict — a role in "
+            "`validators:[]` must be a checker node".format(role, env.kind),
+            "make {!r} a checker (json_object / json_schema / expect_field / "
+            "shell_check) or move it out of `validators:[]` — an agent/other node "
+            "returns output, not a Verdict".format(role),
+            data={"role": role, "kind": env.kind}))
+
     async def _safe_request(self, target: str, input: Envelope) -> Envelope:
         """Request a node, CONVERGING the transports: an in-proc node that RAISES
         becomes the same Kind.ERROR reply a remote `serve()` returns (the H3
@@ -1086,6 +1105,13 @@ class Harness:
             if vout.kind == Kind.ERROR:  # the VALIDATOR itself crashed remotely (H3):
                 # hard-fail carrying the actual error, not an empty no-status verdict
                 return self._error_verdict(role, vout), soft
+            if vout.kind != Kind.VERDICT:  # the role in `validators:[]` is NOT a checker:
+                # an agent/other node replied `result` (no verdict shape), which
+                # `from_envelope` would default to a fail with an EMPTY failures list —
+                # an opaque "no failure detail" stage-fail. Name the misconfiguration
+                # instead (structural signal: only a checker replies Kind.VERDICT — this
+                # holds for custom checkers too, they carry their verdict the same way).
+                return self._not_a_checker_verdict(role, vout), soft
             verdict = Verdict.from_envelope(vout)
             if not verdict.ok:
                 if verdict.severity == "hard":

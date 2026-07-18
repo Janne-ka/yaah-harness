@@ -37,6 +37,40 @@ FAILING_PIPELINE = {
     }},
 }
 
+# An AGENT (not a checker) placed in `validators:[]`. Its reply is kind 'result'
+# (no verdict shape), which `Verdict.from_envelope` would read as a fail with an
+# EMPTY failures list -> an opaque "no failure detail" stage-fail (two authors each
+# lost ~30min to exactly this). The fix names the misconfiguration:
+# validator_not_a_checker + role + fix_hint. `parse:False` keeps the agent's reply a
+# plain 'result' (with parse/self-check on, a FAILED output_schema check would emit a
+# genuine verdict and mask the case we're diagnosing).
+AGENT_IN_VALIDATORS_PIPELINE = {
+    "nodes": {
+        "role:do": {"type": "agent", "template": "do {{request}}",
+                    "model": "fake:do", "stage": "do", "parse": False},
+        "role:bogus": {"type": "agent", "template": "judge {{raw}}",
+                       "model": "fake:judge", "stage": "bogus", "parse": False},
+    },
+    "graph": {"start": "do", "stages": {
+        "do": {"node": "role:do", "validators": ["role:bogus"],
+               "max_attempts": 1, "then": None},
+    }},
+}
+
+# A legitimate checker (shell_check `true`) that PASSES — guards that the
+# kind != VERDICT diagnostic does NOT misfire on a real checker's passing verdict
+# (which IS Kind.VERDICT, so it takes the normal path).
+PASSING_CHECKER_PIPELINE = {
+    "nodes": {
+        "role:do": {"type": "shell", "command": ["true"], "stage": "do"},
+        "role:check": {"type": "shell_check", "command": ["true"], "stage": "check"},
+    },
+    "graph": {"start": "do", "stages": {
+        "do": {"node": "role:do", "validators": ["role:check"],
+               "max_attempts": 1, "then": None},
+    }},
+}
+
 LINEAR_PIPELINE = {
     "nodes": {
         "role:writer": {"type": "agent", "template": "write a spec for {{request}}",
@@ -100,6 +134,34 @@ def test_failed_run_json():
     assert "message" in f and "fix_hint" in f, o
 
 
+def test_validator_not_a_checker_named():
+    # THE FIX: an agent in `validators:[]` used to fail with an empty failures list
+    # (opaque "no failure detail"). Now the stage-fail NAMES the misconfiguration —
+    # code + role + kind + fix_hint — through the same run --json surface.
+    _, root = _project(AGENT_IN_VALIDATORS_PIPELINE)
+    rc, out, err = _run(["run", root, "--json"])
+    o = json.loads(out)
+    assert rc == 1, (rc, out, err)
+    assert o["outcome"] == "failed" and o["stage"] == "do", o
+    assert o["failures"], o                          # NOT the empty list from before
+    f = o["failures"][0]
+    assert f["code"] == "validator_not_a_checker", o
+    assert "role:bogus" in f["message"], o           # names WHICH validator
+    assert "'result'" in f["message"], o             # names the non-verdict kind it replied
+    assert f["fix_hint"] and "checker" in f["fix_hint"], o
+    assert f["data"] == {"role": "role:bogus", "kind": "result"}, o
+
+
+def test_validator_not_a_checker_prose_names_it():
+    # falsifier: the prose (non --json) path also carries the named detail now,
+    # not the old "no failure detail".
+    _, root = _project(AGENT_IN_VALIDATORS_PIPELINE)
+    rc, out, err = _run(["run", root])
+    assert rc == 1, (rc, out, err)
+    assert "validator_not_a_checker" in err, (out, err)
+    assert "no failure detail" not in err, (out, err)
+
+
 def test_failed_run_prose_unchanged():
     # falsifier: without --json the old prose line still prints to stderr
     _, root = _project(FAILING_PIPELINE)
@@ -107,6 +169,16 @@ def test_failed_run_prose_unchanged():
     assert rc == 1, (rc, out, err)
     assert "pipeline failed:" in err and "shell_exit" in err, (out, err)
     assert out.strip() == "" or "RESULT" not in out, out  # no JSON on stdout
+
+
+def test_passing_checker_still_passes():
+    # no-regression: a real checker returns a PASSING Kind.VERDICT -> the stage
+    # completes done. The kind != VERDICT guard must not touch this path.
+    _, root = _project(PASSING_CHECKER_PIPELINE)
+    rc, out, err = _run(["run", root, "--json"])
+    o = json.loads(out)
+    assert rc == 0, (rc, out, err)
+    assert o["outcome"] == "done", o
 
 
 def test_done_run_json():
@@ -152,7 +224,10 @@ def test_suspended_run_prose_unchanged():
 
 def main() -> None:
     test_failed_run_json()
+    test_validator_not_a_checker_named()
+    test_validator_not_a_checker_prose_names_it()
     test_failed_run_prose_unchanged()
+    test_passing_checker_still_passes()
     test_done_run_json()
     test_done_run_prose_unchanged()
     test_suspended_run_json()

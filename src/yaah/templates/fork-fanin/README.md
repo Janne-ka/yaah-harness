@@ -27,4 +27,7 @@ python3 -m yaah.runtime starter.local.json
 ## Reference
 
 - `examples/fork-join/` in the yaah repo — fuller version of this shape.
-- `docs/archetypes.md` — what makes this archetype distinct.
+- `yaah manual` — offline docs shipped with the pip package (node types, root
+  config, foreach/fanout, placeholders, repair loop).
+- `docs/archetypes.md` — in the yaah source repo; not shipped with the pip
+  package.

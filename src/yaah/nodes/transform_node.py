@@ -20,10 +20,12 @@ Two calling conventions (`call`):
   - "args" (default) — fn:`target`(args) → result nested under `into` (enrich,
     don't replace). The uniform get/post/agent shape; also the agent tool-loop path.
   - "envelope" — the fn:`target` receives the richer (envelope, config) and its
-    result (a dict) SPREADS over the payload top-level (an Envelope passes through).
-    This is the "python extends transform" specialization — it subsumed the former
-    standalone `python` node, so a config-aware deterministic step is just a
-    transform. Only valid for an fn: target (the others have no config to pass).
+    result (a dict) BECOMES the new payload (replaces entirely; an Envelope passes
+    through unchanged). The fn must copy envelope.payload for any keys it wants to
+    preserve — `return {**envelope.payload, "new_key": value}`. This is the
+    "python extends transform" specialization — it subsumed the former standalone
+    `python` node, so a config-aware deterministic step is just a transform. Only
+    valid for an fn: target (the others have no config to pass).
 
 Targets Python 3.9+.
 """
@@ -69,10 +71,12 @@ class TransformNode(Node):
     async def _invoke_envelope(self, input: Envelope, config: NodeConfig) -> Envelope:
         """The envelope-style realization (subsumes the old python node): call the
         fn: target with (envelope, config) — so a deterministic step can read the
-        whole envelope and its NodeConfig (e.g. `config.extras`) — and SPREAD its
-        result over the payload top-level (so a following `branch` can read the keys
-        it sets). A returned Envelope passes through unchanged; a dict is spread via
-        reply_with (M4-safe: a `sender` key in the result can't collide)."""
+        whole envelope and its NodeConfig (e.g. `config.extras`) — and REPLACE the
+        payload with the returned dict (a following `branch` reads the keys it sets).
+        The fn is responsible for copying any prior keys it wants to keep:
+        `return {**envelope.payload, "new_key": value}`.
+        A returned Envelope passes through unchanged; a dict is set as the new
+        payload via reply_with (M4-safe: a `sender` key in the result can't collide)."""
         scheme, sep, rest = self._target.partition(":")
         if scheme != "fn":
             raise ValueError(

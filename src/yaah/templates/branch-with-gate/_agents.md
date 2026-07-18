@@ -33,7 +33,8 @@ the key your prompt READS — a mismatch silently reads nothing.
 
 A `strict_render: true` agent that reads its own loop key can stay strict-clean
 by using `{{?loop_feedback}}` (the optional-placeholder sigil renders empty on
-the first turn instead of faulting); see docs/cookbook/bounded-loop-best-of-n.md.
+the first turn instead of faulting); see `yaah manual` → "Placeholders" for the
+full `{{?key}}` / `{{!key}}` dialect.
 
 ## 4. Fence untrusted input with `{{!key}}`
 
@@ -66,6 +67,8 @@ yaah resume <run> decision.json
 
 ---
 
-Run `yaah manual` for offline docs (works without the repo; ships with the
-package). Full docs live in the yaah repo: `AGENTS.md`, `docs/archetypes.md`,
-`docs/node-reference.md`.
+Run `yaah manual` for offline docs — node types, root config keys, placeholders,
+foreach, scripted-reply contract, repair loop (ships with the pip package; works
+without the repo). Extended docs (`AGENTS.md`, `docs/archetypes.md`,
+`docs/node-reference.md`) live in the yaah source repo and are NOT shipped with
+the pip package.
