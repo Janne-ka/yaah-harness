@@ -63,6 +63,17 @@ _DANGEROUS_FLAGS = frozenset({
     "--ide",
 })
 
+# asyncio's StreamReader defaults to a 64 KiB line buffer. A single
+# `claude -p --output-format stream-json` line can carry an ENTIRE authored
+# file in ONE jsonl event (a Write tool_use embeds the whole file body), so a
+# write-heavy agent overruns the default and `readline()` raises ValueError
+# ("Separator is found, but chunk is longer than limit") — which ERRORs the
+# node even when every edit already landed and only the tail of the output
+# stream is being drained (a completed-correct stage reported as ERROR). Give
+# the reader an 8 MiB per-line buffer so a whole-file line fits: one jsonl
+# line == one whole authored file.
+_STREAM_LINE_LIMIT = 8 * 2 ** 20  # 8 MiB per stream-json line
+
 
 def _validate_binary(binary: str) -> str:
     if not binary or _UNSAFE_CHARS_RE.search(binary) or binary.startswith("-"):
@@ -206,6 +217,11 @@ class ClaudeCliProvider(ApiProvider):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
+            # Raise the stdout StreamReader line buffer past the 64 KiB default:
+            # one stream-json line can be a whole authored file (see
+            # _STREAM_LINE_LIMIT). Without this, readline() raises ValueError on
+            # a large Write event and the node ERRORs on a completed stage.
+            limit=_STREAM_LINE_LIMIT,
         )
         # CRIT-001 (opus bugs review, 2026-06-23): if the spawned process died
         # before its stdin/stdout pipes opened (misconfigured binary, immediate
@@ -245,95 +261,134 @@ class ClaudeCliProvider(ApiProvider):
         usage: Optional[Dict[str, Any]] = None
         stop_reason = "end_turn"
         tool_names: Dict[str, str] = {}  # tool_use id → name, to label tool_result notices
-        while True:
-            try:
-                line = await asyncio.wait_for(proc.stdout.readline(),
-                                              timeout=timeout)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+        # The whole read+drain sequence is wrapped so `finally` can GUARANTEE
+        # the subprocess is reaped on every exit path (below). Without it, a
+        # read-loop exception (an over-limit line, an unexpected error) escaped
+        # PAST the timeout branch's kill and left claude orphaned at PPID 1,
+        # still streaming to a dead pipe long after the engine exited — a cost
+        # leak observed in the field.
+        try:
+            while True:
+                try:
+                    line = await asyncio.wait_for(proc.stdout.readline(),
+                                                  timeout=timeout)
+                except asyncio.TimeoutError:
+                    # Guarded like the finally's kill: if the child died in the
+                    # race window between readline timing out and the kill,
+                    # ProcessLookupError must not propagate out of the generator
+                    # — the consumer still gets the clean timeout error event.
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass  # already gone between the timeout and the kill
+                    await proc.wait()
+                    yield {"type": "error",
+                           "message": "claude stream-json timeout after {}s "
+                                      "(no output received from subprocess)".format(timeout)}
+                    return
+                except (ValueError, asyncio.LimitOverrunError) as exc:
+                    # A single stream-json line exceeded even the 8 MiB
+                    # _STREAM_LINE_LIMIT buffer (readline() raises ValueError on
+                    # overrun; LimitOverrunError guards the readuntil form).
+                    # Surface as an in-stream error rather than letting the
+                    # exception crash the node — the `finally` reaps the child.
+                    yield {"type": "error",
+                           "message": "claude stream-json line exceeded the "
+                                      "{}-byte read buffer ({})".format(
+                                          _STREAM_LINE_LIMIT, exc)}
+                    return
+                if not line:
+                    break
+                try:
+                    obj = json.loads(line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    # Garbage line (blank, plain text notice from claude, partial
+                    # buffer). Skip silently — the stream should not crash on
+                    # noise outside the JSONL envelope.
+                    continue
+                event_type = obj.get("type")
+                if event_type == "assistant":
+                    msg = obj.get("message") or {}
+                    for block in msg.get("content") or []:
+                        if not isinstance(block, dict):
+                            continue
+                        btype = block.get("type")
+                        if btype == "text":
+                            text = block.get("text") or ""
+                            if text:
+                                yield {"type": "text_delta", "delta": text}
+                        elif btype == "tool_use":
+                            # claude runs its OWN tool loop, so this must NEVER be
+                            # a `toolcall_end` (the engine would think IT must
+                            # execute it). Surface it as a PASSIVE `notice`
+                            # instead — inert to every collector, mapped to a
+                            # monitoring pulse by the live bridge ("what is
+                            # claude doing right now").
+                            name = str(block.get("name") or "")
+                            block_id = block.get("id")
+                            if isinstance(block_id, str) and block_id:
+                                tool_names[block_id] = name
+                            yield {"type": "notice", "kind": "tool_use", "tool": name}
+                        # thinking: deliberately NOT surfaced (claude-internal
+                        # reasoning — content capture is a separate concern)
+                elif event_type == "user":
+                    # claude's tool RESULTS come back as user-role tool_result
+                    # blocks — the closing bracket of the tool-activity window.
+                    # The block carries only the tool_use_id; resolve it to the
+                    # NAME recorded at tool_use time so the pulse reads
+                    # "tool Read returned", not an opaque id.
+                    for block in (obj.get("message") or {}).get("content") or []:
+                        if isinstance(block, dict) and block.get("type") == "tool_result":
+                            ref = block.get("tool_use_id")
+                            yield {"type": "notice", "kind": "tool_result",
+                                   "tool": tool_names.get(ref, "") if isinstance(ref, str) else ""}
+                elif event_type == "result":
+                    stop_reason = obj.get("stop_reason") or stop_reason
+                    result_model = obj.get("model") or result_model
+                    u = obj.get("usage")
+                    if isinstance(u, dict):
+                        usage = u
+                # system / rate_limit_event: ignored (diagnostic noise)
+
+            # CRIT-004 (opus bugs review): drain stderr BEFORE wait(). If the
+            # process filled its stderr pipe buffer (>64KB) it can't exit while
+            # blocked on the write, so wait() would deadlock. We've already drained
+            # stdout (the readline loop hit EOF); reading stderr to EOF unblocks the
+            # process, then wait() returns immediately. Reading empty stderr is
+            # cheap (returns b"" at EOF). stderr may be absent on some stubs.
+            err_bytes = b""
+            if proc.stderr is not None:
+                err_bytes = await proc.stderr.read()
+            await proc.wait()
+            if proc.returncode != 0:
+                err_text = err_bytes.decode(errors="replace")[:500] if err_bytes else ""
                 yield {"type": "error",
-                       "message": "claude stream-json timeout after {}s "
-                                  "(no output received from subprocess)".format(timeout)}
+                       "message": "claude exit {}{}".format(
+                           proc.returncode, ": " + err_text if err_text else "")}
                 return
-            if not line:
-                break
-            try:
-                obj = json.loads(line)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                # Garbage line (blank, plain text notice from claude, partial
-                # buffer). Skip silently — the stream should not crash on
-                # noise outside the JSONL envelope.
-                continue
-            event_type = obj.get("type")
-            if event_type == "assistant":
-                msg = obj.get("message") or {}
-                for block in msg.get("content") or []:
-                    if not isinstance(block, dict):
-                        continue
-                    btype = block.get("type")
-                    if btype == "text":
-                        text = block.get("text") or ""
-                        if text:
-                            yield {"type": "text_delta", "delta": text}
-                    elif btype == "tool_use":
-                        # claude runs its OWN tool loop, so this must NEVER be a
-                        # `toolcall_end` (the engine would think IT must execute
-                        # it). Surface it as a PASSIVE `notice` instead — inert
-                        # to every collector, mapped to a monitoring pulse by
-                        # the live bridge ("what is claude doing right now").
-                        name = str(block.get("name") or "")
-                        block_id = block.get("id")
-                        if isinstance(block_id, str) and block_id:
-                            tool_names[block_id] = name
-                        yield {"type": "notice", "kind": "tool_use", "tool": name}
-                    # thinking: deliberately NOT surfaced (claude-internal
-                    # reasoning — content capture is a separate concern)
-            elif event_type == "user":
-                # claude's tool RESULTS come back as user-role tool_result
-                # blocks — the closing bracket of the tool-activity window.
-                # The block carries only the tool_use_id; resolve it to the
-                # NAME recorded at tool_use time so the pulse reads
-                # "tool Read returned", not an opaque id.
-                for block in (obj.get("message") or {}).get("content") or []:
-                    if isinstance(block, dict) and block.get("type") == "tool_result":
-                        ref = block.get("tool_use_id")
-                        yield {"type": "notice", "kind": "tool_result",
-                               "tool": tool_names.get(ref, "") if isinstance(ref, str) else ""}
-            elif event_type == "result":
-                stop_reason = obj.get("stop_reason") or stop_reason
-                result_model = obj.get("model") or result_model
-                u = obj.get("usage")
-                if isinstance(u, dict):
-                    usage = u
-            # system / rate_limit_event: ignored (diagnostic noise)
 
-        # CRIT-004 (opus bugs review): drain stderr BEFORE wait(). If the
-        # process filled its stderr pipe buffer (>64KB) it can't exit while
-        # blocked on the write, so wait() would deadlock. We've already drained
-        # stdout (the readline loop hit EOF); reading stderr to EOF unblocks the
-        # process, then wait() returns immediately. Reading empty stderr is
-        # cheap (returns b"" at EOF). stderr may be absent on some stubs.
-        err_bytes = b""
-        if proc.stderr is not None:
-            err_bytes = await proc.stderr.read()
-        await proc.wait()
-        if proc.returncode != 0:
-            err_text = err_bytes.decode(errors="replace")[:500] if err_bytes else ""
-            yield {"type": "error",
-                   "message": "claude exit {}{}".format(
-                       proc.returncode, ": " + err_text if err_text else "")}
-            return
-
-        # Cost bridge (R4/L8): feed the result-event usage to on_usage — the
-        # streaming seam's equivalent of the removed --output-format json path, so
-        # a plain agent collecting via api_provider.complete() still tracks cost.
-        if on_usage is not None and usage is not None:
-            on_usage(_map_usage(usage, result_model or model))
-        done: Dict[str, Any] = {"type": "done", "stop_reason": stop_reason}
-        if usage is not None:
-            done["usage"] = usage
-        yield done
+            # Cost bridge (R4/L8): feed the result-event usage to on_usage — the
+            # streaming seam's equivalent of the removed --output-format json path, so
+            # a plain agent collecting via api_provider.complete() still tracks cost.
+            if on_usage is not None and usage is not None:
+                on_usage(_map_usage(usage, result_model or model))
+            done: Dict[str, Any] = {"type": "done", "stop_reason": stop_reason}
+            if usage is not None:
+                done["usage"] = usage
+            yield done
+        finally:
+            # Reap the child on EVERY exit path — normal EOF, timeout, an
+            # over-limit line, an unexpected parse-loop exception, or the
+            # consumer closing the generator. Kill only if it is still alive:
+            # the normal and timeout paths already awaited proc.wait() (so
+            # returncode is set) and this is a no-op there — it never
+            # double-kills a process that already terminated.
+            if proc.returncode is None:
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass  # already gone between the check and the kill
+                await proc.wait()
 
 
 def _prompt_from_messages(messages: List[Dict[str, Any]], system: Optional[str]) -> str:

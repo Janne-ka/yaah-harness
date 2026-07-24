@@ -10,8 +10,12 @@ Run: cd yaah && PYTHONPATH=src python3 tests/test_adapters_subprocess.py
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
+import tempfile
 
 from yaah.adapters.providers import ClaudeCliProvider
+from yaah.adapters.providers.claude_cli_provider import _STREAM_LINE_LIMIT
 from yaah.adapters.data import GitDiffSource
 from yaah.agents import api_provider as _ap
 
@@ -336,6 +340,10 @@ async def claude_stream_simple_text_yields_text_delta_and_done() -> None:
     assert events[1]["delta"] == "Hello"
     assert events[2]["stop_reason"] == "end_turn"
     assert events[2]["usage"] == {"input_tokens": 5, "output_tokens": 3}
+    # The cleanly-exited child (returncode set) must NOT be killed — pins the
+    # `if proc.returncode is None:` no-op guard in the reap finally; a
+    # regression to an unconditional kill must fail here.
+    assert not proc.killed, "a cleanly-exited child must not be killed by the reap finally"
 
 
 async def claude_stream_uses_output_format_stream_json_argv() -> None:
@@ -612,6 +620,173 @@ async def claude_stream_handles_none_stdout_without_crashing() -> None:
         "error message should mention stdout / pipe; got: {}".format(err["message"])
 
 
+async def claude_stream_reads_line_over_64kib_intact() -> None:
+    # DEFECT 1 (field incidents, write-heavy stages): a single stream-json line
+    # can carry a whole authored file (a Write tool_use), which is far past
+    # asyncio's 64 KiB default readline buffer — the reader raised ValueError
+    # and ERRORed the node even when every edit already landed. The fix passes
+    # limit=_STREAM_LINE_LIMIT (8 MiB) to the spawn. This drives the provider
+    # against a REAL python child emitting a ~200 KiB json line, through a
+    # spawn shim that forwards the provider's own limit= to a real asyncio
+    # StreamReader — so the big line goes through the same code path a real
+    # `claude` hits. If the limit= regressed to the default, the real readline
+    # would raise and no text_delta would surface.
+    big = "x" * 200_000  # ~200 KiB text block; >> the 64 KiB default line buffer
+    child = (
+        "import sys\n"
+        "sys.stdout.write('{\"type\":\"assistant\",\"message\":{\"content\":"
+        "[{\"type\":\"text\",\"text\":\"' + 'x' * 200000 + '\"}]}}\\n')\n"
+        "sys.stdout.write('{\"type\":\"result\",\"subtype\":\"success\","
+        "\"stop_reason\":\"end_turn\",\"usage\":{}}\\n')\n"
+        "sys.stdout.flush()\n"
+    )
+    fd, child_path = tempfile.mkstemp(suffix="_bigline_child.py")
+    os.write(fd, child.encode())
+    os.close(fd)
+    captured = []
+
+    async def real_child_spawn(*args, **kwargs):
+        # Forward the provider's limit= to a REAL subprocess so the >64 KiB line
+        # is read through an actual StreamReader (not a fake that ignores limits).
+        captured.append(kwargs)
+        return await asyncio.create_subprocess_exec(
+            sys.executable, child_path,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            limit=kwargs.get("limit"),
+        )
+
+    try:
+        be = ClaudeCliProvider(spawn=real_child_spawn)
+        events = await _drain(be.stream({"messages": [{"role": "user", "content": "hi"}]}))
+    finally:
+        os.unlink(child_path)
+    # The provider must forward the named 8 MiB constant to the spawn.
+    assert captured and captured[0].get("limit") == _STREAM_LINE_LIMIT, captured
+    types = [e["type"] for e in events]
+    assert "error" not in types, "big line must read intact, not ERROR: {}".format(types)
+    deltas = [e["delta"] for e in events if e["type"] == "text_delta"]
+    assert deltas == [big], "the whole 200 KiB line must surface as one text_delta"
+    assert types[-1] == "done", types
+
+
+async def claude_stream_overlimit_line_yields_error_not_crash() -> None:
+    # DEFECT 1 (graceful floor): a line past even the 8 MiB buffer must NOT crash
+    # the node with a raw ValueError — it is surfaced as an in-stream error and
+    # the child is reaped. Simulate the overrun by having readline() raise the
+    # exact ValueError asyncio's StreamReader raises on an over-limit line.
+    class OverlimitStdout:
+        async def readline(self):
+            raise ValueError("Separator is found, but chunk is longer than limit")
+        async def read(self): return b""
+
+    proc = FakeStreamProc(stdout_lines=[])
+    proc.stdout = OverlimitStdout()
+    proc.returncode = None  # still ALIVE when the overrun fires — must be reaped
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
+    events = await _drain(be.stream({"messages": [{"role": "user", "content": "x"}]}))
+    types = [e["type"] for e in events]
+    assert "error" in types, "over-limit line must yield an error event, not crash: {}".format(types)
+    err = [e for e in events if e["type"] == "error"][0]
+    assert "buffer" in err["message"].lower() or "limit" in err["message"].lower(), err
+    assert proc.killed, "the child must be reaped after an over-limit read"
+
+
+async def claude_stream_reaps_child_when_read_loop_raises() -> None:
+    # DEFECT 2 (orphaned subprocess): before the fix, only asyncio.TimeoutError was
+    # caught in the readline loop; ANY other read-loop exception propagated PAST
+    # the timeout branch's kill and left claude orphaned at PPID 1, still
+    # streaming to a dead pipe minutes later (a cost leak seen in the field). The
+    # try/finally must reap the child on EVERY exit path — including an
+    # exception the loop does not otherwise handle.
+    class ExplodingStdout:
+        async def readline(self):
+            raise RuntimeError("boom mid-stream")
+        async def read(self): return b""
+
+    class AliveProc(FakeStreamProc):
+        # returncode stays None (ALIVE) until kill()+wait() reaps it — the exact
+        # orphan shape. FakeStreamProc defaults returncode=0 (already dead), which
+        # would mask the leak, so model a still-running child explicitly.
+        def __init__(self):
+            super().__init__(stdout_lines=[])
+            self.returncode = None
+            self.stdout = ExplodingStdout()
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self):
+            self.waited = True
+            if self.returncode is None:
+                self.returncode = -9
+
+    proc = AliveProc()
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
+    raised = False
+    try:
+        await _drain(be.stream({"messages": [{"role": "user", "content": "x"}]}))
+    except RuntimeError:
+        raised = True  # the uncaught error still propagates — cleanup must not swallow it
+    assert raised, "an uncaught read error must propagate, not be silently swallowed"
+    assert proc.killed, "orphaned child must be killed by the finally"
+    assert proc.waited, "child must be reaped (wait) so it is not a zombie"
+    assert proc.returncode is not None, "child must be terminated, not left alive at PPID 1"
+
+
+async def claude_stream_reaps_child_when_consumer_closes_generator() -> None:
+    # DEFECT 2 companion: the reap-finally's comment promises cleanup when "the
+    # consumer closes the generator" — aclose() throws GeneratorExit into the
+    # stream at its current yield point, and the finally must still kill+wait
+    # the still-alive child. Pin it so a refactor that yields inside the
+    # finally (illegal on GeneratorExit) or drops the await regresses loudly.
+    class BlockingAfterLinesStdout:
+        # Feeds a couple of real lines, then blocks forever (a child that is
+        # still streaming when the consumer walks away mid-stream).
+        def __init__(self, lines):
+            self._lines = list(lines)
+        async def readline(self):
+            if self._lines:
+                return self._lines.pop(0)
+            await asyncio.Event().wait()  # never resolves
+        async def read(self): return b""
+
+    class AliveProc(FakeStreamProc):
+        def __init__(self, lines):
+            super().__init__(stdout_lines=[])
+            self.returncode = None                 # still ALIVE mid-stream
+            self.stdout = BlockingAfterLinesStdout(lines)
+
+        def kill(self):
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self):
+            self.waited = True
+            if self.returncode is None:
+                self.returncode = -9
+
+    lines = [
+        b'{"type":"assistant","message":{"content":[{"type":"text","text":"one"}]}}\n',
+        b'{"type":"assistant","message":{"content":[{"type":"text","text":"two"}]}}\n',
+    ]
+    proc = AliveProc(lines)
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
+    stream = be.stream({"messages": [{"role": "user", "content": "x"}]})
+    seen = []
+    async for ev in stream:
+        seen.append(ev["type"])
+        if ev["type"] == "text_delta":
+            break                                  # consumer walks away mid-stream
+    await stream.aclose()                          # throws GeneratorExit at the yield
+    assert "text_delta" in seen, seen
+    assert proc.killed, "child must be killed when the consumer closes the generator"
+    assert proc.waited, "child must be reaped (wait) on aclose, not left a zombie"
+    assert proc.returncode is not None, "child must be terminated after aclose"
+
+
 async def main() -> None:
     for fn in [
         claude_binary_and_flag_trust,
@@ -635,6 +810,11 @@ async def main() -> None:
         claude_stream_drains_stderr_before_wait,
         claude_stream_parses_captured_fixture_end_to_end,
         claude_stream_handles_none_stdout_without_crashing,
+        # >64 KiB stream-json line (whole authored file) + orphaned-child reaping
+        claude_stream_reads_line_over_64kib_intact,
+        claude_stream_overlimit_line_yields_error_not_crash,
+        claude_stream_reaps_child_when_read_loop_raises,
+        claude_stream_reaps_child_when_consumer_closes_generator,
         git_diff_builds_argv_with_ref_paths_and_context,
         git_diff_intent_to_add_runs_add_first,
         git_diff_uses_constructor_repo_when_no_cwd,
