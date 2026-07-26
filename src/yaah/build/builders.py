@@ -180,12 +180,25 @@ def _build_human_gate(spec: Dict[str, Any], ctx: BuildContext) -> Node:
                      allow_untrusted=bool(spec.get("allow_untrusted", False)))
 
 
+def _target_from(spec: Dict[str, Any], node_type: str) -> Any:
+    """Read `target_from` off a shell-family spec, rejecting a non-string at build
+    time (a list/dict/number here is an author error — the key names ONE payload
+    key). Absent → None (feature off)."""
+    tf = spec.get("target_from")
+    if tf is not None and not isinstance(tf, str):
+        raise ValueError(
+            "a '{}' node's 'target_from' must be a string (a single payload key "
+            "name), got {!r}".format(node_type, tf))
+    return tf
+
+
 def _build_shell(spec: Dict[str, Any], ctx: BuildContext) -> Node:
     if "command" not in spec:
         raise ValueError("a 'shell' node needs 'command' (host-fact missing — is an overlay supposed to supply it?)")
     return ShellNode(spec["command"], cwd=spec.get("cwd"), cwd_from=spec.get("cwd_from"),
                      timeout=spec.get("timeout"), shell=bool(spec.get("shell", False)),
-                     tail_only=bool(spec.get("tail_only", False)), carry=spec.get("carry"))
+                     tail_only=bool(spec.get("tail_only", False)), carry=spec.get("carry"),
+                     target_from=_target_from(spec, "shell"))
 
 
 def _build_shell_check(spec: Dict[str, Any], ctx: BuildContext) -> Node:
@@ -194,7 +207,8 @@ def _build_shell_check(spec: Dict[str, Any], ctx: BuildContext) -> Node:
     return ShellCheck(spec["command"], expect_exit=int(spec.get("expect_exit", 0)),
                       expect_nonzero=bool(spec.get("expect_nonzero", False)),
                       cwd=spec.get("cwd"), cwd_from=spec.get("cwd_from"),
-                      timeout=spec.get("timeout"), shell=bool(spec.get("shell", False)))
+                      timeout=spec.get("timeout"), shell=bool(spec.get("shell", False)),
+                      target_from=_target_from(spec, "shell_check"))
 
 
 def _build_expect_field(spec: Dict[str, Any], ctx: BuildContext) -> Node:

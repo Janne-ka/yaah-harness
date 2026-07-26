@@ -257,7 +257,12 @@ def _baton_json(b: "Baton") -> Dict[str, Any]:
     driver skills consuming `yaah list --json`: `{id, stage, awaiting, concerns,
     escalation, question}` (question is null when the gate has no `question`/`ask`
     key; escalation is null unless the stage parked by exhausting its attempts —
-    then it carries the failed verdict that broke the stage, Y3)."""
+    then it carries the failed verdict that broke the stage, Y3).
+
+    NB there is deliberately NO top-level `payload` field: the discoverable data a
+    driver wants is already flattened to `question` + `concerns` here. (M18 asked
+    for a `payload` mirror; declined — a script consuming this shape reads
+    `question`/`concerns` directly. Documented in docs/cookbook/debugging.md.)"""
     q = None
     escalation = None
     if b.pending is not None:

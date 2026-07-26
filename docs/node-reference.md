@@ -176,22 +176,49 @@ default `"stored"`), `cwd_from`. Output: payload + `{into: <where it went>}`.
 
 `command` (required; string or argv list). Optional `cwd`, `cwd_from`,
 `timeout`, `shell: true` (string runs under a shell; list elements are quoted),
-`tail_only` (drop full stdout, keep the tail), `carry`. **Never fails the
-stage** — output: `{exit_code, ok, stdout?, stdout_tail, ...carry}`; route on
-`ok`/`exit_code` with `branch`, or gate with `shell_check`. The stage trace
-span records `exit_code` (the error-path contract).
+`tail_only` (drop full stdout, keep the tail), `carry`, `target_from` (below).
+**Never fails the stage** — output: `{exit_code, ok, stdout?, stdout_tail,
+...carry}`; route on `ok`/`exit_code` with `branch`, or gate with `shell_check`.
+The stage trace span records `exit_code` (the error-path contract).
 
 ```json
 "role:green-run": {"type": "shell", "command": "bundle exec rspec spec/unit",
                    "cwd_from": "workdir", "timeout": 600, "tail_only": true}
 ```
 
+### `target_from` — append ONE payload value as a command argument
+
+The command is **trusted config and never comes from the payload** (anti-injection).
+`target_from` is the one controlled exception: it names a single payload key whose
+value(s) are **appended to the command as additional argument(s)** — never
+replacing it, never interpreted as a command. The motivating case (M17): a test
+gate must run against the path the coding agent *actually wrote its test at*, not
+a path pre-guessed in config.
+
+- Value may be a **string** (one appended arg) or a **list of strings** (each
+  appended, in order). A shell-string command gets each value `shlex.quote`d; an
+  argv list gets each value appended as its own element.
+- **Opt-in per value presence**: `target_from` unset → old behaviour; the key
+  absent or `null` in the payload → the command runs **unchanged**.
+- **Strict path-shape validation** (fail-loud): each value must be a non-empty
+  string of only `[A-Za-z0-9._/-]` (no whitespace or shell metacharacters), must
+  not start with `-` (no option injection), must not contain `..` (no traversal),
+  and is length-capped. **Any** invalid value **ERRORS the node**, naming the key
+  and offending value — the node never silently runs the command without the
+  target (running the wrong/no target is the exact bug this fixes). A non-string
+  `target_from` is rejected at **build time**.
+
+```json
+"role:green-run": {"type": "shell", "command": ["bundle", "exec", "rspec"],
+                   "cwd_from": "workdir", "target_from": "test_path"}
+```
+
 ## `shell_check` — a command as a VALIDATOR
 
-Same execution as `shell`, but returns a pass/fail **Verdict** for a stage's
-`validators` list. `expect_exit` (default 0) or `expect_nonzero: true` (the RED
-gate: tests must FAIL before code exists). Failure detail carries the output
-tail into the retry feedback.
+Same execution as `shell` (incl. `cwd_from` and `target_from`), but returns a
+pass/fail **Verdict** for a stage's `validators` list. `expect_exit` (default 0)
+or `expect_nonzero: true` (the RED gate: tests must FAIL before code exists).
+Failure detail carries the output tail into the retry feedback.
 
 ## `expect_field` — payload assertion validator
 

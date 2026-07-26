@@ -75,6 +75,33 @@ The mailbox view. Shows every baton parked at a human gate or waiting on
 external input, the stage that parked it, what it's awaiting, and any
 concerns it carries.
 
+**`--json` baton shape** — the authoritative, stable contract a driver script
+consumes (one object per parked baton, emitted by `runtime._baton_json`; the MCP
+`list_gates` tool returns the identical shape):
+
+```json
+{
+  "id": "b-3f0a…",                // baton id — pass to `yaah resume` / `yaah baton-schema`
+  "stage": "review",              // the stage that parked
+  "awaiting": "human:approve",    // what it's waiting on (tag), or null
+  "question": "ship it?",         // the gate's question/ask, or null if it asked none
+  "concerns": [                   // soft concerns gathered across the run ([] if none)
+    {"by": "sceptic", "msg": "double-check the scope"}
+  ],
+  "escalation": null              // the failed verdict, if it parked by exhausting
+                                  // its attempts (Y3); null for a plain human gate
+}
+```
+
+**There is no top-level `payload` field, and that is deliberate.** A script that
+reaches for `.payload` (expecting the baton's inner envelope) finds nothing — the
+discoverable data is already **flattened** onto this object: read the parked
+gate's prompt from **`question`** and the run's open concerns from **`concerns`**
+directly. The durable baton's inner payload is intentionally not surfaced here:
+it flows into the *resumed* run when you `yaah resume`, and exposing it in the
+mailbox view would invite scripts to depend on app-specific keys the mailbox
+contract does not own.
+
 Use when: a pipeline doesn't return — most "stuck" pipelines are parked at
 a gate, not crashed. A common confusion is restart-then-rerun: the parked
 baton survives the restart (durable state), so the second `yaah run`
