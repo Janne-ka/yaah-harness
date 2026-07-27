@@ -80,7 +80,7 @@ Diagnose:
   manual                        print the generated agent manual (for LLM authors)
   mcp-serve                     serve validate/run/gates as MCP tools over stdio
   validate <root>               validate root + referenced pipeline file (no run)
-                                  [--strict] [--from-code] [--json (machine-readable diagnostics)]
+                                  [--strict] [--from-code] [--verbose (list nodes in collapsed advisories)] [--json (machine-readable diagnostics)]
   doctor                        diagnose install: Python version, optional deps, packaged base configs
   completion <bash|zsh>         emit a shell completion script (`source <(yaah completion bash)`)
 
@@ -305,11 +305,15 @@ def _parse_validate(rest: list) -> dict:
     as_json = "--json" in rest
     if as_json:
         rest.remove("--json")      # --json: ONE machine-readable diagnostics object on stdout
+    verbose = "--verbose" in rest
+    if verbose:
+        rest.remove("--verbose")   # --verbose: list every node in a collapsed multi-item advisory
     spec = _parse_cli(rest)        # parse root + --fake/--debug, then
     spec["action"] = "validate"    # check-only (never runs the pipeline)
     spec["strict"] = strict
     spec["from_code"] = from_code
     spec["json"] = as_json
+    spec["verbose"] = verbose
     return spec
 
 
@@ -801,7 +805,8 @@ def _dispatch_validate(spec: Dict[str, Any], root: Dict[str, Any], base: str) ->
     without prose parsing. Exit codes unchanged: 0 ok / 1 invalid / 2 strict.
     Root validation happens HERE (this action dispatches before the
     orchestrator's validate_root) so root errors become diagnostics too."""
-    from .validate import split_diagnostics, split_lint_id, validate_config
+    from .validate import (collapse_lint_warnings, split_diagnostics,
+                           split_lint_id, validate_config)
     as_json = spec.get("json", False)
     # --from-code (ADR-0005 slice D): read @provides off fn: transforms so the lint sees
     # across them without hand-written `provides`. OPT-IN because it IMPORTS app code; the
@@ -835,8 +840,11 @@ def _dispatch_validate(spec: Dict[str, Any], root: Dict[str, Any], base: str) ->
     # Each lint message carries its rule id as a "[lint: id]" trailer; present it
     # UP FRONT ("warning[id]: ...") — on a long unwrapped stderr line the rule name
     # is what the author scans for, and the trailer would be the last thing seen.
-    for w in warnings:
-        wid, msg = split_lint_id(w)
+    # Multi-item advisory classes (transform-provides-undeclared, untrusted-unfenced)
+    # collapse to a single count line by DEFAULT so the wall of node names can't bury
+    # the verdict; `--verbose` restores the full per-item listing. Strict counting
+    # below still uses the raw `warnings` list, so exit-code semantics are unchanged.
+    for wid, msg in collapse_lint_warnings(warnings, verbose=spec.get("verbose", False)):
         if wid:
             print("warning[{}]: {}".format(wid, msg), file=sys.stderr)
         else:

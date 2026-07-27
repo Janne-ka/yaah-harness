@@ -42,6 +42,13 @@ Loads + validates the root + the referenced pipeline file. Catches:
 Use when: a fresh pipeline isn't running, a hand-edited config is
 suspicious, a graph rewrite might have left a stale reference.
 
+Advisory lint warnings print to stderr; the `ok: ... is valid` verdict is
+always the LAST line. An advisory class that names many nodes at once (e.g.
+`transform-provides-undeclared`) collapses by default to a single count line —
+`N envelope-transform(s) don't declare provides ... run with --verbose to list
+them` — so the verdict isn't buried. Add `--verbose` to expand every node.
+`--strict` (fail on any advisory, exit 2) is unaffected by `--verbose`.
+
 **Not** caught by validate (these surface at `yaah run` time):
 
 - unknown node `type` values

@@ -1691,3 +1691,74 @@ def split_lint_id(warning: str) -> "Tuple[Optional[str], str]":
     if m:
         return m.group(1), warning[:m.start()]
     return None, warning
+
+
+# ---- terminal collapse for multi-item advisory classes -----------------------
+# A few lint rules can name MANY nodes at once — either as one warning that lists
+# them all (`transform-provides-undeclared`) or as one warning per site sharing a
+# rule id (`untrusted-unfenced`). On a live run that wall of names buries the
+# `ok: ... is valid` verdict the operator is actually looking for. The DEFAULT
+# terminal rendering therefore COLLAPSES such a class to a single count line; the
+# validate CLI's `--verbose` flag restores the full per-item listing. This is a
+# RENDER concern (the lint strings themselves are unchanged, so `--json`,
+# `--strict` counting, and every lint test still see the full set). A collapser
+# lives HERE because this module owns the lint-string format each one must read.
+
+def _collapse_transform_provides(msgs: List[str]) -> "Optional[str]":
+    """`transform-provides-undeclared` is ONE consolidated warning naming every
+    undeclared envelope-transform. Count them off the stable
+    "envelope-transform(s) 't1', 't2', ... don't declare" prefix. One transform
+    reads fine as-is, so collapse only kicks in from two."""
+    head = msgs[0].split(" don't declare", 1)[0]
+    n = len(re.findall(r"'[^']*'", head))
+    if n < 2:
+        return None
+    return ("{} envelope-transform(s) don't declare `provides` (the lint skips "
+            "requires-checks on their consumers) — run with --verbose to list "
+            "them".format(n))
+
+
+def _collapse_untrusted_unfenced(msgs: List[str]) -> "Optional[str]":
+    """`untrusted-unfenced` emits ONE warning per consumer site; the count IS the
+    number of warnings. A single site reads fine as-is."""
+    n = len(msgs)
+    if n < 2:
+        return None
+    return ("{} template site(s) interpolate agent-authored keys UNFENCED — run "
+            "with --verbose to list them".format(n))
+
+
+# rule id -> collapser(msgs_for_that_id) -> summary line, or None to keep as-is.
+_COLLAPSIBLE_ADVISORIES = {
+    "transform-provides-undeclared": _collapse_transform_provides,
+    "untrusted-unfenced": _collapse_untrusted_unfenced,
+}
+
+
+def collapse_lint_warnings(warnings: List[str],
+                           verbose: bool = False) -> "List[Tuple[Optional[str], str]]":
+    """Render lint warnings for a terminal as (rule_id, message) pairs, in the
+    original emission order. When `verbose` is False, a multi-item advisory class
+    (see `_COLLAPSIBLE_ADVISORIES`) collapses to a single count line placed at the
+    class's first occurrence; its other lines are dropped. Single-item warnings
+    and rules with no collapser pass through unchanged. `verbose` restores the
+    full one-line-per-warning listing."""
+    parsed = [split_lint_id(w) for w in warnings]
+    if verbose:
+        return parsed
+    grouped: Dict[str, List[str]] = {}
+    for wid, msg in parsed:
+        if wid in _COLLAPSIBLE_ADVISORIES:
+            grouped.setdefault(wid, []).append(msg)
+    out: List[Tuple[Optional[str], str]] = []
+    emitted = set()
+    for wid, msg in parsed:
+        if wid in _COLLAPSIBLE_ADVISORIES:
+            summary = _COLLAPSIBLE_ADVISORIES[wid](grouped[wid])
+            if summary is not None:
+                if wid not in emitted:
+                    out.append((wid, summary))
+                    emitted.add(wid)
+                continue          # collapsed — drop the individual line
+        out.append((wid, msg))
+    return out
