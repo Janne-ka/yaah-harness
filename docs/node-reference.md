@@ -26,6 +26,33 @@ Unknown keys are caught by `validate_pipeline` (the silent-no-op class).
 `{base_dir}` inside agent tool `usage`/`allowed_tools` strings expands to the
 config file's directory (absolute), so tool scripts ship beside the config.
 
+**`timeout` semantics (per-node, unchanged) + the provider stall watchdog.** A
+node's `timeout` still overrides the backend default exactly as before — set it
+per stage for a slow node, leave it off to inherit the backend's default. What
+changed is the *default* when neither the node nor the consumer sets one:
+
+- **`claude` backend** — `timeout` is a per-`readline` **inactivity** watchdog,
+  NOT a total-run deadline. It bounds the silence between output lines: the CLI
+  emits nothing between a `tool_use` and its `tool_result`, so one long tool call
+  is one long silence. The default is now **900s (15 min)** of silence — finite
+  so a network cut / wedged CLI / MCP stall surfaces as a clean error event (and
+  the engine's retry/park path) instead of freezing the run forever. A node whose
+  single tool call can legitimately run longer than 15 min (an agent executing a
+  large test suite in one shell call) MUST set an explicit larger node `timeout`
+  — otherwise it is false-killed at 900s (recoverable: the error is classified
+  transient and retried, but each retry restarts the agent).
+- **`litellm` backend** — `timeout` is the SDK request timeout (bounds the whole
+  request for single-shot; for streaming it is forwarded to the client and bounds
+  inter-chunk reads on httpx-based providers). Default is now **900s**; an
+  explicit `null` in the provider spec opts out to litellm's own default.
+
+Overrides: an explicit **node** `timeout` (a number) wins over the backend
+default. A node-level `timeout: null` is NOT an opt-out — null and absent are
+indistinguishable in node config, both inherit the backend default. The
+wait-forever opt-out for the `claude` backend exists ONLY at the provider spec
+level (`providers: {... "timeout": null}` → `ClaudeCliProvider(timeout=None)`),
+deliberate and greppable in the run-root.
+
 ---
 
 ## `agent` — the LLM worker

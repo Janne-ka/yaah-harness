@@ -15,7 +15,8 @@ import sys
 import tempfile
 
 from yaah.adapters.providers import ClaudeCliProvider
-from yaah.adapters.providers.claude_cli_provider import _STREAM_LINE_LIMIT
+from yaah.adapters.providers.claude_cli_provider import (
+    _STREAM_LINE_LIMIT, _DEFAULT_STALL_TIMEOUT)
 from yaah.adapters.data import GitDiffSource
 from yaah.agents import api_provider as _ap
 
@@ -787,6 +788,90 @@ async def claude_stream_reaps_child_when_consumer_closes_generator() -> None:
     assert proc.returncode is not None, "child must be terminated after aclose"
 
 
+async def claude_timeout_default_is_finite_not_none() -> None:
+    # Network-cut protection (the headline). Constructing the provider WITHOUT a
+    # timeout arg must arm the FINITE default — not None. A regression to
+    # timeout=None (wait forever) is exactly what refroze a whole pipeline run on
+    # an internet cut: the claude child retries silently forever, readline never
+    # returns, the node never errors. This pin fails loudly if someone reverts the
+    # default to None.
+    be = ClaudeCliProvider()
+    assert be._timeout == _DEFAULT_STALL_TIMEOUT, be._timeout
+    assert be._timeout is not None, "unconfigured provider must NOT wait forever"
+
+
+async def claude_timeout_explicit_none_opts_out_to_wait_forever() -> None:
+    # The explicit opt-out: passing timeout=None must STILL mean wait-forever
+    # (distinct from "not passed"). A wedged readline under timeout=None must NOT
+    # produce an in-stream error — the stream simply blocks. Prove it by racing
+    # the drain against a short harness timeout: it must be OUR harness that
+    # fires, never an in-stream error event.
+    class HangingStdout:
+        async def readline(self):
+            await asyncio.Event().wait()          # never resolves
+        async def read(self): return b""
+
+    proc = FakeStreamProc(stdout_lines=[])
+    proc.stdout = HangingStdout()
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []), timeout=None)
+    assert be._timeout is None, be._timeout       # explicit None survives resolution
+    try:
+        await asyncio.wait_for(
+            _drain(be.stream({"messages": [{"role": "user", "content": "x"}]})),
+            timeout=0.3)
+        raise AssertionError("timeout=None must wait forever, not emit an error event")
+    except asyncio.TimeoutError:
+        pass                                      # our harness fired → stream still blocked
+
+
+async def claude_timeout_opts_override_beats_instance_and_reaps() -> None:
+    # Per-call opts["timeout"] wins over the instance value (the agent layer
+    # threads config.timeout this way). A hanging readline with a tiny opts
+    # timeout must error PROMPTLY even though the instance timeout is huge — and
+    # the wedged child must be killed AND reaped (wait), not left an orphan.
+    class HangingStdout:
+        async def readline(self):
+            await asyncio.Event().wait()
+        async def read(self): return b""
+
+    proc = FakeStreamProc(stdout_lines=[])
+    proc.stdout = HangingStdout()
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []), timeout=999.0)
+    events = await asyncio.wait_for(
+        _drain(be.stream({"messages": [{"role": "user", "content": "x"}]},
+                         timeout=0.2)),
+        timeout=3.0)
+    types = [e["type"] for e in events]
+    assert "error" in types, types
+    err = [e for e in events if e["type"] == "error"][0]
+    assert "0.2" in err["message"], err           # the opts value fired, not 999.0
+    assert "inactivity" in err["message"].lower(), err
+    assert proc.killed, "opts timeout must kill even with a large instance timeout"
+    assert proc.waited, "the wedged child must be reaped (wait), not orphaned"
+
+
+async def claude_timeout_opts_none_wins_over_finite_instance() -> None:
+    # Explicit opts None wins — even over a FINITE instance default. With a tiny
+    # instance timeout (0.1s) but opts timeout=None, the readline must wait
+    # forever (opts wins, including None): no error event within the window.
+    class HangingStdout:
+        async def readline(self):
+            await asyncio.Event().wait()
+        async def read(self): return b""
+
+    proc = FakeStreamProc(stdout_lines=[])
+    proc.stdout = HangingStdout()
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []), timeout=0.1)
+    try:
+        await asyncio.wait_for(
+            _drain(be.stream({"messages": [{"role": "user", "content": "x"}]},
+                             timeout=None)),
+            timeout=0.4)
+        raise AssertionError("opts timeout=None must wait forever despite finite instance")
+    except asyncio.TimeoutError:
+        pass
+
+
 async def main() -> None:
     for fn in [
         claude_binary_and_flag_trust,
@@ -807,6 +892,11 @@ async def main() -> None:
         claude_stream_handles_none_stdin_without_crashing,
         claude_stream_drains_stdin_before_closing,
         claude_stream_timeout_kills_proc_and_yields_error,
+        # network-cut / stall protection: armed-by-default inactivity watchdog
+        claude_timeout_default_is_finite_not_none,
+        claude_timeout_explicit_none_opts_out_to_wait_forever,
+        claude_timeout_opts_override_beats_instance_and_reaps,
+        claude_timeout_opts_none_wins_over_finite_instance,
         claude_stream_drains_stderr_before_wait,
         claude_stream_parses_captured_fixture_end_to_end,
         claude_stream_handles_none_stdout_without_crashing,

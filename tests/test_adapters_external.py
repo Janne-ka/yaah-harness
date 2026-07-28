@@ -74,6 +74,46 @@ async def litellm_strips_agent_only_opts() -> None:
     assert not (set(agent_opts) & set(seen)), seen
 
 
+async def litellm_arms_request_timeout_by_default() -> None:
+    # Network-cut / stall protection: with no timeout configured, the provider
+    # must inject the finite _DEFAULT_REQUEST_TIMEOUT so an internet cut can't
+    # hang the calling stage forever (the sibling of the claude readline
+    # watchdog). A regression to no-timeout would refreeze on an internet cut.
+    from yaah.adapters.providers.litellm_provider import _DEFAULT_REQUEST_TIMEOUT
+    seen = {}
+
+    async def stub(**kwargs):
+        seen.update(kwargs)
+        return _resp({"content": "ok"})
+
+    await _ap.complete(LiteLLMProvider(acompletion=stub), "p")
+    assert seen["timeout"] == _DEFAULT_REQUEST_TIMEOUT, seen
+
+
+async def litellm_explicit_timeout_wins_including_none() -> None:
+    # An explicit timeout wins over the default — from the provider default_opts
+    # or a per-call opt, INCLUDING None (opt out to litellm's own default).
+    seen = {}
+
+    async def stub(**kwargs):
+        seen.update(kwargs)
+        return _resp({"content": "ok"})
+
+    # per-call explicit value wins
+    await _ap.complete(LiteLLMProvider(acompletion=stub), "p", timeout=5.0)
+    assert seen["timeout"] == 5.0, seen
+
+    # explicit None wins (opt-out) — not overwritten by the finite default
+    seen.clear()
+    await _ap.complete(LiteLLMProvider(acompletion=stub), "p", timeout=None)
+    assert "timeout" in seen and seen["timeout"] is None, seen
+
+    # provider-level default_opts timeout is respected
+    seen.clear()
+    await _ap.complete(LiteLLMProvider(acompletion=stub, timeout=12.0), "p")
+    assert seen["timeout"] == 12.0, seen
+
+
 async def litellm_turn_parses_tool_calls() -> None:
     async def stub(**kwargs):
         assert kwargs["tools"] == [{"name": "t"}]
@@ -548,6 +588,8 @@ async def main() -> None:
         litellm_complete_shapes_request_and_returns_content,
         litellm_defaults_model_when_unset,
         litellm_strips_agent_only_opts,
+        litellm_arms_request_timeout_by_default,
+        litellm_explicit_timeout_wins_including_none,
         litellm_stream_true_yields_incremental_deltas,
         litellm_stream_reports_usage_to_cost_bridge,
         litellm_stream_reports_resolved_model_like_single_shot,

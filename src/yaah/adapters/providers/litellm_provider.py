@@ -45,6 +45,20 @@ from ...agents.api_provider import ApiProvider, Context, StreamEvent, SupportsTu
 _AGENT_ONLY_OPTS = ("cwd", "mcp", "allowed_tools", "permission_mode")
 
 
+# Request-timeout default — network-cut / stall protection, the litellm sibling of
+# ClaudeCliProvider's readline inactivity watchdog. litellm.acompletion accepts a
+# `timeout` (float seconds), forwarded to the underlying provider client (httpx):
+# for the single-shot path it bounds the whole request; for the `stream: true`
+# path it bounds the read between SSE chunks — so a mid-stream network cut can't
+# hang the chunk loop forever. Unarmed (`timeout=None`) an internet cut freezes
+# the calling stage undetectably (the incident this guards). 15 minutes matches
+# the claude default: generous enough for a slow large completion, but finite.
+# Resolution: an explicit `timeout` (from provider default_opts or per-call opts,
+# INCLUDING None) wins — None opts out to the SDK's own default; absent → this
+# constant is injected.
+_DEFAULT_REQUEST_TIMEOUT = 900.0  # seconds
+
+
 def _strip_agent_opts(merged: Dict[str, Any]) -> None:
     for key in _AGENT_ONLY_OPTS:
         merged.pop(key, None)
@@ -115,6 +129,12 @@ class LiteLLMProvider(ApiProvider, SupportsTurn):
         # stream_options; the single-shot path must never forward it.
         chunked = bool(merged.pop("stream", False))
         _strip_agent_opts(merged)
+        # Arm the request timeout unless the caller set one explicitly. Present
+        # (even None) wins — None opts out to litellm's own default; absent →
+        # the finite constant so an unconfigured consumer survives a network cut
+        # instead of hanging the stage forever. (See _DEFAULT_REQUEST_TIMEOUT.)
+        if "timeout" not in merged:
+            merged["timeout"] = _DEFAULT_REQUEST_TIMEOUT
 
         model = context.get("model") or "gpt-4o-mini"
         messages: List[Dict[str, Any]] = list(context.get("messages") or [])

@@ -74,6 +74,29 @@ _DANGEROUS_FLAGS = frozenset({
 # line == one whole authored file.
 _STREAM_LINE_LIMIT = 8 * 2 ** 20  # 8 MiB per stream-json line
 
+# Inactivity watchdog default — network-cut / stall protection. stream()'s read
+# loop wraps every `proc.stdout.readline()` in asyncio.wait_for(timeout=...): on
+# TimeoutError it kills the child and emits a clean error event so the chain
+# doesn't hang. This is an INACTIVITY timeout PER readline, NOT a total-run
+# deadline — a healthy agent can be legitimately silent for several minutes while
+# a single long tool call runs (e.g. a whole test suite executing inside the
+# agent), so the default must be generous. What it must NEVER be is infinite:
+# on an internet cut the `claude` child retries silently forever, readline never
+# returns, the node never errors, and the whole run freezes with no park and no
+# notification (the incident this guards — "guard exists, unconfigured =
+# unguarded"). TRADE-OFF, stated honestly: a single tool call CAN exceed 15
+# minutes (an agent running a large test suite in one shell call) — that node
+# gets false-killed and transient-retried (recoverable, but the agent restarts).
+# Such nodes must set an explicit larger node `timeout`; the default optimizes
+# for "a cut never freezes the chain", not "no long call is ever interrupted".
+_DEFAULT_STALL_TIMEOUT = 900.0  # seconds of silence per readline before error+kill
+
+# Sentinel distinct from None so __init__ can tell "caller omitted timeout"
+# (→ arm the finite default above) from an EXPLICIT `timeout=None` (→ keep the
+# legacy wait-forever behavior — an explicit, deliberate opt-out). None cannot
+# serve double duty here, since None is itself the wait-forever request.
+_UNSET: Any = object()
+
 
 def _validate_binary(binary: str) -> str:
     if not binary or _UNSAFE_CHARS_RE.search(binary) or binary.startswith("-"):
@@ -124,7 +147,12 @@ class ClaudeCliProvider(ApiProvider):
         binary: str = "claude",
         extra_args: Optional[Sequence[str]] = None,
         strip_mcp: bool = True,
-        timeout: Optional[float] = None,
+        # Caller-facing contract is Optional[float] (a finite inactivity timeout,
+        # or None for wait-forever). The default is the _UNSET sentinel — "not
+        # passed" — resolved below to the finite _DEFAULT_STALL_TIMEOUT so an
+        # unconfigured consumer is armed against a network cut, while an explicit
+        # None still means wait-forever.
+        timeout: Optional[float] = _UNSET,  # type: ignore[assignment]
         permission_mode: Optional[str] = None,   # e.g. "acceptEdits" for a code agent
         allowed_tools: Optional[Sequence[str]] = None,  # e.g. ["Read", "Edit", "Write"]
         allow_dangerous_flags: bool = False,     # explicit opt-in for bypass flags (BUG-629)
@@ -133,7 +161,11 @@ class ClaudeCliProvider(ApiProvider):
         self._binary = _validate_binary(binary)
         self._extra_args = _validate_extra_args(extra_args or [], allow_dangerous_flags)
         self._strip_mcp = strip_mcp
-        self._timeout = timeout
+        # Resolve the inactivity watchdog. The _UNSET sentinel (NOT None) marks
+        # "caller omitted timeout" → arm the finite default (network-cut
+        # protection). An explicit `timeout=None` falls through unchanged → the
+        # legacy wait-forever behavior, a deliberate opt-out.
+        self._timeout = _DEFAULT_STALL_TIMEOUT if timeout is _UNSET else timeout
         self._permission_mode = permission_mode
         self._allowed_tools = list(allowed_tools or [])
         # `spawn` is the external dependency, injected for testability: an async
@@ -255,8 +287,10 @@ class ClaudeCliProvider(ApiProvider):
         # data; everything else is diagnostic noise.
         # CRIT-003 (opus bugs review): wrap each readline in wait_for so a
         # wedged claude (mid-stream silence, infinite api_retry loop, MCP
-        # stall) doesn't hang the pipeline indefinitely. self._timeout=None
-        # preserves the legacy "wait forever" behavior.
+        # stall) doesn't hang the pipeline indefinitely. The instance value is
+        # now the finite _DEFAULT_STALL_TIMEOUT unless the caller explicitly
+        # passed timeout=None (→ wait forever). Per-call resolution: an explicit
+        # opts["timeout"] (INCLUDING None) wins; absent → the instance value.
         timeout = opts.get("timeout", self._timeout)
         usage: Optional[Dict[str, Any]] = None
         stop_reason = "end_turn"
@@ -283,8 +317,12 @@ class ClaudeCliProvider(ApiProvider):
                         pass  # already gone between the timeout and the kill
                     await proc.wait()
                     yield {"type": "error",
-                           "message": "claude stream-json timeout after {}s "
-                                      "(no output received from subprocess)".format(timeout)}
+                           "message": "claude stream-json INACTIVITY timeout after {}s "
+                                      "with no output from the subprocess — likely a "
+                                      "network outage, a wedged CLI, or an MCP stall. The "
+                                      "child was killed; the run can be resumed once "
+                                      "connectivity returns (the engine's error path owns "
+                                      "retry/park).".format(timeout)}
                     return
                 except (ValueError, asyncio.LimitOverrunError) as exc:
                     # A single stream-json line exceeded even the 8 MiB
