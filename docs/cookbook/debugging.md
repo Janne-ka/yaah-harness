@@ -91,6 +91,11 @@ consumes (one object per parked baton, emitted by `runtime._baton_json`; the MCP
   "id": "b-3f0a…",                // baton id — pass to `yaah resume` / `yaah baton-schema`
   "stage": "review",              // the stage that parked
   "awaiting": "human:approve",    // what it's waiting on (tag), or null
+  "parked_at": 1769990400.0,      // wall-clock epoch (float sec) the run suspended, or null;
+                                  // pick the GREATEST to disambiguate N stale batons for one gate
+  "checkpointed_at": null,        // Level 2 twin of parked_at: null for a suspended gate, the
+                                  // last-checkpoint wall-clock for a RUNNING baton (the `running`
+                                  // array); pick the GREATEST to disambiguate N killed checkpoints
   "question": "ship it?",         // the gate's question/ask, or null if it asked none
   "concerns": [                   // soft concerns gathered across the run ([] if none)
     {"by": "sceptic", "msg": "double-check the scope"}
@@ -99,6 +104,11 @@ consumes (one object per parked baton, emitted by `runtime._baton_json`; the MCP
                                   // its attempts (Y3); null for a plain human gate
 }
 ```
+
+The `awaiting` / `parked_at` / `question` / `escalation` fields describe a **park**,
+so on an entry in the `running` array they are **always null** — including for a run
+that was parked earlier and resumed past its gate (the resume clears them before the
+next checkpoint is written). Read `stage` + `checkpointed_at` for a running entry.
 
 **There is no top-level `payload` field, and that is deliberate.** A script that
 reaches for `.payload` (expecting the baton's inner envelope) finds nothing — the
@@ -117,6 +127,27 @@ suspends *the new run* while the old one is still parked.
 If a baton is parked you didn't expect: `yaah baton-schema root.json <id>`
 shows the decision form the gate is waiting for. Compose the JSON, resume
 with `yaah resume`.
+
+**Running checkpoints (recovering a KILLED run).** Below the parked gates,
+`yaah list` shows a `RUNNING` section — batons persisted mid-run by Level 2
+checkpoint durability (docs/durable-state.md §5). On a durable `state:` store,
+after each completed stage the harness saves the baton with its cursor advanced +
+the next stage's input, so a run whose process was **killed mid-flight** (SIGKILL,
+crash, host reboot) is re-drivable instead of lost:
+
+```bash
+yaah resume-run root.json <id>   # re-drive from the in-flight stage to the next gate/completion
+```
+
+The in-flight stage RE-RUNS (completed stages before it do not — their outputs are
+the checkpoint). In `--json`, running checkpoints are an additive `"running"` array
+alongside `"batons"`. Two cautions: (1) on a SHARED store a `RUNNING` baton may be a
+run still LIVE in another process, not a crashed one — the engine can't tell them
+apart (no liveness lease yet), so only resume-run a baton whose process you KNOW is
+dead; (2) if the pipeline graph was edited between the kill and the resume, the
+cursor stage is matched against the CURRENT graph — a renamed/removed stage resumes
+wrong (the graph-fingerprint guard is on the roadmap). A killed run whose in-flight
+stage committed a side effect re-runs that effect unless the node is idempotent.
 
 ## 5 — `yaah trace --pretty` for the postmortem
 

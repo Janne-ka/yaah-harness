@@ -54,10 +54,14 @@ Run & inspect:
                                 against a changed contract (zero model calls)
                                 add --golden FILE to diff collected outputs against
                                 a pinned expected artifact (zero model calls)
-  list <root> [--json]          show parked gates (the mailbox view; --json for a parseable shape)
+  list <root> [--json]          show parked gates + running checkpoints (mailbox + recovery view; --json for a parseable shape)
   resume <root> ID [FILE]       deliver a decision (optionally from FILE) to a parked gate
+  resume-run <root> ID          recover a killed mid-run: re-drive its running checkpoint from the in-flight stage (Level 2)
   baton-schema <root> <id>      print the JSON Schema of decision.json for one parked baton
-  clear <root>                  graceful reset: broadcast clear + flush parked + drop batons
+  clear <root>                  graceful reset: broadcast clear + flush parked + drop every
+                                stored baton (parked gates AND running checkpoints)
+                                add --baton ID (repeatable) to drop only those batons —
+                                parked or running — and leave the rest (surgical orphan cleanup)
   explain <root>                print the EFFECTIVE config (post-_extends/_fake + defaults)
   rollback <root> [ID]          walk a completed run's declared undo targets (ADR-0008).
                                 no ID lists runs with candidates; with ID prints the undo
@@ -90,7 +94,7 @@ Options (on run/list/resume/clear/validate/explain):
   -h --help     show this message
   -V --version  print the installed yaah version
 
-Legacy form (still supported): yaah <root> [--list | --resume ID [FILE] | --clear | --explain | --lint-overlay]
+Legacy form (still supported): yaah <root> [--list | --resume ID [FILE] | --clear [--baton ID ...] | --explain | --lint-overlay]
 (equivalent: `python -m yaah.runtime …` when not installed)"""
 
 
@@ -144,9 +148,24 @@ def _parse_cli(argv: list) -> dict:
         # --list just above, --resume just below.)
         _usage_exit("--json is only valid with run, resume, and --list")
     if cmd == "--clear":
+        # Optional targeted form: `--baton ID` (repeatable) drops exactly those
+        # batons — suspended gates or Level 2 running checkpoints — and leaves the
+        # rest; with no `--baton` it stays the all-or-nothing `*` reset. Same
+        # inline-flag parse as `--resume --approver` above.
+        rest = list(rest)
+        batons: list = []
+        while "--baton" in rest:
+            i = rest.index("--baton")
+            if i + 1 >= len(rest) or rest[i + 1].startswith("-"):
+                _usage_exit("--baton needs a baton id "
+                            "(yaah clear <root> --baton ID [--baton ID ...])")
+            batons.append(rest[i + 1])
+            del rest[i:i + 2]
         if len(rest) > 1:
-            _usage_exit("--clear takes no extra arguments")
-        return {"action": "clear", "root": root, "fake": fake, "debug": debug}
+            _usage_exit("--clear takes no extra arguments (target specific "
+                        "batons with --baton ID)")
+        return {"action": "clear", "root": root, "fake": fake, "debug": debug,
+                "batons": batons}
     if cmd == "--explain":
         if len(rest) > 1:
             _usage_exit("--explain takes no extra arguments")
@@ -290,6 +309,27 @@ def _parse_resume(rest: list) -> dict:
     if len(rest) < 2:
         _usage_exit("resume needs a root config and a baton id")
     return _parse_cli([rest[0], "--resume", rest[1]] + rest[2:])
+
+
+def _parse_resume_run(rest: list) -> dict:
+    """`resume-run <root> ID [--json]` — recover a killed mid-run by re-driving its
+    running checkpoint (Level 2). No decision file: unlike `resume`, a crashed run
+    carries no gate to answer, it just continues from the in-flight stage."""
+    rest = list(rest)
+    fake = "--fake" in rest
+    if fake:
+        rest.remove("--fake")
+    debug = "--debug" in rest
+    if debug:
+        rest.remove("--debug")
+    as_json = "--json" in rest
+    if as_json:
+        rest.remove("--json")
+    if len(rest) != 2:
+        _usage_exit("resume-run needs a root config and a baton id "
+                    "(yaah resume-run <root> ID)")
+    return {"action": "resume-run", "root": rest[0], "baton_id": rest[1],
+            "fake": fake, "debug": debug, "json": as_json}
 
 
 def _parse_validate(rest: list) -> dict:
@@ -447,6 +487,7 @@ _VERB_PARSERS: Dict[str, Callable[[list], dict]] = {
     "clear":         _parse_via_flag("--clear"),
     "explain":       _parse_via_flag("--explain"),
     "resume":        _parse_resume,
+    "resume-run":    _parse_resume_run,
     "validate":      _parse_validate,
     "trace":         _parse_trace,
     "doctor":        _parse_doctor,
@@ -944,12 +985,17 @@ def _dispatch_baton_schema(spec: Dict[str, Any], root: Dict[str, Any], base: str
 
 
 def _dispatch_list(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
-    from .runtime import list_gates, _baton_json
+    from .runtime import list_gates, list_checkpoints, _baton_json
     gates = asyncio.run(list_gates(root, base))
+    running = asyncio.run(list_checkpoints(root, base))
     if spec.get("json"):
         # one JSON document with the same fields the prose view shows — so a
         # driver skill can parse instead of interpret (shape: _baton_json).
-        print(json.dumps({"batons": [_baton_json(b) for b in gates]}, indent=2))
+        # `running` is an ADDITIVE key (Level 2): a suspended-gate consumer
+        # reading `batons` is unaffected; a recovery tool reads `running`.
+        print(json.dumps({
+            "batons": [_baton_json(b) for b in gates],
+            "running": [_baton_json(b) for b in running]}, indent=2))
         return
     for b in gates:
         print("GATE baton_id={} stage={} awaiting={} concerns={}".format(
@@ -966,9 +1012,31 @@ def _dispatch_list(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> Non
                 print("  question: {}".format(q))
     if not gates:
         print("(no suspended gates)")
+    # Running checkpoints (Level 2): a distinct section, ADDITIVE below the gates —
+    # these are NOT gates awaiting a human, they are runs mid-flight (live) or
+    # crashed (recoverable). The engine can't tell which without a liveness lease,
+    # so the label is honest and the resume command is only actionable once the
+    # operator knows its process is dead (docs/durable-state.md §5).
+    for b in running:
+        print("RUNNING baton_id={} stage={}  (if its process died: "
+              "yaah resume-run {} {})".format(b.id, b.stage, spec["root"], b.id))
 
 
 def _dispatch_clear(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
+    batons = spec.get("batons")
+    if batons:
+        # Targeted form: delete exactly the named batons — parked gates or Level 2
+        # running checkpoints. ONLY the action's domain errors (unknown id /
+        # unexpected status) get exit 1 — same boundary as baton-schema, so an
+        # operator can tell "wrong baton" from a broken root/store.
+        from .runtime import ActionError, clear_batons
+        try:
+            result = asyncio.run(clear_batons(root, base, batons))
+        except ActionError as e:
+            print("error: {}".format(e), file=sys.stderr)
+            raise SystemExit(1) from None
+        print("CLEARED:", result)
+        return
     from .runtime import clear_state
     print("CLEARED:", asyncio.run(clear_state(root, base)))
 
@@ -983,6 +1051,21 @@ def _dispatch_resume(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> N
           file=sys.stderr)
     _render_outcome(asyncio.run(resume_gate(root, base, spec["baton_id"], decision,
                                             approver=spec.get("approver"))),
+                    as_json=spec.get("json", False))
+
+
+def _dispatch_resume_run(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
+    """`yaah resume-run` — recover a killed mid-run by re-driving its running
+    checkpoint (Level 2). THIS process runs the engine from the in-flight stage to
+    the next gate or completion. Both domain refusals are raised as ValueError
+    subclasses — ActionError for an unknown id (runtime.resume_run pre-checks it,
+    because the harness's own KeyError would MISS this boundary) and ValueError for
+    'not a running checkpoint' — so main()'s config-class boundary prints the
+    message and exits 2 instead of dumping a traceback."""
+    from .runtime import resume_run
+    print("[yaah resume-run] re-driving the checkpoint in this process from the "
+          "in-flight stage until the next gate or completion", file=sys.stderr)
+    _render_outcome(asyncio.run(resume_run(root, base, spec["baton_id"])),
                     as_json=spec.get("json", False))
 
 
@@ -1009,6 +1092,7 @@ _ROOT_DISPATCH: Dict[str, Callable[[Dict[str, Any], Dict[str, Any], str], None]]
     "list":         _dispatch_list,
     "clear":        _dispatch_clear,
     "resume":       _dispatch_resume,
+    "resume-run":   _dispatch_resume_run,
     "run":          _dispatch_run,
 }
 

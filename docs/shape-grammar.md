@@ -31,7 +31,8 @@ This file is the compressed essence, not the source of truth.
   // Durability + control plane
   "state":       {type: "memory" | "file", ...},        // backs resume + idempotency
   "trace":       {mode, capture: [...], sink: {...}},   // observability
-  "baton_ttl":   4320,                                   // minutes; default 72h
+  "baton_ttl":   259200,                                 // SECONDS; default 72h. Bounds both a
+                                                         //   parked gate and a running checkpoint
   "live_config": false,                                  // re-read mutable leaves per call
   "decisions":   {<gate-stage>: {auto: "approve"}},      // unattended-run answers
   "interactive": false,                                  // stdin prompts on suspend
@@ -152,10 +153,12 @@ yaah init <dir>                            # scaffold a hello-yaah starter
 yaah scaffold <archetype> <dir>            # scaffold a specific archetype
 yaah run <root>                            # the default; `yaah <root>` also works
 yaah validate <root>                       # validate_root + validate_pipeline; no run
-yaah list <root> [--json]                  # mailbox view: every suspended baton
+yaah list <root> [--json]                  # mailbox view: every suspended baton + running checkpoint
 yaah resume <root> <baton-id> [<file>]     # deliver a human decision; run to next park
+yaah resume-run <root> <baton-id>          # re-drive a killed run from its running checkpoint (Level 2)
 yaah baton-schema <root> <baton-id>        # surface the parked gate's decision form
-yaah clear <root>                          # drop all suspended batons (engine reset)
+yaah clear <root> [--baton ID ...]         # drop stored batons — parked gates AND running
+                                           #   checkpoints (engine reset); --baton targets ids
 yaah explain <root>                        # render the effective config + blast radius
 yaah trace <jsonl> [<price-map>]           # post-hoc aggregate over a JSONL trace
   --pretty          per-run tree of stages, model calls, tool calls, errors

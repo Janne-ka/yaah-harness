@@ -155,13 +155,74 @@ runs, exactly as `_batons` does today.
   survive a crash *mid-stage* — that run is lost and re-run from the top.
   Closes the human-gate / mailbox need with minimal cost.
 
-- **Level 2 — checkpoint durability (later).** Also persist the baton **and the
-  inter-stage input envelope** after each completed stage. On startup a recovery
-  pass scans `status="running"` batons and resumes each from its last checkpoint.
-  Survives a crash mid-run. Cost: one write per stage, and `Baton` must carry the
-  resume input (a `cursor_input: Envelope`). Pairs with §6: a stage that ran its
-  side effect then crashed before checkpoint re-runs on recovery, so **idempotency
-  is what makes Level 2 exactly-once** — design them together, ship L1 first.
+- **Level 2 — checkpoint durability (SHIPPED, status 2026-07).** After each
+  completed stage the harness ALSO persists the baton with its cursor advanced to
+  the next stage (`status="running"`), carrying the envelope that will feed it
+  (`Baton.cursor_input`). A run killed mid-flight is recoverable —
+  `Harness.resume_running(baton_id)` (runtime `resume_run`; CLI `yaah resume-run
+  <root> ID`) re-drives from the cursor stage. Cost: one best-effort write per
+  stage. Pairs with §6: a stage that ran its side effect then crashed before the
+  checkpoint re-runs on recovery, so **idempotency is what makes Level 2
+  exactly-once**.
+
+  **One artifact, not two.** The design's "persist the baton AND the inter-stage
+  input" is satisfied by the input riding ON the baton (`cursor_input`), persisted
+  through the SAME `BatonStore` under the SAME `baton:<id>` key. This is deliberate:
+  cursor + input in one write is atomic — a crash can never leave a cursor pointing
+  at a stage whose input was not persisted (two separate artifacts would have a
+  torn-write window and a second store to keep consistent on recovery). `to_dict`/
+  `from_dict` round-trip `cursor_input` exactly like `pending` (both Envelopes).
+
+  **Where it is written / deleted** (`harness.py`):
+  - `_checkpoint(baton, next_input)` sets `cursor_input` + `checkpointed_at` and
+    `save`s the baton. Called from `_drive` after each completed stage advances the
+    cursor to a non-None next stage (the linear pass AND after a fork completes).
+  - **Best-effort:** a checkpoint-write blip is NOTED on the trace
+    (`event: checkpoint_failed`) and swallowed — the Level 1 park remains the
+    authoritative durability point, so durability degrades, the run does not fail.
+    The FIRST such failure also prints one stderr warning ("crash recovery is OFF
+    for this run"); later ones are trace-only, since the cause is a broken store,
+    not a per-stage event.
+  - **Deleted on terminal** (`_settle` deletes the baton on Done/StageFailed) and
+    **cleared on park** — a `_Suspend` transitions the record running→suspended and
+    nulls `cursor_input`/`checkpointed_at`, so a parked gate is Level 1's own
+    artifact and never ALSO looks mid-run-resumable (`list_running` filters
+    `status=="running" and cursor_input is not None`).
+  - **TTL sweep** reclaims an abandoned running checkpoint on the same ttl as an
+    abandoned parked gate (`Baton.is_expired` covers both `parked_at` and
+    `checkpointed_at`). Note that ttl (root `baton_ttl`, **seconds**) therefore also
+    bounds how long ONE stage may be in flight before its recovery record is swept —
+    set it above your slowest stage's wall-clock.
+  - **NOT written before the first stage of a leg.** The checkpoint is written
+    *after* a stage completes, so there are two un-checkpointed windows:
+    - **The first stage of a run.** `Harness.run` mints the baton and drives
+      straight into `graph.start`; nothing is persisted until that stage completes.
+      A kill during the first stage leaves **nothing in the store** — there is no
+      baton to `resume-run`, and the run is re-launched from the top.
+    - **The first stage after a gate resume.** `Harness.resume` delivers the
+      decision and drives on; the next checkpoint lands only when that stage
+      completes. A kill in that window leaves the **suspended record still in the
+      store** (the park write is never deleted until a terminal outcome), so the
+      run is recoverable — but via `yaah resume <root> ID` with the decision
+      **given again**, not `resume-run`. The decision itself was not persisted.
+
+  **Fork scope (v1).** Only the MAIN chain is checkpointed. A fork's inner branch
+  stages run inside `ForkCoordinator` (via `_exec_stage`, not `_drive`), so they are
+  not individually checkpointed and cannot double-checkpoint; the checkpoint after a
+  fork stage completes records "fork done, cursor at the next main stage", so
+  recovery re-runs the WHOLE fork (all branches) — acceptable under the
+  at-least-once contract. Per-branch checkpointing is deferred.
+
+  **Known limitation — no wiring fingerprint (yet).** A graph EDITED between the
+  kill and the resume is UNDETECTED: `resume_running` re-drives `baton.stage` against
+  the CURRENT graph, so a renamed/removed stage would resume onto the wrong stage or
+  KeyError. The graph-hash guard is tracked in ROADMAP ("Baton CAS + graph
+  fingerprint"). Also NOT single-owner safe: with a SHARED durable store the engine
+  cannot distinguish a crashed run from one still live in another process (no CAS
+  lease — §10) — so recovery is an EXPLICIT operator action naming a specific baton,
+  never automatic, and `yaah run` does NOT gate on the presence of running
+  checkpoints (that would deadlock a fleet whose concurrent runs each hold a live
+  checkpoint on the shared store).
 
 ## 6. `IdempotencyStore` — execute-once for side effects
 
@@ -292,8 +353,9 @@ with whatever extender is available.
    single host. Either is a `class XStore(...)`; nothing above changes.
 5. **KV-backed `mem:` source/sink + `stateRef`** convention.
 6. **Mailbox view (`list_suspended`) + a thin UI node** (§8).
-7. *(later)* **Level 2 checkpointing** + recovery pass; **Phase B** concurrent
-   claims.
+7. **Level 2 checkpointing + recovery** (SHIPPED 2026-07 — `_checkpoint` /
+   `Harness.resume_running` / `yaah resume-run`, §5). *(later)* graph-fingerprint
+   guard + CAS single-owner (§10) and **Phase B** concurrent claims.
 
 Build 1–3 first: they close idempotency (#14) and put the resume cursor behind a
 store, with no backend decision required. A concrete durable extender (step 4)
@@ -301,9 +363,10 @@ arrives only when a deployment actually needs to survive a restart.
 
 ## 12. Open decisions
 
-- **L1 vs L2 now.** L1 (gate durability) is cheap and covers the stated need;
-  full crash-resume (L2) is a bigger commitment with a write per stage. Recommend
-  L1 first, L2 only on a measured need.
+- **L1 vs L2 now — RESOLVED (status 2026-07):** L1 (gate durability) shipped
+  first; L2 (full crash-resume, one best-effort write per stage) shipped when a
+  measured need arrived — a killed s_factory run lost all completed mid-run stages
+  (RED/code/GREEN unrecoverable). Both against the unchanged store contract.
 - **Which durable extender first — RESOLVED by need (status 2026-07):** `file`
   shipped first (cross-process gates), `postgres` followed (shared-database
   durability for multi-host + experiment campaigns) — both written against the

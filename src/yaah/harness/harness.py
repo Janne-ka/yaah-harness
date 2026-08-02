@@ -12,6 +12,7 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -157,6 +158,12 @@ class Harness:
         # Both are injectable for testing.
         self._clock = clock
         self._wall = wall_clock
+        # Level 2: has this harness already warned that checkpoint writes are
+        # failing? The failure is swallowed (best-effort durability), so without a
+        # visible warning an operator learns that recovery was silently off only
+        # when a kill leaves nothing to `resume-run`. Warn ONCE per harness — one
+        # line names a real problem, one line per stage is noise. See _checkpoint.
+        self._checkpoint_warned = False
         # Injected tracer: emits a `stage` span per stage so progress/timing is
         # observable. NullTracer (the default) = tracing off, a zero-cost no-op so
         # emit sites call it unconditionally. The carriage/captures are config.
@@ -234,8 +241,21 @@ class Harness:
         Composes the clear/flush primitives: (1) broadcast a `*` clear so every
         in-flight CLEARABLE node cancels its work and every waiting fork/gate
         releases (clear the nodes); (2) FLUSH the durable parked envelope set;
-        (3) drop suspended batons (abandon parked runs). The process stays alive and
-        ready for the next run. Returns counts of what was cleared.
+        (3) drop suspended batons (abandon parked runs) AND Level 2 running
+        checkpoints (abandon crashed mid-runs). The process stays alive and ready
+        for the next run. Returns counts of what was cleared:
+        `{parked_flushed, batons_dropped, checkpoints_dropped}` — `batons_dropped`
+        keeps its original meaning (SUSPENDED gate batons only); the Level 2
+        running checkpoints are counted separately under `checkpoints_dropped`.
+
+        Running checkpoints are included because otherwise a graceful reset leaves
+        them behind FOREVER: a crashed run's checkpoint has no owner to delete it,
+        and `clear` is the operator's "start from a clean store" verb. On a SHARED
+        durable store a running checkpoint may belong to a run still LIVE in another
+        process (no liveness lease — docs/durable-state.md §10); dropping it does
+        not kill that process, it only removes its recovery record. `clear` is
+        already the destructive all-or-nothing reset, so that is the documented
+        cost of using it; name individual ids with `clear --baton` to be surgical.
 
         (Only `clearable` stages cancel in-flight on the broadcast — by design; a
         committed side-effect node isn't cancellable, see the clearable boundary.)"""
@@ -244,7 +264,11 @@ class Harness:
         suspended = await self.batons.list_suspended()
         for b in suspended:
             await self.batons.delete(b.id)
-        return {"parked_flushed": parked, "batons_dropped": len(suspended)}
+        running = await self.batons.list_running()
+        for b in running:
+            await self.batons.delete(b.id)
+        return {"parked_flushed": parked, "batons_dropped": len(suspended),
+                "checkpoints_dropped": len(running)}
 
     async def run(self, task: Envelope, *, ttl: object = _UNSET) -> Outcome:
         """Start a run. `ttl` overrides this baton's suspend lifetime (seconds;
@@ -253,7 +277,11 @@ class Harness:
         baton = Baton(id=uuid.uuid4().hex, stage=self.graph.start)
         if ttl is not _UNSET:
             baton.ttl = ttl  # the lifetime is the baton's, set per run
-        # Level 1: not persisted while running — _settle saves it only if it parks.
+        # Level 1 persists only on park; Level 2 (docs/durable-state.md §5) ALSO
+        # writes a running checkpoint after each completed stage (see _checkpoint),
+        # so a crash mid-run is recoverable via resume_running. Both bounded: a
+        # terminal outcome deletes the baton; a park overwrites the running
+        # checkpoint with the suspended record.
         return await self._settle(baton, task)
 
     async def resume(self, baton_id: str, response: Envelope) -> Outcome:
@@ -304,8 +332,88 @@ class Harness:
                                   decision_keys=response.payload.keys(),
                                   approver=response.headers.get(_APPROVER_HEADER),
                                   decision_diff=self._decision_diff(pending, response))
+        # CLEAR THE GATE FIELDS now that the decision is delivered and recorded.
+        # `pending` was cleared above; `awaiting`/`parked_at` had to wait until the
+        # resumed span read them. Since Level 2 this baton is persisted AGAIN while
+        # running (the next `_checkpoint`), so leaving them set would publish a
+        # running checkpoint that still claims to be awaiting a human at a past
+        # park time — `yaah list` would show a contradiction and the debugging.md
+        # contract ("awaiting/parked_at are null while running") would be false.
+        baton.awaiting = None
+        baton.parked_at = None
         baton.stage = self._next_stage(stage, resume_input)
         return await self._settle(baton, resume_input)
+
+    async def resume_running(self, baton_id: str) -> Outcome:
+        """Recover a run KILLED mid-flight (Level 2 checkpoint durability,
+        docs/durable-state.md §5). Loads the running checkpoint for `baton_id` and
+        RE-DRIVES from its cursor: the stage that was in flight when the process
+        died RE-RUNS (ROADMAP 'per-stage input checkpoint' — re-run the current
+        stage, don't skip it), while the completed stages before it are not
+        repeated (their outputs are the checkpoint input). Distinct from resume():
+        that delivers a human decision to a SUSPENDED gate; this re-drives a
+        RUNNING crash with no new input.
+
+        Refuses anything that isn't a running checkpoint — a suspended gate
+        (use resume()), a finished/swept run (gone), or a baton never checkpointed.
+        NOT single-owner safe yet: there is no CAS lease, so the engine cannot tell
+        a crashed run from one still live in another process — the CALLER asserts
+        the run is dead (the deferred guard is docs/durable-state.md §10 /
+        ROADMAP 'Baton CAS'). Re-running the in-flight stage is at-least-once; a
+        committed side effect in that stage needs an idempotency guard (§6) to stay
+        exactly-once."""
+        await self.sweep_expired()  # a checkpoint past its ttl is already gone
+        baton = await self.batons.load(baton_id)
+        if baton is None:
+            raise KeyError(
+                "no baton {!r} to recover — run `yaah list` (a finished or "
+                "ttl-swept run leaves nothing to resume)".format(baton_id))
+        if baton.status != "running":
+            raise ValueError(
+                "baton {!r} status is {!r}, not 'running' — resume_running recovers a "
+                "crash mid-run; a suspended gate is resumed with a decision via "
+                "resume()".format(baton_id, baton.status))
+        if baton.cursor_input is None or baton.stage is None:
+            raise ValueError(
+                "baton {!r} has no checkpoint (no cursor_input/stage) — it was never "
+                "checkpointed, so there is no mid-run state to recover".format(baton_id))
+        return await self._settle(baton, baton.cursor_input)
+
+    async def _checkpoint(self, baton: Baton, next_input: Envelope) -> None:
+        """LEVEL 2 write (docs/durable-state.md §5): after a stage completes and the
+        cursor advances, persist the baton (status still 'running', `stage` = the
+        NEXT stage) carrying the envelope that will feed it (`cursor_input`) — one
+        atomic artifact, so a crash can never leave a cursor without its input. A
+        later resume_running re-drives from exactly here.
+
+        BEST-EFFORT: the parked-gate save (Level 1) is the authoritative durability
+        point, so a checkpoint-write blip must NOT fail the run — it is NOTED on the
+        trace and swallowed (the run keeps going; the next stage's checkpoint, or
+        the next park, re-establishes durability). Only `Exception` is caught —
+        cancellation propagates. Cheap on the default memory backend (a dict put
+        that dies with the process); crash-survivable on a durable StoreBackend.
+
+        The FIRST failure also prints one stderr warning. A trace note alone is
+        invisible in the moment: crash-recovery would be silently off for the rest
+        of the run, and the operator would discover it only when a kill left nothing
+        for `resume-run`. Once per harness — the cause is a broken store, not a
+        per-stage event, so repeating it every stage would just be noise (and the
+        trace already carries every occurrence)."""
+        baton.cursor_input = next_input
+        baton.checkpointed_at = self._wall()
+        try:
+            await self.batons.save(baton)
+        except Exception as e:
+            await self._spans.note(baton.stage or "?", next_input, status="error",
+                                   attrs={"event": "checkpoint_failed", "error": repr(e)})
+            if not self._checkpoint_warned:
+                self._checkpoint_warned = True
+                print("warning: checkpoint write failed at stage {!r} ({!r}) — "
+                      "crash recovery is OFF for this run (a kill will leave "
+                      "nothing to `yaah resume-run`); parked human gates are "
+                      "unaffected. Further failures are on the trace only "
+                      "(event: checkpoint_failed).".format(baton.stage or "?", e),
+                      file=sys.stderr, flush=True)
 
     def _enforce_decision_form(self, baton_id: str, pending: Optional[Envelope],
                                response: Envelope) -> None:
@@ -413,9 +521,10 @@ class Harness:
     async def _settle(self, baton: Baton, input: Envelope) -> Outcome:
         """Drive the run, then SAVE the baton if it parked (so resume() — possibly
         in another process — can find it) or DELETE it on any terminal outcome (a
-        returned Done or a raised exception, e.g. StageFailed). This is what bounds
-        the store: it only ever holds runs parked awaiting a resume. (delete is a
-        no-op when the baton was never saved — a run that finished without parking.)"""
+        returned Done or a raised exception, e.g. StageFailed). Together with the
+        Level 2 running checkpoints written by `_checkpoint` mid-drive, this is what
+        bounds the store: it holds parked runs plus the checkpoints of runs still in
+        flight. (delete is a no-op when the baton was never saved.)"""
         try:
             outcome = await self._drive(baton, input)
         except StageFailed:
@@ -423,12 +532,18 @@ class Harness:
             raise
         except BaseException:
             # NON-logical failure (a transport/store blip, cancellation, an engine
-            # bug): do NOT evict. A baton lives in the store ONLY because it
-            # previously PARKED (suspended, awaiting a human) — so deleting it on an
-            # infrastructural error would nuke a resumable run and lose the human's
-            # pending decision (the blanket-delete bug). Leave it in its
-            # last-persisted state for a later resume / the TTL sweep; a still-running
-            # baton was never saved, so nothing leaks either way.
+            # bug): do NOT evict. Two kinds of state can be in the store here — a
+            # gate that previously PARKED (deleting it would nuke a resumable run
+            # and lose the human's pending decision — the blanket-delete bug) and,
+            # since Level 2, this run's own RUNNING CHECKPOINT.
+            #
+            # DO NOT "tidy up" by deleting the running checkpoint on this arm:
+            # preserving the last-persisted state IS the crash-recovery mechanism.
+            # That checkpoint is precisely what `resume_running` re-drives from, and
+            # this arm is the path a killed/blipped run takes out of the engine. A
+            # delete here would make every non-logical failure unrecoverable. What
+            # bounds the leak is the TTL sweep (Baton.is_expired covers running
+            # checkpoints), not an eager delete.
             raise
         if isinstance(outcome, Suspended):
             await self.batons.save(baton)  # parked — persist for resume()
@@ -578,6 +693,8 @@ class Harness:
                 self._fold_sticky(input, cleared)
                 input = cleared
                 baton.stage = self._next_stage(stage, cleared)
+                if baton.stage is not None:  # Level 2: checkpoint the MAIN chain
+                    await self._checkpoint(baton, input)  # (a fork's inner branches aren't)
                 continue
             # concerns_into: the inverse of concerns_from — a late stage (report
             # renderer) declares it to SEE the run's accumulated soft concerns,
@@ -594,6 +711,12 @@ class Harness:
             if isinstance(result, _Suspend):
                 baton.status = "suspended"
                 baton.parked_at = self._wall()  # wall-clock: TTL must survive a restart (H1)
+                # A parked gate is Level 1's own durable artifact — it must NOT also
+                # look like a resumable running checkpoint (resume_running would
+                # re-drive a run that is actually awaiting a human). Clear the L2
+                # cursor as the record transitions running -> suspended.
+                baton.cursor_input = None
+                baton.checkpointed_at = None
                 # Pin THIS RUN's correlation id onto the parked artifact before it
                 # is persisted. The artifact's own chain can have diverged from the
                 # run corr (a feedback-retry envelope copies headers WITHOUT a
@@ -627,6 +750,8 @@ class Harness:
             if stage.clears:  # this node clears the named gate(s) on completion
                 await self._clear_bus.publish_clears(stage.clears, input.correlation_id, input.payload)
             baton.stage = self._next_stage(stage, result.output)
+            if baton.stage is not None:  # Level 2: persist the resume cursor + its
+                await self._checkpoint(baton, input)  # input after each completed stage
         baton.status = "done"
         if baton.concerns:  # soft gate -> noted on the final output (e.g. the report)
             input.payload["concerns"] = list(baton.concerns)

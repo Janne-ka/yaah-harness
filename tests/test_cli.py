@@ -322,7 +322,19 @@ def main() -> None:
             assert e.code == 2, (bad, e.code)
         else:
             raise AssertionError("expected SystemExit for {!r}".format(bad))
-    _expect(_parse_subcommand(["clear", R]), action="clear", root=R)
+    _expect(_parse_subcommand(["clear", R]), action="clear", root=R, batons=[])
+    # targeted clear: --baton is repeatable, on both the verb and legacy forms
+    _expect(_parse_subcommand(["clear", R, "--baton", "b1", "--baton", "b2"]),
+            action="clear", root=R, batons=["b1", "b2"])
+    _expect(_parse_cli([R, "--clear", "--baton", "b1"]),
+            action="clear", root=R, batons=["b1"])
+    # --baton with no id is a usage error (exit 2)
+    try:
+        _parse_subcommand(["clear", R, "--baton"])
+    except SystemExit as e:
+        assert e.code == 2, e.code
+    else:
+        raise AssertionError("expected SystemExit for dangling --baton")
     _expect(_parse_subcommand(["explain", R]), action="explain", root=R)
     _expect(_parse_subcommand(["resume", R, "b1"]), action="resume", root=R,
             baton_id="b1", decision_file=None)

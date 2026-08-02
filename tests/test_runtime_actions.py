@@ -99,8 +99,140 @@ def scenario_inline_pipeline_dict_runs() -> None:
         assert "live_config" in str(e) and "inline" in str(e), e
 
 
+def scenario_clear_batons_targeted() -> None:
+    """`clear_batons` drops EXACTLY the named batons and leaves the rest; it refuses
+    an unknown id or an unexpected status (ActionError, exit 1 at the CLI) and
+    deletes NOTHING on refusal. The surgical orphan cleanup a driver runs when a
+    killed run left duplicate gate batons — the counterpart to the global
+    `clear_state` reset. F2: a Level 2 RUNNING checkpoint is also accepted, because
+    this is the operator's only single-record delete path."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = _root(tmp)
+        store = BatonStore(FileBackend(os.path.join(tmp, "state")))
+        for i in range(3):
+            asyncio.run(store.save(Baton(
+                id="b-{}".format(i), stage="gate", awaiting="spec:approve",
+                status="suspended", parked_at=float(i))))
+
+        # unknown id → refuse, delete nothing (all-or-nothing validation)
+        try:
+            _call(r.clear_batons(root, tmp, ["b-0", "nope"]))
+            raise AssertionError("expected ActionError for unknown id")
+        except r.ActionError as e:
+            assert "nope" in str(e), e
+        gates, _ = _call(r.list_gates(root, tmp))
+        assert {b.id for b in gates} == {"b-0", "b-1", "b-2"}, gates
+
+        # an UNEXPECTED status (not suspended, not running) → refuse
+        asyncio.run(store.save(Baton(id="b-done", stage="gate", status="done")))
+        try:
+            _call(r.clear_batons(root, tmp, ["b-done"]))
+            raise AssertionError("expected ActionError for a 'done' baton")
+        except r.ActionError as e:
+            assert "not 'suspended' or 'running'" in str(e), e
+        asyncio.run(store.delete("b-done"))
+
+        # F2: a RUNNING checkpoint IS clearable — otherwise an abandoned one is
+        # undeletable except by the all-or-nothing reset.
+        asyncio.run(store.save(Baton(
+            id="b-crashed", stage="two", status="running",
+            cursor_input=Envelope(Kind.RESULT, {"raw": "one-out"}),
+            checkpointed_at=1000.0)))
+        result, _ = _call(r.clear_batons(root, tmp, ["b-crashed"]))
+        assert result["batons_dropped"] == 1 and result["ids"] == ["b-crashed"], result
+        running, _ = _call(r.list_checkpoints(root, tmp))
+        assert running == [], running
+        gates, _ = _call(r.list_gates(root, tmp))
+        assert {b.id for b in gates} == {"b-0", "b-1", "b-2"}, gates
+
+        # targeted delete: only the named batons go, the rest stay parked; the
+        # action returns data (no stdout — rendering is the CLI's job)
+        result, printed = _call(r.clear_batons(root, tmp, ["b-0", "b-2"]))
+        assert result["batons_dropped"] == 2, result
+        assert set(result["ids"]) == {"b-0", "b-2"}, result
+        assert printed == "", printed
+        gates, _ = _call(r.list_gates(root, tmp))
+        assert {b.id for b in gates} == {"b-1"}, gates
+
+
+CKPT_PIPELINE = {
+    "nodes": {
+        "role:one": {"type": "agent", "template": "one", "model": "fake:x", "parse": False},
+        "role:two": {"type": "agent", "template": "two", "model": "fake:x", "parse": False},
+    },
+    "graph": {"start": "one", "stages": {
+        "one": {"node": "role:one", "then": "two"},
+        "two": {"node": "role:two"},
+    }},
+}
+
+
+def scenario_resume_run_recovers_crash() -> None:
+    """`resume_run` recovers a run KILLED mid-flight from its running checkpoint
+    (Level 2), cross-process: a checkpoint written by a crashed process is picked up
+    by a FRESH assemble over the same durable store and re-driven to completion.
+    `list_checkpoints` surfaces it before recovery (the `yaah list` running section)
+    and it is gone after. A suspended gate is NOT a running checkpoint — resume_run
+    refuses it."""
+    import time
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "pipeline.json"), "w") as f:
+            json.dump(CKPT_PIPELINE, f)
+        root = dict(_root(tmp), pipeline="pipeline.json", input={})
+        root["providers"] = {"fake": {"type": "fake", "default": "done"}}
+
+        # A crashed process left a running checkpoint cursored at the in-flight
+        # stage "two" (stage "one" already completed — its output is the cursor).
+        store = BatonStore(FileBackend(os.path.join(tmp, "state")))
+        asyncio.run(store.save(Baton(
+            id="crashed", stage="two", status="running",
+            cursor_input=Envelope(Kind.RESULT, {"raw": "one-out"}),
+            checkpointed_at=time.time())))
+
+        # list_checkpoints surfaces it (the recovery view) — distinct from the
+        # suspended-gate mailbox, which is empty here.
+        running, printed = _call(r.list_checkpoints(root, tmp))
+        assert [b.id for b in running] == ["crashed"], running
+        assert running[0].stage == "two", running[0]
+        gates, _ = _call(r.list_gates(root, tmp))
+        assert gates == [], gates
+        assert printed == "", printed
+
+        # resume_run re-drives from "two" to completion; the checkpoint is deleted.
+        done, printed = _call(r.resume_run(root, tmp, "crashed"))
+        assert isinstance(done, Done), done
+        assert "RESULT" not in printed and "GATE" not in printed, printed
+        running, _ = _call(r.list_checkpoints(root, tmp))
+        assert running == [], running
+
+        # A suspended gate is not a running checkpoint — resume_run refuses it.
+        asyncio.run(store.save(Baton(id="parked", stage="gate", status="suspended",
+                                     parked_at=time.time())))
+        try:
+            _call(r.resume_run(root, tmp, "parked"))
+            raise AssertionError("resume_run must refuse a suspended baton")
+        except ValueError as e:
+            assert "not 'running'" in str(e), e
+
+        # F3: an UNKNOWN id is a domain refusal (ActionError), NOT a bare KeyError
+        # — KeyError is in no surface's error boundary, so it printed a traceback.
+        try:
+            _call(r.resume_run(root, tmp, "typo-id"))
+            raise AssertionError("resume_run must refuse an unknown id")
+        except r.ActionError as e:
+            assert "typo-id" in str(e) and "yaah list" in str(e), e
+        # ...and the same hole existed on the plain gate resume.
+        try:
+            _call(r.resume_gate(root, tmp, "typo-id", {"decision": "approve"}))
+            raise AssertionError("resume_gate must refuse an unknown id")
+        except r.ActionError as e:
+            assert "typo-id" in str(e) and "yaah list" in str(e), e
+
+
 def main() -> None:
     scenario_inline_pipeline_dict_runs()
+    scenario_clear_batons_targeted()
+    scenario_resume_run_recovers_crash()
     with tempfile.TemporaryDirectory() as tmp:
         with open(os.path.join(tmp, "pipeline.json"), "w") as f:
             json.dump(PIPELINE, f)
@@ -118,6 +250,10 @@ def main() -> None:
         assert [b.id for b in gates] == [out.baton_id], gates
         assert gates[0].awaiting == "spec:approve", gates[0]
         assert printed == "", printed
+        # a genuinely-parked run carries a wall-clock parked_at, and it reaches the
+        # list JSON contract as a non-null float (the disambiguation key, M26).
+        parked_at = r._baton_json(gates[0])["parked_at"]
+        assert isinstance(parked_at, float) and parked_at > 0, parked_at
 
         # baton_schema returns the decision-form contract.
         schema, printed = _call(r.baton_schema(root, tmp, out.baton_id))

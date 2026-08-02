@@ -245,7 +245,10 @@ _ROOT_GLOSS = {
     "input": "fixture path or inline object — the run's first payload",
     "decisions": "decision-fixture path for scripted human gates",
     "serve": "serve node role(s) as a remote worker instead of driving a run",
-    "baton_ttl": "seconds a parked human-gate baton stays claimable",
+    "baton_ttl": ("seconds a baton stays claimable — a parked human gate before it "
+                  "is abandoned, AND a Level 2 running checkpoint before its "
+                  "recovery record is swept (so it also bounds how long one stage "
+                  "may be in flight); default 259200 (72h)"),
     "plugins": "module paths imported before validation (register_type extensions)",
 }
 

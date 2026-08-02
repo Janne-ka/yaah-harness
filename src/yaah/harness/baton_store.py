@@ -9,9 +9,16 @@ Why: keep the harness ignorant of WHERE state lives. It calls save/load/delete/
 sweep/list; this serializes the Baton to bytes and back. Needs the +SCAN tier
 (sweep_expired, list_suspended iterate the namespace).
 
-Level 1 (now): the harness saves a baton only when it SUSPENDS and deletes it on
-any terminal outcome — so the store holds exactly the parked runs, the same bound
-the dict had. (Level 2 per-stage checkpointing is later; see docs/durable-state.md.)
+What the store holds (docs/durable-state.md §5):
+  Level 1 — the harness saves a baton when it SUSPENDS at a human gate and deletes
+  it on any terminal outcome. These are the `suspended` records (list_suspended).
+  Level 2 — the harness ALSO writes a `running` checkpoint after each completed
+  stage (Harness._checkpoint), carrying the cursor + the envelope that feeds the
+  next stage, so a run killed mid-flight is re-drivable (list_running). A park
+  overwrites the running checkpoint with the suspended record; a terminal outcome
+  deletes it.
+So the store holds the parked runs PLUS the in-flight/crashed ones. Both are
+bounded by the same TTL sweep (Baton.is_expired covers each kind's own clock).
 
 Targets Python 3.9+.
 """
@@ -39,7 +46,14 @@ class BatonStore(StoreBackedFacade[ScannableBackend]):  # +SCAN: sweep/list need
         await self._store.delete(self.PREFIX + baton_id)
 
     async def sweep_expired(self, now: float) -> List[str]:
-        """Delete every parked baton past its own ttl as of `now`; return their ids.
+        """Delete every baton past its own ttl as of `now`; return their ids.
+
+        Covers BOTH stored kinds (Baton.is_expired decides): a `suspended` gate
+        nobody answered, measured from `parked_at`, and a Level 2 `running`
+        checkpoint nobody recovered, measured from `checkpointed_at`. So a killed
+        mid-run leaves nothing behind forever — but note the second clock also
+        bounds a LIVE stage: a stage in flight longer than the ttl has its recovery
+        record swept (see Baton.is_expired's dual-meaning note).
 
         Assessment cluster 2 LOW: deleting WHILE iterating the scan is a
         narrow race (the underlying store may invalidate iterator state). We
@@ -65,5 +79,21 @@ class BatonStore(StoreBackedFacade[ScannableBackend]):  # +SCAN: sweep/list need
         async for _key, raw in self._store.scan(self.PREFIX):
             baton = Baton.from_dict(json.loads(raw.decode()))
             if baton.status == "suspended":
+                out.append(baton)
+        return out
+
+    async def list_running(self) -> List[Baton]:
+        """Every RUNNING checkpoint (Level 2) — a baton persisted mid-run with a
+        `cursor_input`. On a shared durable store these are either LIVE runs (a
+        process still driving them) or CRASHED ones a `resume_running` can recover;
+        the store can't tell them apart without a liveness lease (CAS single-owner
+        is deferred — docs/durable-state.md §10). The recovery/inspection surface
+        (`yaah list`, factory resume-run) shows them distinctly from suspended gates
+        so an operator can pick a dead run to re-drive. Empty on the default memory
+        backend after the process that ran them exits (the dict died with it)."""
+        out: List[Baton] = []
+        async for _key, raw in self._store.scan(self.PREFIX):
+            baton = Baton.from_dict(json.loads(raw.decode()))
+            if baton.status == "running" and baton.cursor_input is not None:
                 out.append(baton)
         return out

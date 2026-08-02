@@ -132,7 +132,9 @@ def build_root_schema() -> Dict[str, Any]:
     # plugins: extension modules imported before validation (yaah.plugins)
     props["plugins"] = {"type": "array", "items": {"type": "string", "minLength": 1}}
 
-    # baton_ttl: minutes (positive number)
+    # baton_ttl: SECONDS (positive number) — passed straight to Baton.ttl, whose
+    # default is 72*60*60.0 seconds. Bounds both a parked gate's abandon window and
+    # a Level 2 running checkpoint's recovery window (docs/root-config-reference.md).
     props["baton_ttl"] = {"type": "number", "minimum": 0}
 
     # decisions: map of <gate-stage-name> → {auto: "approve"|"revise"|...}

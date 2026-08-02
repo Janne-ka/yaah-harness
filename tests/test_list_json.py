@@ -1,6 +1,6 @@
 """The `yaah list --json` mailbox shape.
 
-What it proves: the stable JSON shape `{id, stage, awaiting, concerns,
+What it proves: the stable JSON shape `{id, stage, awaiting, parked_at, concerns,
 escalation, question}`
 the CLI emits for each suspended baton — the contract a driver skill consumes
 instead of parsing the prose `GATE …` lines. Covers: question lifted from
@@ -19,14 +19,16 @@ from yaah.runtime import _baton_json
 
 
 def main() -> None:
-    # gate that asked an explicit question
+    # gate that asked an explicit question (parked_at carried through)
     b1 = Baton(id="b-1", stage="review", awaiting="human:approve_or_revise",
-               status="suspended",
+               status="suspended", parked_at=1769990400.0,
                concerns=[{"by": "schema", "msg": "missing key"}],
                pending=Envelope(Kind.AWAIT, {"question": "ship it?"}))
     j1 = _baton_json(b1)
     assert j1 == {"id": "b-1", "stage": "review",
                   "awaiting": "human:approve_or_revise",
+                  "parked_at": 1769990400.0,
+                  "checkpointed_at": None,
                   "concerns": [{"by": "schema", "msg": "missing key"}],
                   "escalation": None,
                   "question": "ship it?"}, j1
@@ -45,12 +47,24 @@ def main() -> None:
     j3 = _baton_json(b3)
     assert j3["question"] is None and "question" in j3, j3
 
-    # gate with no pending envelope at all — question is null
+    # gate with no pending envelope at all — question is null; a baton that never
+    # parked has parked_at null (not missing), so a disambiguating driver can tell
+    # "unknown park time" from an old timestamp
     b4 = Baton(id="b-4", stage=None, awaiting=None, status="suspended",
                concerns=[], pending=None)
     j4 = _baton_json(b4)
     assert j4 == {"id": "b-4", "stage": None, "awaiting": None,
+                  "parked_at": None, "checkpointed_at": None,
                   "concerns": [], "escalation": None, "question": None}, j4
+    assert "parked_at" in j4, j4
+
+    # A running checkpoint (Level 2): no parked_at, a checkpointed_at wall-clock —
+    # the recovery view's disambiguation key.
+    b6 = Baton(id="b-6", stage="code", status="running",
+               cursor_input=Envelope(Kind.RESULT, {"steps": ["red"]}),
+               checkpointed_at=1769990500.0)
+    j6 = _baton_json(b6)
+    assert j6["parked_at"] is None and j6["checkpointed_at"] == 1769990500.0, j6
 
     # gate that escalated after exhausting attempts — the failed verdict folded
     # onto the parked payload (Y3) surfaces under `escalation`
@@ -65,9 +79,12 @@ def main() -> None:
 
     # the contract is the keyset itself — a skill iterating fields must not be
     # surprised by drift
-    assert set(j1.keys()) == {"id", "stage", "awaiting", "concerns", "escalation", "question"}
+    assert set(j1.keys()) == {"id", "stage", "awaiting", "parked_at",
+                              "checkpointed_at", "concerns", "escalation",
+                              "question"}
 
-    print("PASS yaah list --json shape: {id, stage, awaiting, concerns, escalation, question}")
+    print("PASS yaah list --json shape: {id, stage, awaiting, parked_at, "
+          "checkpointed_at, concerns, escalation, question}")
 
 
 if __name__ == "__main__":

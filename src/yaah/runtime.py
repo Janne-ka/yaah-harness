@@ -254,15 +254,24 @@ async def run_root(root: Dict[str, Any], base: str) -> "Optional[Outcome]":
 
 def _baton_json(b: "Baton") -> Dict[str, Any]:
     """The mailbox-view JSON shape for one suspended baton. Stable contract for
-    driver skills consuming `yaah list --json`: `{id, stage, awaiting, concerns,
-    escalation, question}` (question is null when the gate has no `question`/`ask`
-    key; escalation is null unless the stage parked by exhausting its attempts —
-    then it carries the failed verdict that broke the stage, Y3).
+    driver skills consuming `yaah list --json`: `{id, stage, awaiting, parked_at,
+    concerns, escalation, question}` (question is null when the gate has no
+    `question`/`ask` key; escalation is null unless the stage parked by exhausting
+    its attempts — then it carries the failed verdict that broke the stage, Y3;
+    `parked_at` is the wall-clock epoch (float seconds) the run suspended, or null
+    while the baton has never parked — a driver disambiguating N stale batons for
+    the same gate picks the greatest `parked_at`).
 
     NB there is deliberately NO top-level `payload` field: the discoverable data a
     driver wants is already flattened to `question` + `concerns` here. (M18 asked
     for a `payload` mirror; declined — a script consuming this shape reads
-    `question`/`concerns` directly. Documented in docs/cookbook/debugging.md.)"""
+    `question`/`concerns` directly. Documented in docs/cookbook/debugging.md.)
+
+    `checkpointed_at` is the Level 2 twin of `parked_at`: null for a suspended gate,
+    the wall-clock of the last checkpoint for a RUNNING baton (the `running` array
+    of `yaah list --json`). A recovery tool picks the GREATEST to disambiguate N
+    abandoned running checkpoints for one task, exactly as `parked_at` does for
+    killed-run gate orphans."""
     q = None
     escalation = None
     if b.pending is not None:
@@ -271,6 +280,8 @@ def _baton_json(b: "Baton") -> Dict[str, Any]:
         # is in the parked payload so `yaah list` shows WHY the stage broke.
         escalation = b.pending.payload.get("escalation")
     return {"id": b.id, "stage": b.stage, "awaiting": b.awaiting,
+            "parked_at": b.parked_at,
+            "checkpointed_at": b.checkpointed_at,
             "concerns": [dict(c) for c in b.concerns],
             "escalation": escalation,
             "question": q}
@@ -284,6 +295,46 @@ async def list_gates(root: Dict[str, Any], base: str) -> "List[Baton]":
     load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
     async with opened_store(root.get("state"), base) as store:  # release the built backend
         return await BatonStore(store).list_suspended()
+
+
+async def list_checkpoints(root: Dict[str, Any], base: str) -> "List[Baton]":
+    """Every RUNNING checkpoint (Level 2) over the configured store — the recovery
+    view that pairs with the suspended-gate mailbox (`list_gates`). Needs a durable
+    `state:` to see runs a DIFFERENT (crashed) process left behind; empty on the
+    default memory store. On a SHARED durable store these include runs still LIVE in
+    another process — the engine can't distinguish crashed from live without a
+    liveness lease (docs/durable-state.md §10), so the `yaah list` surface labels
+    them 'running (resumable if its process is dead)' rather than asserting death.
+    Used by the `list` CLI verb (a running section under the gates)."""
+    load_plugins(root.get("plugins"), base)
+    async with opened_store(root.get("state"), base) as store:
+        return await BatonStore(store).list_running()
+
+
+async def resume_run(root: Dict[str, Any], base: str, baton_id: str) -> "Outcome":
+    """Recover a KILLED mid-run (Level 2). Loads the running checkpoint and
+    re-drives from its cursor stage — the in-flight stage re-runs, completed stages
+    do not — to the next gate or completion, possibly in a DIFFERENT process than
+    the one that crashed (the durable store is the rendezvous). `resume-run`
+    entrypoint. Distinct from `resume_gate`: that answers a human gate; this has no
+    decision, it just continues a crashed run. A ungated StageFailed reached during
+    the re-drive arms the auto-saga exactly as `run_root`/`resume_gate` do (ADR-0009
+    D6). Raises if the baton isn't a running checkpoint (Harness.resume_running).
+
+    UNKNOWN ID: `Harness.resume_running` signals "no such baton" with a KeyError,
+    which is NOT in any surface's error boundary (the CLI nets ValueError/OSError/
+    ImportError) — an operator typo printed a raw traceback. So this action asks the
+    question ITSELF first (`_require_baton`) and raises ActionError, which every
+    surface already reports. Done as a PRE-CHECK rather than by netting KeyError
+    around the drive: a KeyError raised by a node mid-run must stay a run failure,
+    not be reclassified as "no such baton". The wrong-STATUS refusals are already
+    ValueError and pass through unchanged."""
+    load_plugins(root.get("plugins"), base)
+    async with opened_store(root.get("state"), base) as store:
+        harness = await _assemble_harness(root, base, store=store)
+        await _require_baton(harness, baton_id, "recover")
+        return await saga.settle_terminal(
+            root, base, harness, harness.resume_running(baton_id))
 
 
 async def resume_gate(root: Dict[str, Any], base: str, baton_id: str,
@@ -304,6 +355,10 @@ async def resume_gate(root: Dict[str, Any], base: str, baton_id: str,
     async with opened_store(root.get("state"), base) as store:  # release the built backend
         harness = await _assemble_harness(root, base, store=store)
         headers = {"approver": approver} if approver else {}
+        # Same unknown-id hole as resume_run: Harness.resume raises KeyError for a
+        # baton id that isn't there, and no surface's boundary nets KeyError — an
+        # operator typo printed a traceback. Ask first, raise ActionError.
+        await _require_baton(harness, baton_id, "resume")
         # ADR-0009 D6: a resume can drive the run to a genuine ungated StageFailed
         # (a later stage, no human in the loop) — arm the saga there too, possibly
         # in a DIFFERENT process than the one that suspended it (the trace file has
@@ -320,6 +375,26 @@ class ActionError(ValueError):
     ValueError would reclassify e.g. a corrupted store's JSONDecodeError (a
     ValueError subclass) from the CLI's config exit 2 into the domain exit 1.
     Subclasses ValueError so callers that only know ValueError still work."""
+
+
+async def _require_baton(harness, baton_id: str, verb: str) -> None:
+    """Raise ActionError unless `baton_id` names a baton the store still holds.
+
+    Used by: resume_gate / resume_run — the two actions that hand an operator-typed
+    id to the harness. Harness.resume/resume_running report an unknown id with a
+    KeyError, and KeyError is in NO surface's error boundary (the CLI nets
+    ValueError/OSError/ImportError), so the typo surfaced as a raw traceback. This
+    asks the question at the ACTION boundary instead of netting KeyError around the
+    drive, so a KeyError raised by a node mid-run still fails the run honestly.
+
+    Sweeps first, exactly as the harness does, so a TTL-expired baton reports as
+    gone rather than being 'found' a moment before the harness deletes it."""
+    await harness.sweep_expired()
+    if await harness.batons.load(baton_id) is None:
+        raise ActionError(
+            "no baton with id {!r} to {} — run `yaah list <root>` to see what is "
+            "parked or running (a finished or ttl-swept run leaves nothing "
+            "behind)".format(baton_id, verb))
 
 
 async def baton_schema(root: Dict[str, Any], base: str, baton_id: str) -> Dict[str, Any]:
@@ -352,13 +427,56 @@ async def baton_schema(root: Dict[str, Any], base: str, baton_id: str) -> Dict[s
 async def clear_state(root: Dict[str, Any], base: str) -> Any:
     """CLEAR the harness instead of killing the process: broadcast a `*` clear (every
     in-flight clearable node cancels, every waiting gate releases), flush the parked
-    set, and drop suspended batons — a graceful reset over the SAME store/transport
-    the runs use. Returns the clear result (what was released/dropped).
+    set, and drop BOTH persisted baton kinds — suspended gates and Level 2 running
+    checkpoints — a graceful reset over the SAME store/transport the runs use.
+    Returns the clear result (what was released/dropped: `parked_flushed`,
+    `batons_dropped` = suspended gates, `checkpoints_dropped` = running).
     `--clear` entrypoint."""
     load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
     async with opened_store(root.get("state"), base) as store:  # release the built backend
         harness = await _assemble_harness(root, base, store=store)
         return await harness.clear()
+
+
+async def clear_batons(root: Dict[str, Any], base: str,
+                       baton_ids: "List[str]") -> Dict[str, Any]:
+    """TARGETED clear — delete exactly the named batons, leaving every other run's
+    state untouched. This is the surgical counterpart to `clear_state`'s
+    all-or-nothing `*` broadcast: when several runs are parked (or several stale
+    Level 2 checkpoints have piled up) and only some are orphans, the operator
+    names the ones to drop.
+
+    Accepts BOTH persisted kinds — `suspended` gate batons and `running` Level 2
+    checkpoints. This is the operator's ONLY delete path for a single record, so
+    refusing running ones would leave an abandoned checkpoint undeletable except by
+    the all-or-nothing reset. Deleting a running checkpoint does not kill any live
+    process (there is no liveness lease — docs/durable-state.md §10); it removes
+    that run's recovery record, so a run still live elsewhere becomes
+    unrecoverable if it later crashes. Any OTHER status is refused as unknown.
+
+    All-or-nothing on VALIDATION: every id is loaded and checked first; if any id
+    is unknown or carries an unexpected status, raise ActionError (the CLI maps
+    this to exit 1) and delete NOTHING — so a typo can't half-clear the set.
+    Neither kind holds in-flight work THIS process owns, so a direct store delete
+    is safe and needs no harness broadcast/flush. Returns {batons_dropped, ids}."""
+    load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
+    async with opened_store(root.get("state"), base) as store:  # release the built backend
+        batons = BatonStore(store)
+        loaded = []
+        for bid in baton_ids:
+            b = await batons.load(bid)
+            if b is None:
+                raise ActionError("no baton with id {!r} — run `yaah list` to see "
+                                  "what's parked".format(bid))
+            if b.status not in ("suspended", "running"):
+                raise ActionError(
+                    "baton {!r} status is {!r}, not 'suspended' or 'running' — only "
+                    "parked gates and Level 2 running checkpoints can be "
+                    "cleared".format(bid, b.status))
+            loaded.append(b)
+        for b in loaded:
+            await batons.delete(b.id)
+        return {"batons_dropped": len(loaded), "ids": [b.id for b in loaded]}
 
 
 # R15: root-config validation (unknown-key, shape, enum did-you-mean, cross-field)

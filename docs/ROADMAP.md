@@ -21,10 +21,14 @@ shell-timeout); a render `unfilled`-placeholder marker; a wrapped fan-in reduce
 (a broken reduce is an observable error span, not a silent hang); and NATS
 connection-state callbacks. Forward work from the same analysis:
 
-- **Per-stage input checkpoint** — checkpoint the failing stage's input onto the
-  baton so an *interrupted* run RE-RUNS its current stage on resume (the current
-  preserve leaves it resumable but not re-drivable). Pairs with a durable
-  per-stage cursor (crash-between-stages).
+- **Per-stage input checkpoint** — SHIPPED (2026-07, Level 2 checkpoint durability,
+  docs/durable-state.md §5). After each completed stage the harness persists the
+  baton with its cursor advanced + the next stage's input (`Baton.cursor_input`);
+  `Harness.resume_running` / `yaah resume-run` re-drives a killed run from the
+  in-flight stage. One best-effort write per stage; deleted on terminal, cleared on
+  park; TTL sweep covers running checkpoints. Remaining: the graph-fingerprint guard
+  (below) so a graph edited between kill and resume can't resume onto a stale stage,
+  and CAS single-owner so a shared-store resume is race-safe.
 - **RecordingBackend + input snapshot → offline replay** — capture
   `(rendered_prompt, model, opts, completion)` per call + the stage input at
   failure, so any failed stage becomes a `ScriptedProvider` fixture. Blocked on a

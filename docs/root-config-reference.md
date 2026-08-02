@@ -55,7 +55,7 @@ type-specific fields the new type doesn't accept.
 | `input` | path or inline object | the task payload; absent → empty payload. |
 | `serve` | `"all"` / list / `{placement}` | which roles THIS host runs (distributed). |
 | `run` | bool | run the pipeline now, or stay a serve-only worker (default: run iff `input` present). |
-| `baton_ttl` | minutes | how long a parked gate survives before the sweep (default 4320 = 72h, so a Friday gate is resumable Monday). |
+| `baton_ttl` | **seconds** | how long a baton survives before the sweep (default `259200` = 72h, so a Friday gate is resumable Monday). Two meanings, one knob: for a **suspended gate** it is the abandon window (time since `parked_at`); for a **Level 2 running checkpoint** it also bounds how long a single stage may be in flight before its recovery record is swept (time since the last `checkpointed_at`). Set it above your slowest stage's wall-clock, or a long-running stage's crash becomes unrecoverable. (Earlier revisions of this table said "minutes" — wrong: the value is passed straight to `Baton.ttl`, which is seconds.) |
 | `strict_resume` | bool | enforce a parked gate's declared `form` at `resume` (default **true**). A decision that violates the form is rejected (`decision_rejected`, exit 1) instead of silently taking the branch default; the gate stays parked and re-submittable. `false` restores the old blind merge — set it only for a gate whose form is genuinely mis-declared. No effect on a gate with no `form`. See ADR-0002. |
 | `live_config` | bool | re-read mutable node leaves from the pipeline file per call (no restart). |
 | `decisions` / `interactive` | map / bool | gate-driver answers (auto-drive) / stdin prompting. |

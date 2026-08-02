@@ -23,7 +23,7 @@ from __future__ import annotations
 # The verbs the user can pick first. Mirrors _SUBCOMMANDS in cli.py — keep in
 # sync (a divergence shows up as a verb the user can run but not tab-complete,
 # or vice versa). Tested in test_completion.py.
-_VERBS = ("init", "scaffold", "run", "list", "resume", "clear",
+_VERBS = ("init", "scaffold", "run", "list", "resume", "resume-run", "clear",
           "validate", "explain", "trace", "baton-schema", "doctor",
           "manual", "mcp-serve", "ab", "rollback",
           "completion")
@@ -116,6 +116,7 @@ _yaah() {{
     'run:run the configured pipeline'
     'list:show parked gates (the mailbox view)'
     'resume:deliver a decision to a parked gate'
+    'resume-run:recover a killed mid-run from its checkpoint'
     'clear:graceful reset of the harness'
     'validate:validate root + pipeline; no run'
     'explain:print the effective config'

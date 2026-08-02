@@ -234,7 +234,10 @@ def scenario_cli_parser() -> None:
     # additive — default False keeps the prose path byte-identical).
     assert _parse_cli(["root.json"]) == {"action": "run", "root": "root.json", "fake": False, "debug": False, "json": False}
     assert _parse_cli(["root.json", "--list"]) == {"action": "list", "root": "root.json", "fake": False, "debug": False, "json": False}
-    assert _parse_cli(["root.json", "--clear"]) == {"action": "clear", "root": "root.json", "fake": False, "debug": False}
+    assert _parse_cli(["root.json", "--clear"]) == {"action": "clear", "root": "root.json", "fake": False, "debug": False, "batons": []}
+    # targeted clear: --baton is repeatable, collected onto `batons`
+    assert _parse_cli(["root.json", "--clear", "--baton", "b1", "--baton", "b2"]) == {
+        "action": "clear", "root": "root.json", "fake": False, "debug": False, "batons": ["b1", "b2"]}
     assert _parse_cli(["root.json", "--resume", "B"]) == {
         "action": "resume", "root": "root.json", "fake": False, "debug": False, "json": False,
         "baton_id": "B", "approver": None, "decision_file": None}
