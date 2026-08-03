@@ -14,6 +14,9 @@ command as additional argument(s) (never replacing it) — the controlled except
 that lets a gate run against the path the agent actually wrote, but only for
 strictly path-shaped values (see _target). Unset = old behaviour; key absent =
 command runs unchanged.
+interpolate_from names the payload keys a `{{key}}` in an argv-LIST command may
+draw from, for the per-run value that belongs in the MIDDLE of the argv rather
+than at the end (see _target). Unset = old behaviour, `{{key}}` stays a literal.
 tail_only drops the full stdout from the payload (keeps stdout_tail) so a chatty
 test run doesn't ride multi-MB of output through every downstream hop.
 
@@ -21,12 +24,12 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from typing import List, Optional, Union
+from typing import List, Optional, Sequence, Union
 
 from ..core import Node, Envelope, Kind, NodeConfig
 from ..cwd import carry_cwd, resolve_cwd
 from ._shell import _run, ShellTimeout
-from ._target import append_targets, resolve_target_args
+from ._target import append_targets, render_command, resolve_target_args
 
 
 class ShellNode(Node):
@@ -34,7 +37,8 @@ class ShellNode(Node):
                  cwd_from: Optional[str] = None, timeout: Optional[float] = None,
                  shell: bool = False, tail_only: bool = False, tail: int = 2000,
                  carry: Optional[List[str]] = None,
-                 target_from: Optional[str] = None) -> None:
+                 target_from: Optional[str] = None,
+                 interpolate_from: Optional[Sequence[str]] = None) -> None:
         self._command = command
         self._cwd = cwd
         self._cwd_from = cwd_from
@@ -45,6 +49,9 @@ class ShellNode(Node):
         # payload key whose validated value(s) append to the trusted command as
         # additional argument(s); None = the command never changes (see _target).
         self._target_from = target_from
+        # payload keys a `{{key}}` in the command may draw from; None = the
+        # command is never interpolated (see _target).
+        self._interpolate_from = interpolate_from
         # payload keys to forward (a shell node otherwise emits only its result
         # fields) — e.g. carry the spec through a repo-bound RED run to the coder
         self._carry = list(carry or [])
@@ -52,9 +59,13 @@ class ShellNode(Node):
     async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
         cwd = resolve_cwd(input, self._cwd_from, self._cwd)  # per-run worktree, else static cwd
         timeout = config.timeout if config.timeout is not None else self._timeout  # #13
-        # Append the validated payload target(s) to the trusted command (raises →
-        # the node ERRORS; never runs the command with a wrong/absent target).
-        command = append_targets(self._command, resolve_target_args(input.payload, self._target_from))
+        # Interpolate FIRST (declared {{key}} placeholders keep their position in
+        # the trusted argv), THEN append the validated payload target(s) — targets
+        # are documented to land last. Either raising → the node ERRORS; it never
+        # runs the command with a wrong/absent target or an unfilled placeholder.
+        command = append_targets(
+            render_command(self._command, input.payload, self._interpolate_from),
+            resolve_target_args(input.payload, self._target_from))
         try:
             code, text = await _run(command, cwd=cwd, timeout=timeout, shell=self._shell)
             fields = {"exit_code": code, "ok": (code == 0), "stdout_tail": text[-self._tail:]}

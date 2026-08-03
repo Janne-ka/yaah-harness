@@ -26,9 +26,12 @@ what a parked-resume safely picks up and what a future config-push may carry):
       binaries/tools; root keys are deployment trust)
     - new or removed nodes (topology), node `type` changes
     - `target`/`impl` (fn: = code), `command`, `binary`, `allowed_tools`,
-      `permission_mode`, `tools`, `mcp`, `cwd_from`, `target_from` (execution
-      surface — `target_from` chooses which payload value the command runs
-      against, so it is trust-equivalent to the command itself)
+      `permission_mode`, `tools`, `mcp`, `cwd_from`, `target_from`,
+      `interpolate_from`, `args_from`
+      (execution surface — `target_from` chooses which payload value the command
+      runs against and `interpolate_from` chooses which payload values are
+      substituted INTO its argv, so both are trust-equivalent to the command
+      itself; `args_from` is the transform node's equivalent)
     - `validators`, `concerns_from`, gate fields (safety surface)
     - numeric increases, non-numeric config changes (deny by default)
     - a missing `_authored_by` (provenance is mandatory)

@@ -10,6 +10,11 @@ the gate run against the path the agent actually wrote (e.g. the test file it
 created) instead of a pre-guessed one. Strict path-shape validation; any invalid
 value ERRORS the node (never runs the gate against the wrong/no target). Unset =
 old behaviour; key absent = command unchanged (see _target).
+interpolate_from names the payload keys a `{{key}}` in an argv-LIST command may
+draw from, for the per-run value that belongs in the MIDDLE of the argv rather
+than at the end (see _target). Unset = old behaviour, `{{key}}` stays a literal.
+tail caps how much of the command output rides into the failure detail (and so
+into the retry feedback the next attempt reads).
 Where: validator slots in a stage (e.g. qa on the code stage = the refix loop).
 Why: turn a command's exit code into a Verdict the harness retry loop understands.
 
@@ -17,19 +22,21 @@ Targets Python 3.9+.
 """
 from __future__ import annotations
 
-from typing import List, Optional, Union
+from typing import List, Optional, Sequence, Union
 
 from ..core import Node, Envelope, Failure, NodeConfig, Verdict
 from ..cwd import resolve_cwd
 from ._shell import _run, ShellTimeout
-from ._target import append_targets, resolve_target_args
+from ._target import append_targets, render_command, resolve_target_args
 
 
 class ShellCheck(Node):
     def __init__(self, command: Union[str, List[str]], *, expect_exit: int = 0,
                  expect_nonzero: bool = False, cwd: Optional[str] = None,
                  cwd_from: Optional[str] = None, timeout: Optional[float] = None,
-                 shell: bool = False, target_from: Optional[str] = None) -> None:
+                 shell: bool = False, tail: int = 2000,
+                 target_from: Optional[str] = None,
+                 interpolate_from: Optional[Sequence[str]] = None) -> None:
         self._command = command
         self._expect = expect_exit
         self._expect_nonzero = expect_nonzero
@@ -37,16 +44,24 @@ class ShellCheck(Node):
         self._cwd_from = cwd_from
         self._timeout = timeout
         self._shell = shell
+        self._tail = tail
         # payload key whose validated value(s) append to the trusted command as
         # additional argument(s); None = the command never changes (see _target).
         self._target_from = target_from
+        # payload keys a `{{key}}` in the command may draw from; None = the
+        # command is never interpolated (see _target).
+        self._interpolate_from = interpolate_from
 
     async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
         cwd = resolve_cwd(input, self._cwd_from, self._cwd)  # per-run worktree, else static cwd
         timeout = config.timeout if config.timeout is not None else self._timeout  # #13
-        # Append the validated payload target(s) to the trusted command (raises →
-        # the node ERRORS; never runs the gate with a wrong/absent target).
-        command = append_targets(self._command, resolve_target_args(input.payload, self._target_from))
+        # Interpolate FIRST (declared {{key}} placeholders keep their position in
+        # the trusted argv), THEN append the validated payload target(s) — targets
+        # are documented to land last. Either raising → the node ERRORS; it never
+        # runs the gate with a wrong/absent target or an unfilled placeholder.
+        command = append_targets(
+            render_command(self._command, input.payload, self._interpolate_from),
+            resolve_target_args(input.payload, self._target_from))
         try:
             code, text = await _run(command, cwd=cwd, timeout=timeout, shell=self._shell)
         except ShellTimeout as t:
@@ -58,5 +73,5 @@ class ShellCheck(Node):
             return Verdict.passed().to_envelope(input)
         want = "nonzero" if self._expect_nonzero else self._expect
         return Verdict.failed(Failure(
-            "shell_exit", "exit {} != expected {}".format(code, want), text[-2000:]
+            "shell_exit", "exit {} != expected {}".format(code, want), text[-self._tail:]
         )).to_envelope(input)

@@ -43,8 +43,12 @@ async def _run(command: Union[str, List[str]], *, cwd: Optional[str], timeout: O
         # world"]` became `echo hello world` (two tokens). `shlex.quote` preserves
         # each element's intent so list+shell behaves predictably. The shell
         # is still trusted-config; this fixes the silent quoting footgun, not a
-        # payload-injection vector (cwd is the only payload-derived input and it
-        # is passed via kwarg, not concatenated).
+        # payload-injection vector. It is ALSO what makes `interpolate_from`
+        # interpolation safe under shell=True: a payload value substituted into an
+        # element is quoted here as one token, so it can never become command
+        # structure (_target). The other payload-derived inputs — `cwd` and
+        # `target_from` — reach the child by kwarg / by `shlex.quote` too, never by
+        # raw concatenation.
         cmd = command if isinstance(command, str) else " ".join(shlex.quote(a) for a in command)
         proc = await asyncio.create_subprocess_shell(
             cmd, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)

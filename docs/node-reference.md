@@ -154,6 +154,10 @@ payload-derived**), `node:role` (another node over Comms), or `http(s)://url`
 (POST JSON). Two call shapes:
 - `call: "args"` (default): `fn(args)` where args = payload (or `args_from`
   key); result lands under `into` (default `"result"`) — enrich, don't replace.
+  This `args_from` is **ONE string** naming the payload key that holds the whole
+  args object. It is *not* the shell family's `interpolate_from` (a **list** of
+  key names substituted into argv) — different type, arity and meaning; that is
+  exactly why the shell key is not called `args_from`.
 - `call: "envelope"` (fn: only): `fn(envelope, config)`; the returned dict
   REPLACES the payload entirely — the config-aware deterministic step. The fn
   must copy any prior keys it wants to keep:
@@ -203,7 +207,8 @@ default `"stored"`), `cwd_from`. Output: payload + `{into: <where it went>}`.
 
 `command` (required; string or argv list). Optional `cwd`, `cwd_from`,
 `timeout`, `shell: true` (string runs under a shell; list elements are quoted),
-`tail_only` (drop full stdout, keep the tail), `carry`, `target_from` (below).
+`tail_only` (drop full stdout, keep the tail), `tail` (tail size in chars,
+default 2000), `carry`, `target_from` / `interpolate_from` (below).
 **Never fails the stage** — output: `{exit_code, ok, stdout?, stdout_tail,
 ...carry}`; route on `ok`/`exit_code` with `branch`, or gate with `shell_check`.
 The stage trace span records `exit_code` (the error-path contract).
@@ -240,12 +245,65 @@ a path pre-guessed in config.
                    "cwd_from": "workdir", "target_from": "test_path"}
 ```
 
+### `interpolate_from` — substitute payload values INTO the command's arguments
+
+`target_from` only ever appends. When the per-run value belongs in the **middle**
+of the argv — a connection string, a tenant id, a branch name — declare
+`interpolate_from`: a **list of payload key names** that the command's `{{key}}`
+placeholders may draw from.
+
+> **Why this name, not `args_from`?** The `transform` node already has an
+> `args_from`, and it is a *different thing wearing the same words*: ONE string
+> naming the payload key that holds the whole args object, versus a LIST of key
+> names substituted into argv — different type, different arity, different
+> semantics. `interpolate_from` names the mechanism and sits cleanly beside
+> `target_from` and `cwd_from`.
+
+- **argv-LIST commands for anything to substitute.** A **string** command
+  carrying a `{{`-token plus `interpolate_from` is a **build error**. This is the
+  safety argument, and it holds *by construction*: a list command is either
+  exec'd directly (no shell exists) or, under `shell: true`, has every element
+  `shlex.quote`d before being joined. Either way a substituted value is exactly
+  **one argv token** and can never become command structure — a value containing
+  `; rm -rf /` or `$(id)` reaches the child as inert literal text. A string
+  command goes to the shell as *source*, where substitution would be raw
+  concatenation; that edge is closed by refusing it.
+- **A token-free string command is legal.** Substitution needs a `{{`-token; with
+  none present it cannot occur, so a declared `interpolate_from` over a plain
+  shell-string command **builds and runs unchanged** — interpolation is simply
+  inert. That is the normal shape when a host overlay supplies its runner as a
+  shell string while the pipeline declares the key centrally.
+- **Whole-element or embedded**: both `"{{db_url}}"` and `"--db-url={{db_url}}"`
+  work — substitution is per element, anywhere inside it.
+- **Declared keys only.** A `{{key}}` the node's `interpolate_from` does not list
+  is a **build error**, never a silently-passed-through literal. So is a
+  `{{`-token that is not a well-formed `{{key}}` (the `{{?key}}`/`{{!key}}`
+  agent-prompt sigils are not this templater's dialect).
+- **Unfilled = node error.** A declared key absent from the payload, `null`, a
+  non-scalar, an empty string, or a value carrying a C0 control other than tab
+  (NUL, newline, ESC, ...) or past the 4096-char cap → the node **ERRORS**. A gate
+  never runs with a literal `{{key}}` in its argv. (Controls beyond NUL/newline
+  are rejected because these values ride back out through `stdout_tail` into ANSI
+  operator terminals and rendered reports.)
+- **Opt-in, and inert when unset.** `interpolate_from` absent → behaviour is
+  byte-identical to before: a `{{key}}` in a command stays the literal `{{key}}`.
+- **Order with `target_from`**: interpolation happens first (placeholders keep
+  their position), then targets are appended — targets always land last.
+
+```json
+"role:migrate": {"type": "shell", "cwd_from": "workdir",
+                 "command": ["./bin/migrate", "--url={{db_url}}", "--tenant", "{{tenant}}"],
+                 "interpolate_from": ["db_url", "tenant"]}
+```
+
 ## `shell_check` — a command as a VALIDATOR
 
-Same execution as `shell` (incl. `cwd_from` and `target_from`), but returns a
-pass/fail **Verdict** for a stage's `validators` list. `expect_exit` (default 0)
-or `expect_nonzero: true` (the RED gate: tests must FAIL before code exists).
-Failure detail carries the output tail into the retry feedback.
+Same execution as `shell` (incl. `cwd_from`, `target_from` and
+`interpolate_from`), but
+returns a pass/fail **Verdict** for a stage's `validators` list. `expect_exit`
+(default 0) or `expect_nonzero: true` (the RED gate: tests must FAIL before code
+exists). Failure detail carries the output tail (`tail`, default 2000 chars) into
+the retry feedback.
 
 ## `expect_field` — payload assertion validator
 

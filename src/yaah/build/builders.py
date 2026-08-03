@@ -29,6 +29,7 @@ from ..nodes import (
     TransformNode,
     WorktreeNode,
 )
+from ..nodes._target import check_command
 from ..validators import ExpectField, JsonObjectValidator, JsonSchemaValidator
 from .build_context import BuildContext
 from .human_gate import HumanGate
@@ -192,13 +193,33 @@ def _target_from(spec: Dict[str, Any], node_type: str) -> Any:
     return tf
 
 
+def _interpolate_from(spec: Dict[str, Any], node_type: str) -> Any:
+    """Read `interpolate_from` off a shell-family spec — the list of payload keys a
+    `{{key}}` in the command may draw from — and run the BUILD-time refusals so a
+    command that can never render is a config error at LOAD, not a node error mid
+    run. Absent → None (feature off, `{{key}}` stays the literal it is today).
+    (Distinct from the `transform` node's `args_from`, which is ONE key naming a
+    whole args object — see _target's module docstring.)"""
+    af = spec.get("interpolate_from")
+    if af is None:
+        return None
+    if not isinstance(af, list) or not all(isinstance(k, str) and k for k in af):
+        raise ValueError(
+            "a '{}' node's 'interpolate_from' must be a list of non-empty payload key "
+            "names, got {!r}".format(node_type, af))
+    check_command(spec["command"], af)   # tokened string command / undeclared {{key}} → refused here
+    return af
+
+
 def _build_shell(spec: Dict[str, Any], ctx: BuildContext) -> Node:
     if "command" not in spec:
         raise ValueError("a 'shell' node needs 'command' (host-fact missing — is an overlay supposed to supply it?)")
     return ShellNode(spec["command"], cwd=spec.get("cwd"), cwd_from=spec.get("cwd_from"),
                      timeout=spec.get("timeout"), shell=bool(spec.get("shell", False)),
-                     tail_only=bool(spec.get("tail_only", False)), carry=spec.get("carry"),
-                     target_from=_target_from(spec, "shell"))
+                     tail_only=bool(spec.get("tail_only", False)),
+                     tail=int(spec.get("tail", 2000)), carry=spec.get("carry"),
+                     target_from=_target_from(spec, "shell"),
+                     interpolate_from=_interpolate_from(spec, "shell"))
 
 
 def _build_shell_check(spec: Dict[str, Any], ctx: BuildContext) -> Node:
@@ -208,7 +229,9 @@ def _build_shell_check(spec: Dict[str, Any], ctx: BuildContext) -> Node:
                       expect_nonzero=bool(spec.get("expect_nonzero", False)),
                       cwd=spec.get("cwd"), cwd_from=spec.get("cwd_from"),
                       timeout=spec.get("timeout"), shell=bool(spec.get("shell", False)),
-                      target_from=_target_from(spec, "shell_check"))
+                      tail=int(spec.get("tail", 2000)),
+                      target_from=_target_from(spec, "shell_check"),
+                      interpolate_from=_interpolate_from(spec, "shell_check"))
 
 
 def _build_expect_field(spec: Dict[str, Any], ctx: BuildContext) -> Node:
