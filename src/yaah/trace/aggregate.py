@@ -11,7 +11,9 @@ a retry signal. The token->$ conversion is a CONFIG PRICE-MAP applied here in th
 consumer, so history can be re-priced by editing config, never the engine. (The
 Langfuse sink computes cost itself; this is the file-path equivalent.)
 
-Price-map shape: {model: {"input": usd_per_1k_in, "output": usd_per_1k_out}}.
+Price-map shape: {model: {"input": usd_per_1k_in, "output": usd_per_1k_out}},
+with OPTIONAL "cache_read"/"cache_write" per-1k rates — omitted, they derive
+from "input" via the standard multipliers below.
 
 Targets Python 3.9+.
 """
@@ -21,15 +23,42 @@ import json
 import math
 from typing import Any, Dict, Iterable, List, Optional
 
+# Prompt-cache rate multipliers, relative to a model's plain input rate.
+# Cached input is billed differently from fresh input: a cache READ is ~0.1x,
+# a cache WRITE ~1.25x (the 5-minute-TTL write premium; a 1h-TTL write is 2x —
+# the trace records no TTL, so a map that uses long-TTL caching should state an
+# explicit "cache_write" rate rather than rely on this default).
+CACHE_READ_MULT = 0.1
+CACHE_WRITE_MULT = 1.25
+
 
 def cost_usd(model: Optional[str], tokens_in: int, tokens_out: int,
-             price_map: Optional[Dict[str, Any]]) -> float:
+             price_map: Optional[Dict[str, Any]], *,
+             tokens_cache_read: int = 0, tokens_cache_write: int = 0) -> float:
     """Token cost for one model call via the price-map (per-1k rates). An unknown
-    model (or no map) contributes 0.0 — cost is opt-in, never guessed."""
+    model (or no map) contributes 0.0 — cost is opt-in, never guessed.
+
+    The three INPUT classes are priced SEPARATELY: `tokens_in` (fresh input) at
+    the "input" rate, cache reads at `CACHE_READ_MULT` x that, cache writes at
+    `CACHE_WRITE_MULT` x. A price-map entry may override either derived rate
+    with an explicit "cache_read"/"cache_write" per-1k rate.
+
+    BACK-COMPAT with traces written before the split (2026-08): those records
+    carry only `tokens_in`, in which it is the SUM of all three classes, and the
+    cache args default to 0 — so an old trace prices exactly as it always did,
+    i.e. everything at the full input rate. Such totals are an UPPER BOUND, not
+    a correction: they cannot be re-priced, because the split the arithmetic
+    needs was never recorded."""
     if not price_map or model not in price_map:
         return 0.0
     p = price_map[model]
-    return tokens_in / 1000.0 * p.get("input", 0.0) + tokens_out / 1000.0 * p.get("output", 0.0)
+    in_rate = p.get("input", 0.0)
+    read_rate = p.get("cache_read", in_rate * CACHE_READ_MULT)
+    write_rate = p.get("cache_write", in_rate * CACHE_WRITE_MULT)
+    return (tokens_in / 1000.0 * in_rate
+            + tokens_cache_read / 1000.0 * read_rate
+            + tokens_cache_write / 1000.0 * write_rate
+            + tokens_out / 1000.0 * p.get("output", 0.0))
 
 
 def record_cost_usd(r: Dict[str, Any],
@@ -38,11 +67,17 @@ def record_cost_usd(r: Dict[str, Any],
     the pretty/--cost renderers so they can never disagree. Prefers the CONFIG
     ref (`model_ref`, "provider:model" — what price maps are authored against)
     when the map knows it, else the backend-RESOLVED `model` name (older
-    records / maps keyed by API names). No silent $0 from the dialect gap."""
+    records / maps keyed by API names). No silent $0 from the dialect gap.
+
+    `tokens_cache_read`/`tokens_cache_write` are OPTIONAL on the record (a
+    backend that reports no caching, or a pre-split trace, omits them) and
+    default to 0 — see cost_usd on what that means for old traces."""
     ref = r.get("model_ref")
     model = r.get("model")
     key = ref if (price_map and ref in price_map) else model
-    return cost_usd(key, r.get("tokens_in", 0), r.get("tokens_out", 0), price_map)
+    return cost_usd(key, r.get("tokens_in", 0), r.get("tokens_out", 0), price_map,
+                    tokens_cache_read=r.get("tokens_cache_read", 0) or 0,
+                    tokens_cache_write=r.get("tokens_cache_write", 0) or 0)
 
 
 def priced_key(r: Dict[str, Any],
@@ -131,12 +166,15 @@ def count_by_stage_model(records: Iterable[Dict[str, Any]],
             g = {"stage": stage, "model_ref": model_ref, "ladder": is_ladder,
                  "ladder_from": r.get("ladder_from"),
                  "calls": 0, "tokens_in": 0, "tokens_out": 0,
+                 "tokens_cache_read": 0, "tokens_cache_write": 0,
                  "cost_usd": 0.0, "priced": False, "_durations": []}
             groups[key] = g
             order.append(key)
         g["calls"] += 1
         g["tokens_in"] += r.get("tokens_in", 0)
         g["tokens_out"] += r.get("tokens_out", 0)
+        g["tokens_cache_read"] += r.get("tokens_cache_read", 0) or 0
+        g["tokens_cache_write"] += r.get("tokens_cache_write", 0) or 0
         g["cost_usd"] += record_cost_usd(r, price_map)
         if priced_key(r, price_map) is not None:
             g["priced"] = True
@@ -177,7 +215,9 @@ def aggregate(records: Iterable[Dict[str, Any]],
         if status is not None and status not in ("ok", "suspended"):
             errors.append({"name": name, "stage": r.get("stage") or r.get("role"),
                            "status": status, "detail": r.get("error") or r.get("detail")})
-        run = runs.setdefault(corr, {"tokens_in": 0, "tokens_out": 0, "cost_usd": 0.0,
+        run = runs.setdefault(corr, {"tokens_in": 0, "tokens_out": 0,
+                                     "tokens_cache_read": 0, "tokens_cache_write": 0,
+                                     "cost_usd": 0.0,
                                      "duration_ms": 0.0, "stages": 0, "model_calls": 0})
         if name == "stage":
             n_stage_spans += 1
@@ -190,16 +230,28 @@ def aggregate(records: Iterable[Dict[str, Any]],
             n_model_calls += 1
             run["model_calls"] += 1
             ti, to = r.get("tokens_in", 0), r.get("tokens_out", 0)
+            # cached-input classes ride alongside tokens_in (absent on records
+            # from a non-caching backend / a pre-split trace) — carried so the
+            # operator can SEE the cache hit rate behind a cost figure
+            cr = r.get("tokens_cache_read", 0) or 0
+            cw = r.get("tokens_cache_write", 0) or 0
             model = r.get("model")
             c = record_cost_usd(r, price_map)
             run["tokens_in"] += ti
             run["tokens_out"] += to
+            run["tokens_cache_read"] += cr
+            run["tokens_cache_write"] += cw
             run["cost_usd"] += c
             m = models.setdefault(model or "?", {"calls": 0, "tokens_in": 0,
-                                                 "tokens_out": 0, "cost_usd": 0.0})
+                                                 "tokens_out": 0,
+                                                 "tokens_cache_read": 0,
+                                                 "tokens_cache_write": 0,
+                                                 "cost_usd": 0.0})
             m["calls"] += 1
             m["tokens_in"] += ti
             m["tokens_out"] += to
+            m["tokens_cache_read"] += cr
+            m["tokens_cache_write"] += cw
             m["cost_usd"] += c
         elif name == "tool_call":
             tools[r.get("tool", "?")] = tools.get(r.get("tool", "?"), 0) + 1
@@ -213,6 +265,8 @@ def aggregate(records: Iterable[Dict[str, Any]],
         "runs": len(runs),
         "tokens_in": sum(v["tokens_in"] for v in runs.values()),
         "tokens_out": sum(v["tokens_out"] for v in runs.values()),
+        "tokens_cache_read": sum(v["tokens_cache_read"] for v in runs.values()),
+        "tokens_cache_write": sum(v["tokens_cache_write"] for v in runs.values()),
         "cost_usd": sum(v["cost_usd"] for v in runs.values()),
         "stage_spans": n_stage_spans,
         "model_calls": n_model_calls,

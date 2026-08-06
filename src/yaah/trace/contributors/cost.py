@@ -28,6 +28,13 @@ class CostContributor(TraceContributor):
         out: Dict[str, Any] = {"tokens_in": span.tokens_in,
                                "tokens_out": span.tokens_out,
                                "model": span.model}
+        # cached-input classes: emitted ONLY when non-zero, so a backend that
+        # reports no cache usage keeps the exact record shape it always had
+        # (and aggregate's absent-field default prices such records unchanged)
+        if span.tokens_cache_read:
+            out["tokens_cache_read"] = span.tokens_cache_read
+        if span.tokens_cache_write:
+            out["tokens_cache_write"] = span.tokens_cache_write
         # the CONFIG ref ("provider:model") beside the backend-RESOLVED name —
         # price maps are authored against refs; without the ref on the RECORD,
         # pricing a config-ref map against resolved names silently reads $0.00

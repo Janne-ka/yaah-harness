@@ -89,13 +89,36 @@ def _as_dict(resp: Any) -> Dict[str, Any]:
 def _report_usage(on_usage: Optional[Callable[..., Any]], resp: Any, model: Optional[str]) -> None:
     """Feed the cost bridge (R4) from a litellm response. No-op if no callback
     (cost capture off) or the response carries no usage. litellm normalizes usage
-    to prompt_tokens / completion_tokens across providers."""
+    to prompt_tokens / completion_tokens across providers.
+
+    The two CACHED input classes are reported separately from `tokens_in`
+    (same provider-agnostic contract as claude_cli_provider._map_usage) because
+    they bill at different rates — cache read ~0.1x the input rate, cache write
+    ~1.25x — and pricing them at the full input rate over-reports cache-heavy
+    stages several-fold.
+
+    UNLIKE claude's raw usage, litellm's `prompt_tokens` is cache-INCLUSIVE: the
+    OpenAI dialect counts `prompt_tokens_details.cached_tokens` inside it, and
+    litellm's anthropic shim likewise sums input + cache-read + cache-creation
+    into it. So the plain-rate remainder is prompt_tokens MINUS the two cache
+    classes, clamped at 0 (a provider that reports a cache count without folding
+    it into prompt_tokens would otherwise go negative and under-bill)."""
     if on_usage is None:
         return
     resp = _as_dict(resp)
     usage = resp.get("usage") or {}
+    details = usage.get("prompt_tokens_details") or {}
+    if not isinstance(details, dict):
+        details = _as_dict(details)
+    cache_read = int(usage.get("cache_read_input_tokens")
+                     or details.get("cached_tokens") or 0)
+    cache_write = int(usage.get("cache_creation_input_tokens")
+                      or details.get("cache_creation_tokens") or 0)
+    prompt = int(usage.get("prompt_tokens", 0) or 0)
     resp_model = resp.get("model")
-    on_usage({"tokens_in": usage.get("prompt_tokens", 0),
+    on_usage({"tokens_in": max(prompt - cache_read - cache_write, 0),
+              "tokens_cache_read": cache_read,
+              "tokens_cache_write": cache_write,
               "tokens_out": usage.get("completion_tokens", 0),
               "model": resp_model or model})
 

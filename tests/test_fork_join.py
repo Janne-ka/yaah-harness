@@ -415,7 +415,10 @@ async def scenario_dead_arm_under_timed_wait_degrades_immediately() -> None:
     assert isinstance(out, Done), out
     assert len(errs) == 1 and errs[0].payload["reason"] == "branch_failed", errs
     assert "branch output not ok" in errs[0].payload.get("detail", ""), errs[0].payload
-    assert seen and seen[0].get("seed") == 1, seen  # degraded: pre-fork payload continued
+    assert seen and seen[0].get("seed") == 1, seen  # pre-fork payload survives
+    # …and since the M33 review's HIGH-1 the healthy arm rides out with it: this
+    # graph's arm `a` DID deposit at the join before `bad` killed the fork.
+    assert seen[0].get("fork_partial", {}).get("arrived") == ["a"], seen[0]
 
 
 async def scenario_timed_wait_happy_path_clears_normally() -> None:
@@ -452,11 +455,13 @@ async def scenario_timed_wait_happy_path_clears_normally() -> None:
 async def scenario_pure_liveness_ttl_still_fires() -> None:
     """The TTL keeps its liveness role: a CLEAN settle with no fan-in (the
     external-clear pattern) and no clearer waits out the full wait.timeout,
-    then degrades with the plain 'wait_timeout' reason."""
-    errs = []
+    then degrades with the plain 'wait_timeout' reason. With NOTHING parked at a
+    fan-in the degrade output is the pre-fork input UNCHANGED (M33): no
+    `fork_partial` key, so a degrade with no evidence stays loud downstream."""
+    errs, seen = [], []
     comms = InProcessComms()
     comms.register("role:a", Emit("A", []))
-    comms.register("role:summary", Capture([]))
+    comms.register("role:summary", Capture(seen))
 
     async def on_to(env):
         errs.append(env)
@@ -468,9 +473,277 @@ async def scenario_pure_liveness_ttl_still_fires() -> None:
         Stage("a", node="role:a", then=None),   # branch ends; NO fan-in, no clearer
         Stage("summary", node="role:summary", then=None),
     )
-    out = await Harness(comms, graph).run(Envelope(Kind.TASK, {}))
+    out = await Harness(comms, graph).run(Envelope(Kind.TASK, {"seed": 1}))
     assert isinstance(out, Done), out
     assert len(errs) == 1 and errs[0].payload["reason"] == "wait_timeout", errs
+    assert len(seen) == 1 and "fork_partial" not in seen[0], seen
+
+
+class _Slow:
+    """A branch stage that outlives the fork's TTL — the starving arm."""
+    def __init__(self, secs):
+        self.secs = secs
+
+    async def invoke(self, env, config):
+        await asyncio.sleep(self.secs)
+        return env.reply_with(Kind.RESULT, {"findings": [{"id": "SLOW"}]})
+
+
+async def scenario_timeout_delivers_completed_arm() -> None:
+    """M33 (live incident TASK-JK-260): one arm DEPOSITED at the fan-in and the
+    other was still retrying when the fork's TTL fired. The degrade used to
+    return the pre-fork input, so the completed arm's whole review — paid for,
+    parked on disk — was discarded and the app saw an empty fork. Now the parked
+    arrivals ride the output under `fork_partial` (and the parked set is
+    flushed), so the app can degrade to single-arm evidence instead of zero."""
+    errs, seen = [], []
+    comms = InProcessComms()
+    comms.register("role:slow", _Slow(5.0))
+    comms.register("role:b", Emit("B", []))
+    comms.register("role:summary", Capture(seen))
+
+    async def on_to(env):
+        errs.append(env)
+    await comms.subscribe("fork.timeout", on_to)
+
+    graph = Graph.of(
+        Stage("spread", id="g", node="", fork=["a", "b"], then="summary",
+              wait={"timeout": 0.3, "on_timeout": "fork.timeout"}),
+        Stage("a", node="role:slow", then="join"),
+        Stage("b", node="role:b", then="join"),
+        Stage("join", node="", fanin={"expect": ["a", "b"], "wait": "all"}, then=None),
+        Stage("summary", node="role:summary", then=None),
+    )
+    with tempfile.TemporaryDirectory() as d:
+        es = EnvelopeStore(FileBackend(d))
+        out = await asyncio.wait_for(
+            Harness(comms, graph, envelope_store=es).run(
+                Envelope(Kind.TASK, {"seed": "S"}, {"correlation_id": "R"})), timeout=5)
+        assert isinstance(out, Done), out
+        assert len(errs) == 1 and errs[0].payload["reason"] == "wait_timeout", errs
+        assert len(seen) == 1, seen
+        part = seen[0].get("fork_partial")
+        assert part is not None, ("the completed arm must reach the continuation", seen[0])
+        assert part["arrived"] == ["b"], part
+        assert part["expected"] == ["a", "b"] and part["missing"] == ["a"], part
+        assert part["fork"] == "spread" and part["reason"] == "wait_timeout", part
+        assert part["results"]["b"]["findings"] == [{"id": "B"}], part
+        assert seen[0].get("seed") == "S", ("pre-fork payload must survive", seen[0])
+        assert await es.list("") == [], "parked set must be released on the degrade"
+
+
+async def scenario_branch_failed_delivers_completed_arm() -> None:
+    """M33 review HIGH-1, route 2 of 3. M33 shipped the salvage as a promise over
+    ALL THREE degrade reasons and delivered it on `wait_timeout` alone: on
+    `branch_failed` the fan-in's own coordinator reaches its unmeetable exit
+    FIRST (the watch loop sets the join's event, the coordinator wakes and
+    FLUSHES) and only then does the fork degrade — so `_degraded_output` listed
+    an already-empty store and threw the completed arm away exactly as before the
+    fix. The route matters most in exactly the shape M33 was written for: an app
+    whose arm RAISES (rather than starving) still lost its healthy sibling's
+    whole output. The coordinator now snapshots before flushing."""
+    errs, seen = [], []
+    comms = InProcessComms()
+    comms.register("role:b", Emit("B", []))
+    comms.register("role:bad", _BadNode())
+    comms.register("role:check", _HardCheck())
+    comms.register("role:summary", Capture(seen))
+
+    async def on_to(env):
+        errs.append(env)
+    await comms.subscribe("fork.timeout", on_to)
+
+    graph = Graph.of(
+        Stage("spread", id="g", node="", fork=["a", "b"], then="summary",
+              wait={"timeout": 30.0, "on_timeout": "fork.timeout"}),   # long TTL
+        Stage("a", node="role:bad", validators=["role:check"],
+              max_attempts=1, then="join"),                            # the dead arm
+        Stage("b", node="role:b", then="join"),                        # completes + deposits
+        Stage("join", node="", fanin={"expect": ["a", "b"], "wait": "all"}, then=None),
+        Stage("summary", node="role:summary", then=None),
+    )
+    with tempfile.TemporaryDirectory() as d:
+        es = EnvelopeStore(FileBackend(d))
+        out = await asyncio.wait_for(
+            Harness(comms, graph, envelope_store=es).run(
+                Envelope(Kind.TASK, {"seed": "S"}, {"correlation_id": "R"})), timeout=5)
+        assert isinstance(out, Done), out
+        assert len(errs) == 1 and errs[0].payload["reason"] == "branch_failed", errs
+        part = seen[0].get("fork_partial")
+        assert part is not None, ("branch_failed must deliver the completed arm", seen[0])
+        assert part["arrived"] == ["b"] and part["reason"] == "branch_failed", part
+        assert part["expected"] == ["a", "b"] and part["missing"] == ["a"], part
+        assert part["results"]["b"]["findings"] == [{"id": "B"}], part
+        assert "branch output not ok" in part.get("detail", ""), part
+        assert seen[0].get("seed") == "S", ("pre-fork payload must survive", seen[0])
+        assert await es.list("") == [], "parked set must be released on the degrade"
+
+
+async def scenario_fanin_unmeetable_delivers_completed_arm() -> None:
+    """M33 review HIGH-1, route 3 of 3 — same lost race as `branch_failed`, no
+    exception anywhere: arm `a` runs cleanly to its OWN terminal and never
+    reaches the join, so once every branch has settled the policy is provably
+    unmeetable (H2), the coordinator exits + flushes, and the fork degrades with
+    `fanin_unmeetable`. Arm `b`'s deposited work must still ride out."""
+    errs, seen = [], []
+    comms = InProcessComms()
+    comms.register("role:a", Emit("A", []))
+    comms.register("role:b", Emit("B", []))
+    comms.register("role:summary", Capture(seen))
+
+    async def on_to(env):
+        errs.append(env)
+    await comms.subscribe("fork.timeout", on_to)
+
+    graph = Graph.of(
+        Stage("spread", id="g", node="", fork=["a", "b"], then="summary",
+              wait={"timeout": 30.0, "on_timeout": "fork.timeout"}),   # long TTL
+        Stage("a", node="role:a", then=None),        # ends on its own — never joins
+        Stage("b", node="role:b", then="join"),
+        Stage("join", node="", fanin={"expect": ["a", "b"], "wait": "all"}, then=None),
+        Stage("summary", node="role:summary", then=None),
+    )
+    with tempfile.TemporaryDirectory() as d:
+        es = EnvelopeStore(FileBackend(d))
+        out = await asyncio.wait_for(
+            Harness(comms, graph, envelope_store=es).run(
+                Envelope(Kind.TASK, {"seed": "S"}, {"correlation_id": "R"})), timeout=5)
+        assert isinstance(out, Done), out
+        assert len(errs) == 1 and errs[0].payload["reason"] == "fanin_unmeetable", errs
+        part = seen[0].get("fork_partial")
+        assert part is not None, ("fanin_unmeetable must deliver the completed arm", seen[0])
+        assert part["arrived"] == ["b"] and part["reason"] == "fanin_unmeetable", part
+        assert part["expected"] == ["a", "b"] and part["missing"] == ["a"], part
+        assert part["results"]["b"]["findings"] == [{"id": "B"}], part
+        assert seen[0].get("seed") == "S", ("pre-fork payload must survive", seen[0])
+        assert await es.list("") == [], "parked set must be released on the degrade"
+
+
+async def scenario_fanin_own_timeout_still_salvages() -> None:
+    """M33 review MED-3: a fan-in with its OWN `timeout` SHORTER than the fork's
+    `wait.timeout` gives up first, publishes its join error and releases the
+    parked set — and the fork, still holding TTL, then reached `_degraded_output`
+    to find an empty store. Same snapshot-before-flush fixes it: the fan-in
+    hands its arrivals to the fork's degrade instead of erasing them.
+
+    ORDERING, stated: this is the fan-in's clock, not the fork's, so the reason
+    the listener sees is still the fork's own `wait_timeout` — the fan-in gave up
+    early, the fork ran out later."""
+    errs, seen = [], []
+    comms = InProcessComms()
+    comms.register("role:slow", _Slow(5.0))
+    comms.register("role:b", Emit("B", []))
+    comms.register("role:summary", Capture(seen))
+
+    async def on_to(env):
+        errs.append(env)
+    await comms.subscribe("fork.timeout", on_to)
+
+    graph = Graph.of(
+        Stage("spread", id="g", node="", fork=["a", "b"], then="summary",
+              wait={"timeout": 0.6, "on_timeout": "fork.timeout"}),
+        Stage("a", node="role:slow", then="join"),
+        Stage("b", node="role:b", then="join"),
+        # the JOIN gives up long before the fork does
+        Stage("join", node="", then=None,
+              fanin={"expect": ["a", "b"], "wait": "all", "timeout": 0.1}),
+        Stage("summary", node="role:summary", then=None),
+    )
+    with tempfile.TemporaryDirectory() as d:
+        es = EnvelopeStore(FileBackend(d))
+        out = await asyncio.wait_for(
+            Harness(comms, graph, envelope_store=es).run(
+                Envelope(Kind.TASK, {"seed": "S"}, {"correlation_id": "R"})), timeout=5)
+        assert isinstance(out, Done), out
+        assert len(errs) == 1 and errs[0].payload["reason"] == "wait_timeout", errs
+        part = seen[0].get("fork_partial")
+        assert part is not None, ("an early fan-in must not erase the salvage", seen[0])
+        assert part["arrived"] == ["b"], part
+        assert part["results"]["b"]["findings"] == [{"id": "B"}], part
+        assert await es.list("") == [], "parked set must be released on the degrade"
+
+
+class _ListBrokenStore(EnvelopeStore):
+    """An EnvelopeStore whose SCAN fails — a full disk, a swept file, a backend
+    that lost its connection."""
+    async def list(self, group: str = ""):
+        raise OSError("store scan failed")
+
+
+async def scenario_degrade_survives_a_broken_store() -> None:
+    """M33 review MED-2: the salvage put STORE CALLS on a path whose old body was
+    infallible (`cleared = input`). A store that cannot be listed must therefore
+    cost the run its salvage and NOTHING more — the degrade completes, the
+    continuation runs on the pre-fork payload with no `fork_partial`, and the
+    fault is traced. A degrade that crashes is strictly worse than the bug it
+    replaced."""
+    errs, seen = [], []
+    comms = InProcessComms()
+    comms.register("role:slow", _Slow(5.0))
+    comms.register("role:b", Emit("B", []))
+    comms.register("role:summary", Capture(seen))
+
+    async def on_to(env):
+        errs.append(env)
+    await comms.subscribe("fork.timeout", on_to)
+
+    graph = Graph.of(
+        Stage("spread", id="g", node="", fork=["a", "b"], then="summary",
+              wait={"timeout": 0.3, "on_timeout": "fork.timeout"}),
+        Stage("a", node="role:slow", then="join"),
+        Stage("b", node="role:b", then="join"),
+        Stage("join", node="", fanin={"expect": ["a", "b"], "wait": "all"}, then=None),
+        Stage("summary", node="role:summary", then=None),
+    )
+    with tempfile.TemporaryDirectory() as d:
+        es = _ListBrokenStore(FileBackend(d))
+        out = await asyncio.wait_for(
+            Harness(comms, graph, envelope_store=es).run(
+                Envelope(Kind.TASK, {"seed": "S"}, {"correlation_id": "R"})), timeout=5)
+        assert isinstance(out, Done), out
+        assert len(errs) == 1 and errs[0].payload["reason"] == "wait_timeout", errs
+        assert len(seen) == 1 and "fork_partial" not in seen[0], seen
+        assert seen[0].get("seed") == "S", ("the old, infallible degrade", seen[0])
+
+
+async def scenario_partial_names_arms_under_a_count_expect() -> None:
+    """M33 review LOW-5: with a `{"count": n}` expect the engine named NO branch,
+    so `expected`/`missing` came out empty and a listener could not say which arm
+    was lost. A count EQUAL to the fork's width means "every arm", and branch ids
+    ARE the fork's stage names, so naming them is reporting rather than inventing
+    — a count SHORTER than the fork stays empty, since a partial policy does not
+    say which arms it wanted."""
+    async def _run(slow, fast, count):
+        """One fork over `slow + fast` arms whose join wants `count` of them —
+        chosen so the policy is never met and the TTL always degrades."""
+        seen = []
+        comms = InProcessComms()
+        comms.register("role:slow", _Slow(5.0))
+        comms.register("role:fast", Emit("F", []))
+        comms.register("role:summary", Capture(seen))
+        arms = list(slow) + list(fast)
+        graph = Graph.of(
+            Stage("spread", node="", fork=arms, then="summary",
+                  wait={"timeout": 0.2}),
+            *[Stage(n, node="role:slow" if n in slow else "role:fast", then="join")
+              for n in arms],
+            Stage("join", node="", then=None,
+                  fanin={"expect": {"count": count}, "wait": "all"}),
+            Stage("summary", node="role:summary", then=None),
+        )
+        out = await asyncio.wait_for(
+            Harness(comms, graph).run(Envelope(Kind.TASK, {})), timeout=5)
+        assert isinstance(out, Done), out
+        return seen[0]["fork_partial"]
+
+    # count == the fork's width: "every arm", so the missing one is nameable
+    full = await _run(("a",), ("b",), 2)
+    assert full["arrived"] == ["b"], full
+    assert full["expected"] == ["a", "b"] and full["missing"] == ["a"], full
+    # count SHORTER than the fork: which two of the three? the engine won't guess
+    partial = await _run(("a", "b"), ("c",), 2)
+    assert partial["arrived"] == ["c"], partial       # the salvage is unchanged
+    assert partial["expected"] == [] and partial["missing"] == [], partial
 
 
 async def scenario_terminal_fork_branch_failure_surfaces() -> None:
@@ -619,6 +892,12 @@ async def main() -> None:
     await scenario_dead_arm_under_timed_wait_degrades_immediately()
     await scenario_timed_wait_happy_path_clears_normally()
     await scenario_pure_liveness_ttl_still_fires()
+    await scenario_timeout_delivers_completed_arm()
+    await scenario_branch_failed_delivers_completed_arm()
+    await scenario_fanin_unmeetable_delivers_completed_arm()
+    await scenario_fanin_own_timeout_still_salvages()
+    await scenario_degrade_survives_a_broken_store()
+    await scenario_partial_names_arms_under_a_count_expect()
     await scenario_branch_failure_fails_fork_instead_of_hanging()
     await scenario_terminal_fork_branch_failure_surfaces()
     await scenario_branch_soft_concerns_surface()

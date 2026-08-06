@@ -48,6 +48,22 @@ def _trace_context(corr: str) -> Optional[Dict[str, str]]:
     return None
 
 
+def _usage_details(r: Dict[str, Any]) -> Dict[str, int]:
+    """Langfuse usage for one model_call record. Always `input`/`output`; the
+    cached-input classes are added ONLY when the record carries them (non-zero),
+    under Langfuse's own anthropic-dialect key names — Langfuse computes cost
+    itself, and without the split it would price cache reads (~0.1x) and cache
+    writes (~1.25x) at the full input rate, the same over-report the file-path
+    aggregator was fixed for. A record without them keeps the exact usage shape
+    it always had."""
+    usage = {"input": r.get("tokens_in", 0), "output": r.get("tokens_out", 0)}
+    if r.get("tokens_cache_read"):
+        usage["cache_read_input_tokens"] = r["tokens_cache_read"]
+    if r.get("tokens_cache_write"):
+        usage["cache_creation_input_tokens"] = r["tokens_cache_write"]
+    return usage
+
+
 class LangfuseTraceSink(TraceSink):
     def __init__(self, *, client: Any = None, **client_opts: Any) -> None:
         # `client` is the external dependency, injected for testability: any object
@@ -89,8 +105,7 @@ class LangfuseTraceSink(TraceSink):
         if name == "model_call":
             obs = client.start_observation(
                 as_type="generation", model=r.get("model"),
-                usage_details={"input": r.get("tokens_in", 0),
-                               "output": r.get("tokens_out", 0)},
+                usage_details=_usage_details(r),
                 **common)
         else:
             obs = client.start_observation(as_type="span", **common)
@@ -106,8 +121,6 @@ class LangfuseTraceSink(TraceSink):
             name=obs_name, metadata=metadata)
         if name == "model_call":
             client.generation(
-                model=r.get("model"),
-                usage={"input": r.get("tokens_in", 0), "output": r.get("tokens_out", 0)},
-                **common)
+                model=r.get("model"), usage=_usage_details(r), **common)
         else:
             client.span(**common)

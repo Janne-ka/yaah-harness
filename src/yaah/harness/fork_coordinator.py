@@ -49,6 +49,16 @@ class _WaitDetermined(Exception):
         super().__init__(reason)
 
 
+def _expect_count(expect: dict) -> "Optional[int]":
+    """The `n` of a `{"count": n}` fan-in expect, or None when it is not a
+    number. Never raises: it is read on the DEGRADE path, where a malformed
+    config must cost the caller a nameable `expected` set, not the salvage."""
+    try:
+        return int(expect.get("count", 1))
+    except (TypeError, ValueError):
+        return None
+
+
 def _safe_set(fut: "asyncio.Future", value: object) -> None:
     """Idempotent future.set_result — drops the call if the future is already
     done (a race between two clear publishers). Scheduled via
@@ -119,10 +129,8 @@ class ForkCoordinator:
             await self._drain(ctx)
             if excs:  # H2 terminal case: a branch failure must not vanish into a task
                 for extra in excs[1:]:  # don't lose siblings — only excs[0] is raised
-                    await self._tracer.emit(Span.timed(
-                        "stage", corr=input.correlation_id, parent=stage.name,
-                        t0=self._clock(), t1=self._clock(), status="error",
-                        attrs={"stage": stage.name, "error": "fork_branch_failed: " + repr(extra)}))
+                    await self._error_span(stage.name, input.correlation_id,
+                                           "fork_branch_failed: " + repr(extra))
                 raise excs[0]
             return ctx.result if ctx.result is not None else input
 
@@ -171,10 +179,142 @@ class ForkCoordinator:
             for t in ctx.tasks:  # abandon outstanding branches
                 t.cancel()
             await asyncio.gather(*ctx.tasks, return_exceptions=True)  # retrieve, no warnings
-            cleared = input
+            cleared = await self._degraded_output(stage, input, ctx, reason, detail)
         finally:
             sub.cancel()
         return cleared
+
+    async def _degraded_output(self, stage: Stage, input: Envelope, ctx: _ForkCtx,
+                               reason: str, detail: "Optional[str]") -> Envelope:
+        """Build the fork's output for a DEGRADE (TTL elapsed / arm died / join
+        unmeetable), delivering whatever the fan-in already collected.
+
+        Why (M33): the degrade used to return the pre-fork `input` unchanged, so
+        a branch that had ALREADY deposited at the fan-in was thrown away — the
+        completed arm's work sat in the EnvelopeStore, paid for and unreachable,
+        while the continuation ran on a payload with no branch results at all.
+        Downstream that reads as "the whole fork produced nothing", which is a
+        LIE whenever an arm finished. Same lesson as the fan-out's `min_success`
+        degrade (M9a): hand the healthy results forward with a marker naming what
+        is missing, and let the app decide — never silently discard them.
+
+        The engine stays domain-free: it delivers the arrivals under the reserved
+        `fork_partial` key ({fork, reason, detail, arrived, results:{branch_id:
+        payload}}) and takes no view of their shape. A reducer is NOT run — the
+        fan-in's `reduce` is declared for a MET policy, and calling it on a
+        partial set would fabricate a full-fork result. With NO arrivals the
+        pre-fork input is returned exactly as before (fully backwards
+        compatible), so a degrade with nothing to show stays loud downstream.
+
+        The parked sets are flushed here, as every other end-of-join path does —
+        the data now rides the payload, so the store must not keep a second copy.
+
+        SALVAGE MUST NOT BE WORSE THAN NO SALVAGE (review MED-2). The body this
+        replaced was infallible — it returned `input`. Draining a store can fail
+        (a full disk, a swept file, a backend that lost its connection), and a
+        degrade that CRASHES is strictly worse than one that delivers nothing.
+        So the whole drain is guarded: on any store error the fault is traced and
+        the pre-fork input is returned — exactly the old behaviour.
+        """
+        try:
+            arrived, expected = await self._collect_parked(stage, ctx)
+        except Exception as e:                      # noqa: BLE001 — see docstring
+            await self._error_span(
+                stage.name, input.correlation_id,
+                "fork_partial_salvage_failed: " + repr(e))
+            return input
+        if not arrived:
+            return input
+        partial = {"fork": stage.name, "reason": reason,
+                   "arrived": sorted(arrived), "results": arrived,
+                   # what the join WANTED, so a listener can name the arm that
+                   # never landed (see _collect_parked for when it is knowable)
+                   "expected": sorted(expected),
+                   "missing": sorted(expected - set(arrived))}
+        if detail is not None:
+            partial["detail"] = detail
+        payload = dict(input.payload)
+        payload["fork_partial"] = partial
+        return input.reply_with(Kind.RESULT, payload)
+
+    async def _collect_parked(self, stage: Stage, ctx: _ForkCtx) -> tuple:
+        """`({branch_id: payload}, expected_branch_ids)` — the degrade's evidence,
+        drained out of this fork's joins and released from the store.
+
+        LIVE LISTING FIRST, SNAPSHOT SECOND (review HIGH-1). A join whose own
+        coordinator already exited (fan-in timeout / unmeetable / broken reduce)
+        has ALREADY flushed its parked set, and on two of the three degrade
+        routes it does so BEFORE this runs — see `_release_join`. Those exits
+        leave the arrivals on `join["parked"]`, so an empty live listing falls
+        back to that snapshot instead of reading "nothing arrived".
+
+        `expected` — what the join WANTED, so a listener can name the arm that
+        never landed. Knowable in two shapes: a list `expect` names its branches
+        outright; a `{"count": n}` expect names none, but a count EQUAL to the
+        fork's width means "every arm", and branch ids ARE the fork's stage names
+        (`run_collect`/`_spread` call `_walk(s, branch_id=s)` over `stage.fork`),
+        so naming them is reporting, not inventing. Any other count, or an
+        omitted `expect` ("whatever arrives"), leaves it empty — the engine will
+        not guess which arms a partial policy wanted.
+
+        CAVEAT — MULTI-JOIN FORKS FLATTEN (review LOW-6). A fork with two fan-ins
+        merges every join's arrivals into ONE `{branch_id: payload}` map, so two
+        joins reached by the same branch id would collide (last wins) and
+        `expected` is the union across joins rather than per-join. Every fork
+        shipped on this engine has exactly ONE join, and a per-join shape would
+        change the published `fork_partial` contract for a case nobody has;
+        stated here rather than papered over.
+        """
+        arrived: dict = {}
+        expected: set = set()
+        for name, join in ctx.joins.items():
+            parked = await self._envelopes.list(join["addr"] + ":")
+            if not parked:
+                parked = join.get("parked") or []
+            for key, env in parked:
+                arrived[key.rsplit(":", 1)[-1]] = env.payload
+            await self._envelopes.flush(join["addr"] + ":")
+            exp = (self._h.graph.stages[name].fanin or {}).get("expect")
+            if isinstance(exp, list):
+                expected.update(exp)
+            elif isinstance(exp, dict) and _expect_count(exp) == len(stage.fork or []):
+                expected.update(stage.fork or [])
+        return arrived, expected
+
+    async def _release_join(self, join: dict) -> None:
+        """Release one join's parked set, keeping a SNAPSHOT on the join first.
+
+        Why (review HIGH-1): M33 promised the salvage on all THREE degrade routes
+        but delivered it on `wait_timeout` alone. On `branch_failed` and
+        `fanin_unmeetable` the fan-in coordinator reaches its own exit FIRST —
+        `_release_unmeetable_joins` sets the join's event from inside the watch
+        loop, the coordinator wakes and flushes, and only then does the loop
+        observe `doomed` and let `run_collect` degrade. The live listing in
+        `_collect_parked` was empty by then, so a completed arm was discarded
+        exactly as before the fix (verified by repro; both routes now pinned).
+
+        Snapshotting keeps no second copy in the STORE — the flush still happens
+        — only in this run's in-memory join, which dies with the fork. The list
+        is guarded because this runs in a background coordinator whose exceptions
+        `_drain` retrieves and discards: a store fault here must degrade the
+        salvage, never turn a handled join error into a vanished one.
+        """
+        try:
+            join["parked"] = await self._envelopes.list(join["addr"] + ":")
+        except Exception:                           # noqa: BLE001 — see docstring
+            join["parked"] = []
+        await self._envelopes.flush(join["addr"] + ":")
+
+    async def _error_span(self, stage_name: str, corr: "Optional[str]",
+                          error: str) -> None:
+        """One error span for a fork/join fault, in the one shape every sink in
+        this module already emits (`parent` = the owning stage, `error` = a short
+        code plus its detail). A helper so the four fault sites cannot drift into
+        four different span shapes."""
+        await self._tracer.emit(Span.timed(
+            "stage", corr=corr or "", parent=stage_name,
+            t0=self._clock(), t1=self._clock(), status="error",
+            attrs={"stage": stage_name, "error": error}))
 
     async def _watch_branches(self, fut: "asyncio.Future", ctx: _ForkCtx) -> tuple:
         """The shared H2 watch loop: await the clear while watching the branch
@@ -354,14 +494,19 @@ class ForkCoordinator:
             else:
                 await join["event"].wait()
         except asyncio.TimeoutError:
+            # THIS JOIN's own timeout, which may be SHORTER than the fork's
+            # wait.timeout (review MED-3): the fork then still has TTL left to
+            # burn, reaches _degraded_output long after this flush, and would
+            # find nothing. `_release_join` snapshots first, so a fan-in that
+            # gives up early still hands its arrivals to the fork's degrade.
             await self._publish_join_error(stage, join)
-            await self._envelopes.flush(join["addr"] + ":")  # release the parked arrivals
+            await self._release_join(join)          # release the parked arrivals
             return
         if join.get("doomed"):  # released as UNMEETABLE (every branch settled,
             # policy unmet — H2): exit the same way the timeout path does, so the
             # drain/wait above can finish instead of this coordinator waiting forever
             await self._publish_join_error(stage, join)
-            await self._envelopes.flush(join["addr"] + ":")
+            await self._release_join(join)
             return
         # gather the PARKED arrivals (branch -> payload) from the EnvelopeStore and reduce
         parked = await self._envelopes.list(join["addr"] + ":")
@@ -373,12 +518,13 @@ class ForkCoordinator:
             # background task whose exception _drain retrieved-and-DISCARDED, so the
             # fork saw only a MISSING clear and hung (or timed out misleadingly).
             # Surface it as an explicit join error + error span instead of a silent hang.
-            await self._tracer.emit(Span.timed(
-                "stage", corr=join.get("corr") or "", parent=stage.name,
-                t0=self._clock(), t1=self._clock(), status="error",
-                attrs={"stage": stage.name, "error": "fanin_reduce_failed: " + repr(e)}))
+            # Snapshot-then-flush like the other non-continuing exits: the fork
+            # above will sit out its TTL and degrade, and the arms that DID land
+            # are the only evidence that run has.
+            await self._error_span(stage.name, join.get("corr"),
+                                   "fanin_reduce_failed: " + repr(e))
             await self._publish_join_error(stage, join)
-            await self._envelopes.flush(join["addr"] + ":")
+            await self._release_join(join)
             return
         payload = dict(reduced) if isinstance(reduced, dict) else {"result": reduced}
         corr = join.get("corr") or ""
@@ -405,13 +551,10 @@ class ForkCoordinator:
                 if ctx.result is None:
                     ctx.result = term
                 else:
-                    await self._tracer.emit(Span.timed(
-                        "stage", corr=corr, parent=stage.name,
-                        t0=self._clock(), t1=self._clock(),
-                        status="error",
-                        attrs={"stage": stage.name,
-                               "error": "fanin_terminal_race: dropping second "
-                                        "terminal (first preserved)"}))
+                    await self._error_span(
+                        stage.name, corr,
+                        "fanin_terminal_race: dropping second terminal "
+                        "(first preserved)")
         await self._envelopes.flush(join["addr"] + ":")  # release this join's parked set
 
     @staticmethod

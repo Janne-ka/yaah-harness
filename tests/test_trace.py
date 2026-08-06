@@ -21,7 +21,8 @@ class _UsageBackend:
     async def complete(self, prompt, *, model=None, **opts):
         on_usage = opts.get("on_usage")
         if on_usage is not None:
-            on_usage({"tokens_in": 10, "tokens_out": 3, "model": model})
+            on_usage({"tokens_in": 10, "tokens_cache_read": 900,
+                      "tokens_cache_write": 40, "tokens_out": 3, "model": model})
         return "done"
 
 
@@ -49,6 +50,74 @@ async def scenario_phase_minimum() -> None:
     assert r["stage"] == "review" and r["status"] == "ok" and r["duration_ms"] == 500.0
     # cost is OFF -> no token leakage into the record
     assert "tokens_in" not in r and "model" not in r
+
+
+async def scenario_phase_projects_retry_cause() -> None:
+    """A stage-error span must project WHY the attempt was rejected — `retry`,
+    `attempt`/`n` and a LENGTH-BOUNDED `error`. Without this the trace can say
+    that a stage retried but never why, so a run that burned four paid model
+    calls on rejected replies is undiagnosable (the M7 ladder_from lesson: an
+    attr missing from the projection is dead in real runs)."""
+    tr = RecordingTracer([PhaseContributor()])
+    long_detail = "not_ok: " + ("x" * 900)
+    await tr.emit(Span(id="e1", corr="run-1", name="stage", parent="p0",
+                       duration_ms=12.0, status="error",
+                       attrs={"stage": "review", "retry": "feedback",
+                              "attempt": 2, "error": long_detail}))
+    r = tr.records[-1]
+    assert r["status"] == "error" and r["stage"] == "review", r
+    assert r["retry"] == "feedback" and r["attempt"] == 2, r
+    # bounded: 500 chars of the detail + the marker, and the HEAD is kept
+    # (the failure code is at the front, where the diagnosis lives)
+    assert r["error"].startswith("not_ok: xxx"), r["error"][:40]
+    assert r["error"] == long_detail[:500] + PhaseContributor.ERROR_TRUNCATED_MARKER, r["error"]
+    assert len(r["error"]) == 500 + len(PhaseContributor.ERROR_TRUNCATED_MARKER), len(r["error"])
+
+    # a short error rides through verbatim — no marker, no clipping
+    await tr.emit(Span(id="e2", corr="run-1", name="stage", status="error",
+                       attrs={"retry": "transient", "n": 1, "error": "boom: overloaded"}))
+    r2 = tr.records[-1]
+    assert r2["error"] == "boom: overloaded", r2
+    assert r2["retry"] == "transient" and r2["n"] == 1, r2
+
+    # a normal (non-error) span is unchanged: no retry keys invented
+    await tr.emit(_model_span())
+    r3 = tr.records[-1]
+    assert "error" not in r3 and "retry" not in r3 and "n" not in r3, r3
+
+
+async def scenario_harness_retry_cause_reaches_the_record() -> None:
+    """e2e over the real attempt loop: the harness's own error note must arrive
+    at a sink as a projected record, not sit dead in span.attrs."""
+    from yaah.core import Failure, NodeConfig, Verdict
+    from yaah.harness import Graph, Stage, Suspended
+
+    class _Nope:
+        async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
+            return input.reply("result", text="nope")
+
+    class _AlwaysFails:
+        async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
+            return Verdict.failed(
+                Failure("not_ok", "y" * 900, "fix it")).to_envelope()
+
+    comms = InProcessComms()
+    comms.register("role:nope", _Nope())
+    comms.register("role:check", _AlwaysFails())
+    tr = RecordingTracer([PhaseContributor()])
+    from yaah.harness import Harness
+    h = Harness(comms, Graph.of(
+        Stage("review", node="role:nope", validators=["role:check"],
+              max_attempts=2, feedback=True, escalate="human")), tracer=tr)
+    outcome = await h.run(Envelope("task", {}))
+    assert isinstance(outcome, Suspended), outcome
+
+    errs = [r for r in tr.records if r.get("name") == "stage" and r.get("status") == "error"]
+    assert errs, "the rejected attempt must be traced: {!r}".format(tr.records)
+    e = errs[0]
+    assert e["stage"] == "review" and e["retry"] == "feedback" and e["attempt"] == 1, e
+    assert e["error"].startswith("not_ok: yyy"), e["error"][:40]
+    assert e["error"].endswith(PhaseContributor.ERROR_TRUNCATED_MARKER), e["error"][-40:]
 
 
 async def scenario_emitter_records_artifact_from_path() -> None:
@@ -91,6 +160,22 @@ async def scenario_cost_is_orthogonal() -> None:
     r = tr.records[-1]
     assert r["tokens_in"] == 800 and r["tokens_out"] == 120 and r["model"] == "claude:sonnet"
     assert r["duration_ms"] == 1200.0  # phase still applies (orthogonal)
+    # a call with NO cache usage keeps the pre-split record shape exactly
+    assert "tokens_cache_read" not in r and "tokens_cache_write" not in r
+
+
+async def scenario_cost_projects_cache_classes_when_present() -> None:
+    """The three INPUT token classes reach the record separately — they bill at
+    different rates (read ~0.1x input, write ~1.25x), so a lumped `tokens_in`
+    is unpriceable. Absent on a non-caching call (asserted above), present here."""
+    tr = RecordingTracer([CostContributor()])
+    await tr.emit(Span(id="m2", corr="run-1", name="model_call",
+                       tokens_in=800, tokens_cache_read=40000,
+                       tokens_cache_write=2000, tokens_out=120,
+                       model="claude:sonnet", status="ok"))
+    r = tr.records[-1]
+    assert r["tokens_in"] == 800, r
+    assert r["tokens_cache_read"] == 40000 and r["tokens_cache_write"] == 2000, r
 
 
 async def scenario_tools_capture() -> None:
@@ -240,6 +325,50 @@ def scenario_aggregate() -> None:
     assert agg["models"]["m1"]["calls"] == 3 and agg["models"]["m2"]["calls"] == 1
 
 
+def scenario_cache_classes_priced_at_their_own_rates() -> None:
+    """A cache-heavy stage must NOT be priced as if every input token were fresh.
+    Cache reads bill ~0.1x the input rate and cache writes ~1.25x; summing the
+    three classes into `tokens_in` (the pre-2026-08 provider behaviour) and
+    pricing that at the full input rate inflated long agentic stages several-fold
+    — the exact axis cost rankings are made on."""
+    from yaah.trace.aggregate import aggregate, cost_usd
+
+    price = {"m1": {"input": 3.0, "output": 15.0}}   # $/1k
+    # 1k fresh + 100k cache-read + 10k cache-write + 1k out
+    fresh, read, write, out = 1000, 100000, 10000, 1000
+    got = cost_usd("m1", fresh, out, price,
+                   tokens_cache_read=read, tokens_cache_write=write)
+    expected = 3.0 + 100 * 0.3 + 10 * 3.75 + 15.0        # 3 + 30 + 37.5 + 15
+    assert abs(got - expected) < 1e-9, got
+    # the OLD lumped arithmetic (all 111k input at the full rate) is 3.5x higher
+    lumped = cost_usd("m1", fresh + read + write, out, price)
+    assert abs(lumped - (333.0 + 15.0)) < 1e-9, lumped
+    assert lumped > got * 3, (lumped, got)
+
+    # a map may state explicit per-1k cache rates instead of the derived ones
+    explicit = {"m1": {"input": 3.0, "output": 15.0,
+                       "cache_read": 0.3, "cache_write": 6.0}}   # 1h-TTL write = 2x
+    assert abs(cost_usd("m1", fresh, out, explicit,
+                        tokens_cache_read=read, tokens_cache_write=write)
+               - (3.0 + 30.0 + 60.0 + 15.0)) < 1e-9
+
+    # BACK-COMPAT: a pre-split record carries no cache fields -> priced exactly
+    # as before (everything in tokens_in at the full input rate; an upper bound)
+    old = [{"name": "model_call", "corr": "r1", "model": "m1",
+            "tokens_in": fresh + read + write, "tokens_out": out}]
+    assert abs(aggregate(old, price_map=price)["totals"]["cost_usd"] - lumped) < 1e-9
+
+    # ...and a split record prices at the corrected total, with the cache classes
+    # rolled up so the operator can see the hit rate behind the $ figure
+    new = [{"name": "model_call", "corr": "r1", "model": "m1",
+            "tokens_in": fresh, "tokens_cache_read": read,
+            "tokens_cache_write": write, "tokens_out": out}]
+    t = aggregate(new, price_map=price)["totals"]
+    assert abs(t["cost_usd"] - expected) < 1e-9, t
+    assert t["tokens_in"] == fresh, t                      # uncached input only
+    assert t["tokens_cache_read"] == read and t["tokens_cache_write"] == write, t
+
+
 async def scenario_console_sink() -> None:
     import io
 
@@ -366,6 +495,9 @@ async def scenario_emit_through_harness() -> None:
     assert stage["stage"] == "s" and stage["status"] == "ok"
     model = next(r for r in tr.records if r["name"] == "model_call")
     assert model["tokens_in"] == 10 and model["tokens_out"] == 3  # cost bridge fired
+    # the cached-input classes survive the bridge -> span -> record path too
+    assert model["tokens_cache_read"] == 900, model
+    assert model["tokens_cache_write"] == 40, model
     # the model_call's parent chains under the run (same corr)
     assert model["corr"] == stage["corr"]
 
@@ -410,8 +542,11 @@ async def scenario_cost_off_skips_gathering() -> None:
 
 async def main() -> None:
     await scenario_phase_minimum()
+    await scenario_phase_projects_retry_cause()
+    await scenario_harness_retry_cause_reaches_the_record()
     await scenario_emitter_records_artifact_from_path()
     await scenario_cost_is_orthogonal()
+    await scenario_cost_projects_cache_classes_when_present()
     await scenario_tools_capture()
     await scenario_drain_by_corr()
     await scenario_null_tracer_off()
@@ -421,6 +556,7 @@ async def main() -> None:
     await scenario_envelope_tracer_caps_buffer_with_truncated_marker()
     await scenario_envelope_tracer_satisfies_tracer_protocol()
     scenario_aggregate()
+    scenario_cache_classes_priced_at_their_own_rates()
     await scenario_console_sink()
     await scenario_file_sink_appends()
     await scenario_langfuse_sink_mapping()

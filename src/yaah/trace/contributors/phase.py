@@ -19,6 +19,22 @@ from ..span import Span
 class PhaseContributor(TraceContributor):
     name = "phase"
 
+    #: Bound on the projected `error` detail. `error` is the ONE free-text attr
+    #: in this projection (every other key is an identity, a key list, or a
+    #: number), and trace records are line-oriented JSONL — one unbounded
+    #: validator message (a schema dump, a diffed payload, a stack) would blow a
+    #: single line to megabytes and make the file hostile to `tail`/`jq`/grep.
+    #: Bounded here, at the projection, so no sink has to defend itself.
+    ERROR_MAX = 500
+    ERROR_TRUNCATED_MARKER = "...[truncated]"
+
+    @classmethod
+    def _bounded_error(cls, value: Any) -> str:
+        text = value if isinstance(value, str) else str(value)
+        if len(text) <= cls.ERROR_MAX:
+            return text
+        return text[:cls.ERROR_MAX] + cls.ERROR_TRUNCATED_MARKER
+
     def contribute(self, span: Span) -> Dict[str, Any]:
         out: Dict[str, Any] = {"status": span.status, "duration_ms": span.duration_ms}
         # Progress-UX attrs the progress sink renders: the stage name, plus the
@@ -41,11 +57,25 @@ class PhaseContributor(TraceContributor):
         # persists with EMPTY buckets and idempotency is a silent no-op (a retried
         # resume would re-undo everything — design-eval #1). Buckets are identities
         # only (stage/occurrence/node), consistent with the keys-only trace contract.
+        # The RETRY-CAUSE trio on a stage-error span (`retry`/`attempt`/`n`,
+        # plus the bounded `error` below): the harness's attempt loop already
+        # notes WHY each rejected attempt was rejected, but without them in this
+        # projection a run that burned N paid model calls on rejected replies
+        # traces as N anonymous error spans — the trace can say THAT a stage
+        # retried, never why, which is the first question of any postmortem.
+        # `retry` is the kind ("transient" | "retry" | "feedback"); `attempt`
+        # counts against `max_attempts`; `n` counts against the SEPARATE
+        # transient-fault budget (`error_retries`), which is why both exist.
         for k in ("stage", "awaiting", "artifact", "ladder_from", "ladder_trigger",
                   "resumed", "decision_keys", "approver", "decision_diff",
                   "effects", "effects_truncated", "effects_head",
                   "rolled_back", "skipped_costly", "impossible", "failed",
-                  "not_attempted", "skipped"):
+                  "not_attempted", "skipped",
+                  "retry", "attempt", "n"):
             if k in span.attrs:
                 out[k] = span.attrs[k]
+        # Free text -> bounded (see ERROR_MAX). Everything above is an identity,
+        # a key list, or a number and needs no bound.
+        if "error" in span.attrs:
+            out["error"] = self._bounded_error(span.attrs["error"])
         return out

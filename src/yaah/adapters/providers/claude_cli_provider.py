@@ -452,12 +452,23 @@ def _prompt_from_messages(messages: List[Dict[str, Any]], system: Optional[str])
 
 
 def _map_usage(u: Dict[str, Any], model: Optional[str]) -> Dict[str, Any]:
-    """Map claude's raw usage dict (input/cache/output token counts) to the yaah
-    cost-bridge shape {tokens_in, tokens_out, model}. tokens_in sums the plain
-    input plus both cache-read and cache-creation input tokens."""
+    """Map claude's raw usage dict to the yaah cost-bridge shape
+    {tokens_in, tokens_cache_read, tokens_cache_write, tokens_out, model}.
+
+    The three INPUT classes stay SEPARATE because they bill at different rates
+    (cache read ~0.1x the input rate, cache write ~1.25x). Summing them into one
+    `tokens_in` — what this did until 2026-08 — then pricing the sum at the full
+    input rate inflated long agentic stages several-fold, worst exactly where
+    caching works best. `tokens_in` keeps its back-compat meaning: the tokens
+    priced at the plain input rate (claude's `input_tokens` is already
+    cache-exclusive, so no subtraction is needed here).
+
+    The field names are PROVIDER-AGNOSTIC (`tokens_cache_read`/`_write`, not
+    claude's `cache_read_input_tokens`/`cache_creation_input_tokens`) — the same
+    contract litellm_provider reports and yaah.trace.aggregate prices."""
     u = u or {}
-    tokens_in = sum(int(u.get(k, 0) or 0) for k in
-                    ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
-    return {"tokens_in": tokens_in,
+    return {"tokens_in": int(u.get("input_tokens", 0) or 0),
+            "tokens_cache_read": int(u.get("cache_read_input_tokens", 0) or 0),
+            "tokens_cache_write": int(u.get("cache_creation_input_tokens", 0) or 0),
             "tokens_out": int(u.get("output_tokens", 0) or 0),
             "model": model}
