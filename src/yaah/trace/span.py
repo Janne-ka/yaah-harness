@@ -30,9 +30,9 @@ class Span:
     t_end: float = 0.0
     duration_ms: float = 0.0
     # cost (filled only when the `cost` capture is enabled — see R4 on_usage).
-    # The three INPUT classes are separate because they bill at different rates:
-    # tokens_in = plain (uncached) input, tokens_cache_read ~0.1x that rate,
-    # tokens_cache_write ~1.25x. yaah.trace.aggregate.cost_usd prices each.
+    # The three INPUT classes are separate because they bill at different rates
+    # (tokens_in = plain uncached input); yaah.trace.aggregate.cost_usd holds the
+    # multipliers and prices each.
     tokens_in: int = 0
     tokens_cache_read: int = 0
     tokens_cache_write: int = 0

@@ -481,6 +481,39 @@ async def claude_stream_nonzero_exit_yields_error_event() -> None:
     assert "exit 2" in err["message"] or "auth failed" in err["message"], err
 
 
+async def claude_stream_error_keeps_the_end_of_stderr() -> None:
+    # A failing CLI writes its banner and warnings first and the line that
+    # actually killed it LAST, so the error event must keep the TAIL of stderr —
+    # keeping the head reports the startup noise and drops the diagnosis.
+    from yaah.trace.bounded_text import TRUNCATED_MARKER, bounded
+    from yaah.trace.contributors.phase import PhaseContributor
+
+    noise = "warming up\n" * 400                     # well over the bound
+    fatal = "FATAL: credit balance too low"
+    proc = FakeStreamProc(returncode=1, stdout_lines=[],
+                          stderr=(noise + fatal).encode())
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
+    events = await _drain(be.stream({"messages": [{"role": "user", "content": "x"}]}))
+    msg = [e for e in events if e["type"] == "error"][0]["message"]
+    assert msg.endswith(fatal), msg[-80:]            # the diagnosis survived
+    assert TRUNCATED_MARKER in msg, msg[:80]         # ...and the cut is marked
+
+    # STACKED BOUNDS: this message becomes the harness's failure detail, which
+    # the phase capture re-bounds at ERROR_MAX. The provider's budget must leave
+    # room for the "claude exit N: " prefix AND the marker, or the outer bound
+    # silently eats the inner one's marker and the message reads as complete.
+    assert len(msg) <= PhaseContributor.ERROR_MAX, len(msg)
+    rebounded = bounded(msg, PhaseContributor.ERROR_MAX)
+    assert rebounded == msg, "the downstream re-bound must be a no-op here"
+
+    # a short stderr is untouched — no marker, no clipping
+    short = FakeStreamProc(returncode=1, stdout_lines=[], stderr=b"auth failed")
+    be2 = ClaudeCliProvider(spawn=_stream_spawner(short, []))
+    ev = await _drain(be2.stream({"messages": [{"role": "user", "content": "x"}]}))
+    short_msg = [e for e in ev if e["type"] == "error"][0]["message"]
+    assert short_msg == "claude exit 1: auth failed", short_msg
+
+
 async def claude_stream_passes_prompt_via_stdin() -> None:
     # The user message from context becomes the prompt on stdin. Multi-message
     # contexts collapse to the most recent user message — claude -p has no
@@ -891,6 +924,7 @@ async def main() -> None:
         claude_stream_thinking_blocks_skipped,
         claude_stream_malformed_lines_skipped,
         claude_stream_nonzero_exit_yields_error_event,
+    claude_stream_error_keeps_the_end_of_stderr,
         claude_stream_passes_prompt_via_stdin,
         claude_stream_prepends_system_and_joins_content_blocks,
         claude_stream_handles_none_stdin_without_crashing,

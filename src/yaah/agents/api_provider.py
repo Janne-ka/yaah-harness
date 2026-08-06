@@ -97,6 +97,39 @@ class _ErrorEvent(TypedDict):
 StreamEvent = Dict[str, Any]
 
 
+# --- Usage: the cost bridge's payload ---------------------------------------
+
+class Usage(TypedDict, total=False):
+    """One model call's token usage, in the ENGINE's provider-agnostic spelling —
+    what a backend hands the `on_usage` callback (the R4 cost bridge) and what
+    Agent accumulates into a model_call Span.
+
+    The input side is THREE classes, not one, because they bill at three
+    different rates: `tokens_in` is fresh (uncached) input, `tokens_cache_read`
+    is prompt-cache replay, `tokens_cache_write` is input written into the
+    cache. The multipliers and the arithmetic live in
+    `yaah.trace.aggregate` (CACHE_READ_MULT / CACHE_WRITE_MULT / cost_usd);
+    lumping the three into `tokens_in` prices a cache-heavy agentic stage
+    several-fold high.
+
+    Provider dialects differ on whether their native prompt-token count already
+    INCLUDES the cache classes — each backend does that arithmetic before it
+    reports, so this shape is always the split one. `model` is the
+    backend-RESOLVED name (None when the backend reports none; the caller falls
+    back to the requested model)."""
+    tokens_in: int
+    tokens_cache_read: int
+    tokens_cache_write: int
+    tokens_out: int
+    model: Optional[str]
+
+
+#: The four numeric Usage keys, in report order — the accumulate/iterate list, so
+#: adding a token class is one edit here rather than a grep across backends.
+USAGE_TOKEN_KEYS = ("tokens_in", "tokens_cache_read", "tokens_cache_write",
+                    "tokens_out")
+
+
 # --- Content-block & message shapes -----------------------------------------
 
 class TextBlock(TypedDict):

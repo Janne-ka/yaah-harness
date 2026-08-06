@@ -12,7 +12,11 @@ langfuse isn't installed (the default dev env).
 
 It asserts the SURFACE only (no live client is constructed) — emitting would spin
 up the SDK's background OTLP exporter. The mapping logic is covered offline by
-scenario_langfuse_v4_mapping / scenario_langfuse_sink_mapping in test_trace.py.
+scenario_langfuse_v4_mapping / scenario_langfuse_sink_mapping in test_trace.py,
+including the prompt-cache split: v4's `usage_details` is an open map that takes
+the anthropic-dialect cache keys, v2's `usage` is a typed model that has no field
+for them, so the v2 path folds cache into `input`. Don't "fix" that by posting
+cache keys into the v2 model — nothing offline can prove it accepts them.
 
 Run: cd yaah && PYTHONPATH=src python3 tests/test_langfuse_integration.py
 

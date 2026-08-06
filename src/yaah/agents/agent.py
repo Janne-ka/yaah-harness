@@ -15,7 +15,7 @@ import json
 import re
 import secrets
 import time
-from typing import Any, Optional, Union
+from typing import Any, Dict, Optional, Union
 
 from ..comms import Comms
 from ..core import Node, Envelope, Failure, NodeConfig, Verdict
@@ -342,19 +342,18 @@ class Agent(Node):
         if self._mcp is not None:  # give the model its MCP servers (resolved if a ref)
             opts["mcp"] = await self._resolve_mcp()
         # Cost bridge (R4): usage lives in the backend, the span is built here, so
-        # the agent passes an on_usage callback the real backends call back with
-        # {tokens_in, tokens_out, model}. Gathered ONLY when the cost capture is on
-        # (a disabled capture costs nothing) — see the contributor/capture design.
+        # the agent passes an on_usage callback the real backends call back with an
+        # api_provider.Usage. Gathered ONLY when the cost capture is on (a disabled
+        # capture costs nothing) — see the contributor/capture design.
         # ACCUMULATES across calls (bug review M3): a multi-turn tool loop calls back
         # once per turn, so we SUM tokens (dict.update would keep only the last turn).
-        usage = {"tokens_in": 0, "tokens_cache_read": 0, "tokens_cache_write": 0,
-                 "tokens_out": 0, "model": None}
+        usage: Dict[str, Any] = dict.fromkeys(_ap.USAGE_TOKEN_KEYS, 0)
+        usage["model"] = None
 
         def _on_usage(u: dict) -> None:
-            # the cached-input classes are OPTIONAL in the bridge shape (a
-            # backend that reports no caching just omits them) — never assume
-            for k in ("tokens_in", "tokens_cache_read", "tokens_cache_write",
-                      "tokens_out"):
+            # every token class is OPTIONAL in the bridge shape (a backend that
+            # reports no caching may omit the cache keys) — never assume
+            for k in _ap.USAGE_TOKEN_KEYS:
                 usage[k] += u.get(k, 0) or 0
             if u.get("model"):
                 usage["model"] = u["model"]

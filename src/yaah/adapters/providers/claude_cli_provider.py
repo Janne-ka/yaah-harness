@@ -35,7 +35,8 @@ import os
 import re
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Sequence
 
-from ...agents.api_provider import ApiProvider, Context, StreamEvent
+from ...agents.api_provider import ApiProvider, Context, StreamEvent, Usage
+from ...trace.bounded_text import bounded
 
 # Config-named-executable trust (BUG-629: an env-var-named binary was executed
 # with --allow-dangerously-skip-permissions). The binary is config — and config
@@ -73,6 +74,14 @@ _DANGEROUS_FLAGS = frozenset({
 # the reader an 8 MiB per-line buffer so a whole-file line fits: one jsonl
 # line == one whole authored file.
 _STREAM_LINE_LIMIT = 8 * 2 ** 20  # 8 MiB per stream-json line
+
+# How much of a failing child's stderr rides the error event. Deliberately BELOW
+# PhaseContributor.ERROR_MAX (500), because that is where this text ends up: the
+# harness notes the whole message as the failure detail and the phase capture
+# re-bounds it at ERROR_MAX. Budget it at 500 and the "claude exit N: " prefix
+# pushes the message over, so the downstream bound eats this one's own truncation
+# marker — stack two bounds and the inner one must leave the outer some room.
+_STDERR_MAX = 400
 
 # Inactivity watchdog default — network-cut / stall protection. stream()'s read
 # loop wraps every `proc.stdout.readline()` in asyncio.wait_for(timeout=...): on
@@ -399,7 +408,14 @@ class ClaudeCliProvider(ApiProvider):
                 err_bytes = await proc.stderr.read()
             await proc.wait()
             if proc.returncode != 0:
-                err_text = err_bytes.decode(errors="replace")[:500] if err_bytes else ""
+                # The TAIL of a failing CLI's stderr — the startup banner and any
+                # warnings scroll past, the error that actually killed it is the
+                # last thing written. This message rides into the harness's
+                # failure detail and from there into the trace, so it uses the
+                # one shared bound + marker (see trace.bounded_text) and leaves
+                # ERROR_MAX headroom for the prefix (see _STDERR_MAX).
+                err_text = bounded(err_bytes.decode(errors="replace"),
+                                   _STDERR_MAX, keep="tail") if err_bytes else ""
                 yield {"type": "error",
                        "message": "claude exit {}{}".format(
                            proc.returncode, ": " + err_text if err_text else "")}
@@ -451,17 +467,16 @@ def _prompt_from_messages(messages: List[Dict[str, Any]], system: Optional[str])
     return user_text
 
 
-def _map_usage(u: Dict[str, Any], model: Optional[str]) -> Dict[str, Any]:
-    """Map claude's raw usage dict to the yaah cost-bridge shape
-    {tokens_in, tokens_cache_read, tokens_cache_write, tokens_out, model}.
+def _map_usage(u: Dict[str, Any], model: Optional[str]) -> Usage:
+    """Map claude's raw usage dict to the engine's api_provider.Usage shape.
 
     The three INPUT classes stay SEPARATE because they bill at different rates
-    (cache read ~0.1x the input rate, cache write ~1.25x). Summing them into one
-    `tokens_in` — what this did until 2026-08 — then pricing the sum at the full
-    input rate inflated long agentic stages several-fold, worst exactly where
-    caching works best. `tokens_in` keeps its back-compat meaning: the tokens
-    priced at the plain input rate (claude's `input_tokens` is already
-    cache-exclusive, so no subtraction is needed here).
+    (see yaah.trace.aggregate). Summing them into one `tokens_in` — what this did
+    until 2026-08 — then pricing the sum at the full input rate inflated long
+    agentic stages several-fold, worst exactly where caching works best.
+    `tokens_in` keeps its back-compat meaning: the tokens priced at the plain
+    input rate. Claude's `input_tokens` is already cache-EXCLUSIVE, so no
+    subtraction is needed here (litellm's dialect differs — see that provider).
 
     The field names are PROVIDER-AGNOSTIC (`tokens_cache_read`/`_write`, not
     claude's `cache_read_input_tokens`/`cache_creation_input_tokens`) — the same

@@ -177,6 +177,85 @@ def scenario_cost_summary_unpriced() -> None:
     assert "1 model call" in out and "$" not in out, out
 
 
+def scenario_cost_summary_shows_cached_input() -> None:
+    """The shape that made --cost useless: 1k fresh input against 100k of cache
+    read. `tokens_in` alone reports 1k — 1% of the traffic actually behind the $
+    figure — so the rollup must surface the cached side too. Kept as its own
+    "(+Nk cached)" segment: cached input is not fresh input and must never be
+    summed into the in→out number as if it were."""
+    records = [
+        {"id": "m1", "corr": "r1", "name": "model_call", "parent": "p",
+         "tokens_in": 1000, "tokens_cache_read": 100000, "tokens_cache_write": 0,
+         "tokens_out": 500, "model": "claude:sonnet"},
+    ]
+    out = cost_summary(records)
+    assert "1.0k→500 tokens" in out, out          # fresh input, unchanged
+    assert "(+100.0k cached)" in out, out          # ...and the cached side, visible
+    # both the header rollup and the per-model line carry it
+    assert out.count("(+100.0k cached)") == 2, out
+
+    # priced: the cache read is billed at its own rate, so the $ is NOT the
+    # fresh-only figure and NOT the everything-at-input-rate figure
+    price = {"claude:sonnet": {"input": 3.0, "output": 15.0}}
+    priced = cost_summary(records, price_map=price)
+    assert "$40.500" in priced, priced             # 3.00 fresh + 30.00 read + 7.50 out
+
+    # a run with no caching keeps the line it always had — no empty segment
+    plain = [{"id": "m1", "corr": "r1", "name": "model_call", "parent": "p",
+              "tokens_in": 100, "tokens_cache_read": 0, "tokens_cache_write": 0,
+              "tokens_out": 50, "model": "x"}]
+    assert "cached" not in cost_summary(plain), cost_summary(plain)
+
+
+def scenario_pretty_tree_shows_cached_input() -> None:
+    """Same under-report on the per-run tree: the run header and the model_call
+    line show the cached tokens beside the fresh ones."""
+    records = [
+        {"id": "s1", "corr": "r1", "name": "stage", "parent": "p",
+         "duration_ms": 100.0, "status": "ok", "stage": "draft"},
+        {"id": "m1", "corr": "r1", "name": "model_call", "parent": "s1",
+         "duration_ms": 95.0, "tokens_in": 1000, "tokens_cache_read": 100000,
+         "tokens_cache_write": 0, "tokens_out": 500, "model": "claude:sonnet"},
+    ]
+    out = pretty(records)
+    assert out.count("(+100.0k cached)") == 2, out   # run header + the call line
+    # no caching -> no segment anywhere
+    plain = [dict(records[0]),
+             {"id": "m1", "corr": "r1", "name": "model_call", "parent": "s1",
+              "duration_ms": 95.0, "tokens_in": 10, "tokens_cache_read": 0,
+              "tokens_cache_write": 0, "tokens_out": 5, "model": "x"}]
+    assert "cached" not in pretty(plain), pretty(plain)
+
+
+def scenario_errors_show_retry_cause() -> None:
+    """The retry cause the phase capture projects must reach the operator's
+    error rollup — without it four rejected attempts of one stage read as four
+    anonymous failures. The two counters stay SEPARATE (never "2/4"): `attempt`
+    counts against max_attempts, the retry counter against error_retries."""
+    records = [
+        {"id": "e1", "corr": "r1", "name": "stage", "parent": "p", "stage": "code",
+         "status": "error", "error": "not_ok: missing summary",
+         "retry": "feedback", "attempt": 2},
+        # the transient arm as an ARCHIVED (pre-2026-08) trace spells it — bare
+        # `n`; still rendered, so an old trace file doesn't lose its retry cause
+        {"id": "e2", "corr": "r1", "name": "stage", "parent": "p", "stage": "code",
+         "status": "error", "error": "boom: overloaded", "retry": "transient", "n": 1},
+        # ...and the same thing as it is emitted today
+        {"id": "e3", "corr": "r1", "name": "stage", "parent": "p", "stage": "code",
+         "status": "error", "error": "boom", "retry": "transient",
+         "error_retry_n": 2},
+    ]
+    code, msg = errors_only(records)
+    assert code == 1, msg
+    assert "not_ok: missing summary (feedback, attempt 2)" in msg, msg
+    assert "boom: overloaded (transient, error-retry 1)" in msg, msg
+    assert "boom (transient, error-retry 2)" in msg, msg
+    # an error span carrying no retry attrs gets no empty parens
+    bare = [{"id": "e", "corr": "r1", "name": "stage", "parent": "p",
+             "stage": "x", "status": "error", "error": "nope"}]
+    assert errors_only(bare)[1].rstrip().endswith("nope"), errors_only(bare)[1]
+
+
 def scenario_cost_summary_no_calls() -> None:
     """No model_call records -> a clear placeholder, exit-friendly."""
     records = [
@@ -211,6 +290,9 @@ def main() -> None:
     scenario_keep_last_runs_filters_by_corr()
     scenario_cost_summary_with_prices()
     scenario_cost_summary_unpriced()
+    scenario_cost_summary_shows_cached_input()
+    scenario_pretty_tree_shows_cached_input()
+    scenario_errors_show_retry_cause()
     scenario_cost_summary_no_calls()
     scenario_keep_corr_zooms_to_one_run()
     print("ok")

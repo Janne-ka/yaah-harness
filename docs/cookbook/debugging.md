@@ -206,17 +206,24 @@ which model, from which stage, and how long" view — a cross-run cousin of
 
 A `model_call` record splits INPUT into three classes, because they bill at
 three rates: `tokens_in` (fresh input, the `"input"` rate), `tokens_cache_read`
-(~0.1x that) and `tokens_cache_write` (~1.25x). `--cost` / `--counts` price each
-separately; a price-map row can override the two derived cache rates with an
-explicit `"cache_read"` / `"cache_write"` per-1k rate (do that for 1h-TTL cache
-writes, which bill at 2x — the trace records no TTL).
+and `tokens_cache_write` (multiples of it — the multipliers are
+`CACHE_READ_MULT` / `CACHE_WRITE_MULT` in `yaah.trace.aggregate`). `--cost` /
+`--counts` price each separately, and show the cached tokens beside the fresh
+ones (`--cost` as a `(+Nk cached)` segment, `--counts` as `cache_read` /
+`cache_write` columns — both appear only when a run actually cached). A
+price-map row can override the two derived cache rates with an explicit
+`"cache_read"` / `"cache_write"` per-1k rate (do that for 1h-TTL cache writes,
+which bill at 2x — the trace records no TTL).
 
 > **Old traces are an upper bound, not a wrong number.** Records written before
 > 2026-08 carry only `tokens_in`, and it is the SUM of all three classes, so the
 > whole prompt prices at the full input rate. On a long, cache-heavy agentic
 > stage that over-reports spend several-fold. Such traces cannot be re-priced —
 > the split the arithmetic needs was never recorded — so read their `$` as a
-> ceiling and don't compare them against a post-fix run.
+> ceiling and don't compare them against a post-fix run. Records written since
+> carry both cache keys ALWAYS, zeros included, so their absence is what marks a
+> record as pre-split: `python -m yaah.trace.aggregate` reports how many a
+> rollup mixed in as `totals.unpriced_upper_bound_calls`.
 
 Use when: you want the per-stage/per-model call breakdown for a cost or latency
 story, or to confirm a laddered stage escalated as expected (the `(ladder)` row

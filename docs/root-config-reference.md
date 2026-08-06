@@ -150,13 +150,16 @@ only, never model text). `stats_file` takes a `price_map` (tokens→$).
 
 **What `cost` projects.** `model`, `model_ref`, `tokens_out`, and the input
 tokens split into the three classes that bill at different rates: `tokens_in`
-(fresh, uncached input), `tokens_cache_read` (~0.1x the input rate) and
-`tokens_cache_write` (~1.25x). The two cache keys appear only when non-zero, so
-a backend that reports no prompt-cache usage writes the record shape it always
-did. Price-map rows are `{"input": usd_per_1k, "output": usd_per_1k}`; the two
-cache rates derive from `input` via those multipliers unless a row states an
-explicit `"cache_read"` / `"cache_write"` per-1k rate (needed for e.g. 1h-TTL
-cache writes, which bill at 2x — the record carries no TTL).
+(fresh, uncached input), `tokens_cache_read` and `tokens_cache_write`. Both cache
+keys are ALWAYS written, zeros included — their absence is what identifies a
+record written before the split (2026-08), whose lumped `tokens_in` prices as an
+upper bound; `python -m yaah.trace.aggregate` counts those as
+`totals.unpriced_upper_bound_calls`. Price-map rows are `{"input": usd_per_1k,
+"output": usd_per_1k}`; the two cache rates derive from `input` via the
+multipliers in `yaah.trace.aggregate` (`CACHE_READ_MULT` / `CACHE_WRITE_MULT`)
+unless a row states an explicit `"cache_read"` / `"cache_write"` per-1k rate
+(needed for e.g. 1h-TTL cache writes, which bill at 2x — the record carries no
+TTL).
 Cross-field checks reject silently-dropped config (e.g. `sinks` under
 `mode: none`). `--explain` shows the effective trace block.
 
@@ -170,14 +173,29 @@ payload KEYS and an identity only, never decision VALUES),
 the saga buckets `rolled_back`/`skipped_costly`/`impossible`/`failed`/
 `not_attempted`/`skipped`, and the **retry cause** on a stage-error span:
 `retry` (kind — `transient` | `retry` | `feedback`), `attempt` (which attempt,
-against `max_attempts`), `n` (which transient retry, against the separate
-`error_retries` budget), and `error` (the failing verdict's detail).
+against `max_attempts`), `error_retry_n` (which transient retry, against the
+separate `error_retries` budget), and `error` (the failing verdict's detail).
+`yaah trace --pretty` / `--errors-only` render these beside each error line, and
+`yaah trace` (JSON) carries them on each `errors[]` entry. Traces written before
+2026-08 spell the counter `n`; the readers accept that legacy key and report it
+as `error_retry_n`, but nothing emits it any more.
 `error` is the only free-text value here and is therefore **truncated at 500
 chars** with a trailing `...[truncated]` marker: trace files are line-oriented
 JSONL, and one unbounded validator message (a schema dump, a diffed payload)
 would blow a single line to megabytes and make the file hostile to
 `tail`/`jq`/grep. Read the full message from the stage's own artifact or the
 run's failure output; the trace carries the diagnostic, not the corpus.
+
+> **A trace file inherits the sensitivity class of its run's payloads.** Every
+> other projected attr is a key, an identity, or a number — `error` is the
+> documented exception: a rejecting validator routinely QUOTES the payload it
+> rejected, so payload VALUES (bounded at 500 chars, but values) land in
+> `trace.jsonl`, in whatever `sinks` you configured (a third-party observability
+> backend included), and — under `mode: "envelope"` — on the wire records that
+> ride replies between nodes. That is deliberate: the detail is the whole
+> postmortem value of the retry cause. Treat trace artifacts of a run that
+> handled regulated or personal data with the same care as the data itself, and
+> pick sinks accordingly.
 
 Pipelines in which any node declares `rollback:` — or arm the auto-saga
 (`graph.on_failure: "rollback"`, ADR-0009: automatic unwind of completed stages

@@ -436,12 +436,12 @@ async def litellm_stream_reports_usage_to_cost_bridge() -> None:
 
 
 async def litellm_usage_splits_cached_input_classes() -> None:
-    # The three INPUT classes bill at different rates (cache read ~0.1x the
-    # input rate, cache write ~1.25x), so they must reach the cost bridge
-    # SEPARATELY under the provider-agnostic names claude_cli_provider also
-    # reports. litellm's prompt_tokens is cache-INCLUSIVE (OpenAI counts
-    # cached_tokens inside it; the anthropic shim sums all three into it), so
-    # tokens_in is the remainder after subtracting both cache classes.
+    # The three INPUT classes bill at different rates (see yaah.trace.aggregate),
+    # so they must reach the cost bridge SEPARATELY under the provider-agnostic
+    # names claude_cli_provider also reports. litellm's prompt_tokens is
+    # cache-INCLUSIVE (OpenAI counts cached_tokens inside it; the anthropic shim
+    # sums all three into it), so tokens_in is the remainder after subtracting
+    # both cache classes.
     got = {}
 
     async def stub(**kwargs):
@@ -475,9 +475,15 @@ async def litellm_usage_splits_cached_input_classes() -> None:
     assert got2["tokens_in"] == 904 and got2["tokens_cache_read"] == 4096, got2
     assert got2["tokens_cache_write"] == 0, got2
 
-    # a provider that reports a cache count NOT folded into prompt_tokens must
-    # never drive tokens_in negative (which would UNDER-bill)
-    got3 = {}
+
+async def litellm_usage_handles_cache_exclusive_dialect() -> None:
+    # Not every dialect folds the cache classes into prompt_tokens — litellm's
+    # shim has flipped before. When the subtraction goes NEGATIVE, prompt_tokens
+    # already IS the fresh count, so report it as-is: clamping the remainder to 0
+    # (the old behaviour) bills every fresh input token on such a provider at $0,
+    # silently and forever. Over-billing 10 tokens is recoverable; a $0 line item
+    # that nobody can see is not.
+    got = {}
 
     async def stub_exclusive(**kwargs):
         return {"model": "weird",
@@ -485,11 +491,28 @@ async def litellm_usage_splits_cached_input_classes() -> None:
                 "usage": {"prompt_tokens": 10, "completion_tokens": 1,
                           "cache_read_input_tokens": 9000}}
 
-    be3 = LiteLLMProvider(acompletion=stub_exclusive)
-    async for _ in be3.stream({"messages": [], "model": "weird"},
-                              on_usage=lambda u: got3.update(u)):
+    be = LiteLLMProvider(acompletion=stub_exclusive)
+    async for _ in be.stream({"messages": [], "model": "weird"},
+                             on_usage=lambda u: got.update(u)):
         pass
-    assert got3["tokens_in"] == 0 and got3["tokens_cache_read"] == 9000, got3
+    assert got["tokens_in"] == 10, got                    # the fresh count, not 0
+    assert got["tokens_cache_read"] == 9000, got
+
+    # the exact-zero boundary stays on the inclusive reading: a fully-cached
+    # prompt (prompt_tokens == cache_read) really did have no fresh input
+    got2 = {}
+
+    async def stub_all_cached(**kwargs):
+        return {"model": "m",
+                "choices": [{"message": {"content": "x"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 9000, "completion_tokens": 1,
+                          "cache_read_input_tokens": 9000}}
+
+    be2 = LiteLLMProvider(acompletion=stub_all_cached)
+    async for _ in be2.stream({"messages": [], "model": "m"},
+                              on_usage=lambda u: got2.update(u)):
+        pass
+    assert got2["tokens_in"] == 0 and got2["tokens_cache_read"] == 9000, got2
 
 
 async def litellm_stream_assembles_chunked_tool_calls() -> None:
@@ -651,6 +674,7 @@ async def main() -> None:
         litellm_stream_true_yields_incremental_deltas,
         litellm_stream_reports_usage_to_cost_bridge,
         litellm_usage_splits_cached_input_classes,
+    litellm_usage_handles_cache_exclusive_dialect,
         litellm_stream_reports_resolved_model_like_single_shot,
         litellm_stream_merges_author_stream_options,
         litellm_stream_assembles_chunked_tool_calls,

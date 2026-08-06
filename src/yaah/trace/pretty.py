@@ -38,6 +38,23 @@ def _fmt_cost(usd: float) -> str:
     return "${:.3f}".format(usd)
 
 
+def _cached(r: Dict[str, Any]) -> int:
+    """A record's (or a counts row's) total cached input tokens — read + write.
+    The two classes are priced apart (aggregate does that); for the human views
+    one "how much of the input was cached" number is what an operator scans."""
+    return (r.get("tokens_cache_read", 0) or 0) + (r.get("tokens_cache_write", 0) or 0)
+
+
+def _cached_segment(n: int) -> str:
+    """The cache side of a token count, rendered as `(+40.0k cached)` — empty
+    when there was none. Kept as a separate SEGMENT, never folded into in→out:
+    cached input is real traffic behind the $ number, but it is not fresh input
+    and must never read as if it were."""
+    if n <= 0:
+        return ""
+    return "(+{} cached)".format(_fmt_tokens(n))
+
+
 def _status_glyph(status: Optional[str]) -> str:
     if status == "ok":
         return "✓"
@@ -95,6 +112,7 @@ def _render_run(corr: str, records: List[Dict[str, Any]],
     total_ms = sum(s.get("duration_ms", 0.0) for s in stages)
     tokens_in = sum(m.get("tokens_in", 0) for m in model_calls)
     tokens_out = sum(m.get("tokens_out", 0) for m in model_calls)
+    tokens_cached = sum(_cached(m) for m in model_calls)
     total_cost = sum(record_cost_usd(m, price_map) for m in model_calls)
 
     def _plural(n: int, noun: str) -> str:
@@ -109,6 +127,8 @@ def _render_run(corr: str, records: List[Dict[str, Any]],
     if tokens_in or tokens_out:
         header_bits.append("{}→{} tokens".format(_fmt_tokens(tokens_in),
                                                   _fmt_tokens(tokens_out)))
+    if tokens_cached:
+        header_bits.append(_cached_segment(tokens_cached))
     cost_str = _fmt_cost(total_cost)
     if cost_str:
         header_bits.append(cost_str)
@@ -149,6 +169,9 @@ def _render_run(corr: str, records: List[Dict[str, Any]],
                          _fmt_ms(child.get("duration_ms", 0.0)),
                          "{}→{} tokens".format(_fmt_tokens(child.get("tokens_in", 0)),
                                                _fmt_tokens(child.get("tokens_out", 0)))]
+                ccached = _cached_segment(_cached(child))
+                if ccached:
+                    cbits.append(ccached)
                 ccost = _fmt_cost(record_cost_usd(child, price_map))
                 if ccost:
                     cbits.append(ccost)
@@ -161,10 +184,32 @@ def _render_run(corr: str, records: List[Dict[str, Any]],
     return lines
 
 
+def _retry_cause(e: Dict[str, Any]) -> str:
+    """The retry cause the phase capture projects onto a stage-error span,
+    rendered as ` (feedback, attempt 2, error-retry 1)` — empty when it carried
+    none.
+    Without it four rejected attempts of one stage read as four anonymous
+    failures, which is the first question of any postmortem. The two counters
+    are kept SEPARATE (not "2/4"): `attempt` counts against `max_attempts`,
+    the retry counter against the distinct `error_retries` budget."""
+    bits: List[str] = []
+    if e.get("retry"):
+        bits.append(str(e["retry"]))
+    if e.get("attempt") is not None:
+        bits.append("attempt {}".format(e["attempt"]))
+    # `error_retry_n` is the emitted key; bare `n` is the pre-2026-08 spelling,
+    # read so an archived trace still renders its retry cause.
+    retry_n = e.get("error_retry_n", e.get("n"))
+    if retry_n is not None:
+        bits.append("error-retry {}".format(retry_n))
+    return " ({})".format(", ".join(bits)) if bits else ""
+
+
 def _render_errors(records: List[Dict[str, Any]]) -> List[str]:
     """One-line-per-error rollup at the end. An error is any span whose status
-    isn't ok/suspended/None; the message names the run, stage, and detail so
-    the operator knows where to look without scrolling back."""
+    isn't ok/suspended/None; the message names the run, stage, detail and (when
+    projected) the retry cause, so the operator knows where to look without
+    scrolling back."""
     errs: List[Dict[str, Any]] = []
     for r in records:
         st = r.get("status")
@@ -177,7 +222,8 @@ def _render_errors(records: List[Dict[str, Any]]) -> List[str]:
         corr = e.get("corr", "?")
         stage = e.get("stage") or e.get("attrs", {}).get("stage") or e.get("name") or "?"
         detail = e.get("error") or e.get("detail") or e.get("status") or ""
-        lines.append('  - run {} stage "{}": {}'.format(corr, stage, detail))
+        lines.append('  - run {} stage "{}": {}{}'.format(corr, stage, detail,
+                                                          _retry_cause(e)))
     return lines
 
 
@@ -187,7 +233,9 @@ def cost_summary(records: Iterable[Dict[str, Any]],
     computes the same numbers in JSON; this is the view operators read at the
     terminal when they want "how much did this cost". $ shown only when a
     price-map is provided — tokens-only otherwise (cost is opt-in, never
-    guessed). PURE."""
+    guessed). Cached input rides as its own "(+Nk cached)" segment, present only
+    when there was some — the in→out figure counts FRESH input, so on a
+    cache-heavy run it alone understates the traffic behind the $. PURE."""
     rec_list = list(records)
     calls = [r for r in rec_list if r.get("name") == "model_call"]
     if not calls:
@@ -195,11 +243,17 @@ def cost_summary(records: Iterable[Dict[str, Any]],
 
     total_in = sum(r.get("tokens_in", 0) for r in calls)
     total_out = sum(r.get("tokens_out", 0) for r in calls)
+    total_cached = sum(_cached(r) for r in calls)
     total_cost = sum(record_cost_usd(r, price_map) for r in calls)
 
     head_bits = ["{} model call{}".format(len(calls),
                                            "" if len(calls) == 1 else "s"),
                  "{}→{} tokens".format(_fmt_tokens(total_in), _fmt_tokens(total_out))]
+    # cached input shown only when there IS some — a non-caching run's rollup
+    # keeps the line it always had (and on a cache-heavy run the in→out figure
+    # alone under-reports the traffic ~100x)
+    if total_cached:
+        head_bits.append(_cached_segment(total_cached))
     cost_str = _fmt_cost(total_cost)
     if cost_str:
         head_bits.append(cost_str)
@@ -215,10 +269,11 @@ def cost_summary(records: Iterable[Dict[str, Any]],
     for r in calls:
         m = r.get("model") or "?"
         d = per_model.setdefault(m, {"calls": 0, "tokens_in": 0, "tokens_out": 0,
-                                     "cost_usd": 0.0})
+                                     "cached": 0, "cost_usd": 0.0})
         d["calls"] += 1
         d["tokens_in"] += r.get("tokens_in", 0)
         d["tokens_out"] += r.get("tokens_out", 0)
+        d["cached"] += _cached(r)
         d["cost_usd"] += record_cost_usd(r, price_map)
     sort_key = "cost_usd" if total_cost > 0 else "calls"
     rows = sorted(per_model.items(), key=lambda kv: kv[1][sort_key], reverse=True)
@@ -229,6 +284,8 @@ def cost_summary(records: Iterable[Dict[str, Any]],
                     "{} call{}".format(d["calls"], "" if d["calls"] == 1 else "s"),
                     "{}→{} tokens".format(_fmt_tokens(d["tokens_in"]),
                                           _fmt_tokens(d["tokens_out"]))]
+        if d["cached"]:
+            row_bits.append(_cached_segment(d["cached"]))
         c = _fmt_cost(d["cost_usd"])
         if c:
             row_bits.append(c)
@@ -241,7 +298,10 @@ def counts_table(records: Iterable[Dict[str, Any]],
     """Invocation-count report as an aligned table — `yaah trace --counts`. One
     row per (stage, model, ladder rung), the columns the client reads instead of
     hand-rolling stats.json + jq: stage · model · calls · tokens_in · tokens_out
-    · cost · p50 · p95.
+    · cost · p50 · p95, plus cache_read · cache_write when any row has cached
+    input (a cache-heavy stage's tokens_in alone under-reports its traffic ~100x;
+    the two classes stay APART because they price apart, and the columns stay
+    away entirely on a non-caching trace so the common table keeps its width).
 
     Ladder second-rung rows (M7 escalation, records carrying `ladder_from`) are
     marked ' (ladder)' on the model cell and kept as SEPARATE rows — never merged
@@ -265,13 +325,20 @@ def counts_table(records: Iterable[Dict[str, Any]],
     def _model_cell(g: Dict[str, Any]) -> str:
         return g["model_ref"] + (" (ladder)" if g["ladder"] else "")
 
-    headers = ["stage", "model", "calls", "tokens_in", "tokens_out",
-               "cost", "p50", "p95"]
+    show_cache = any(_cached(g) for g in rows)
+    headers = ["stage", "model", "calls", "tokens_in"]
+    if show_cache:
+        headers += ["cache_read", "cache_write"]
+    headers += ["tokens_out", "cost", "p50", "p95"]
     body: List[List[str]] = []
     for g in rows:
-        body.append([g["stage"], _model_cell(g), str(g["calls"]),
-                     str(g["tokens_in"]), str(g["tokens_out"]), _cost_cell(g),
-                     _fmt_ms(g["p50_ms"]), _fmt_ms(g["p95_ms"])])
+        cells = [g["stage"], _model_cell(g), str(g["calls"]), str(g["tokens_in"])]
+        if show_cache:
+            cells += [str(g.get("tokens_cache_read", 0) or 0),
+                      str(g.get("tokens_cache_write", 0) or 0)]
+        cells += [str(g["tokens_out"]), _cost_cell(g),
+                  _fmt_ms(g["p50_ms"]), _fmt_ms(g["p95_ms"])]
+        body.append(cells)
 
     # column widths from header + body; text cols (stage, model) left-aligned,
     # the rest right-aligned so numbers line up for scanning.

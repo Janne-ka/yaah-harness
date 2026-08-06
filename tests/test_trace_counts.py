@@ -23,13 +23,16 @@ from yaah.trace.pretty import counts_table
 
 
 def _model_call(corr, stage, model_ref, *, tin=100, tout=50, dur=100.0,
-                model=None, ladder_from=None):
+                model=None, ladder_from=None, cache_read=0, cache_write=0):
     """Build a model_call record the shape PhaseContributor + CostContributor
     emit (see record.py): duration_ms + status from phase, tokens/model/model_ref
-    from cost, ladder_from from phase-projected span.attrs on the escalation rung."""
+    from cost, ladder_from from phase-projected span.attrs on the escalation rung.
+    The two cache keys are ALWAYS present (zeros included) — their absence is
+    what marks a pre-split record."""
     r = {"id": "m", "corr": corr, "name": "model_call", "parent": "s",
          "duration_ms": dur, "status": "ok",
          "tokens_in": tin, "tokens_out": tout,
+         "tokens_cache_read": cache_read, "tokens_cache_write": cache_write,
          "model": model or model_ref, "model_ref": model_ref, "stage": stage}
     if ladder_from is not None:
         r["ladder_from"] = ladder_from
@@ -179,6 +182,28 @@ def scenario_model_ref_preferred_for_pricing() -> None:
     assert abs(rows[0]["cost_usd"] - 3.0) < 1e-9   # 1000/1000 * 3.0
 
 
+def scenario_cache_columns_appear_only_when_cached() -> None:
+    """The shape that made --counts useless: 1k fresh input against 100k of cache
+    read. A `tokens_in` column alone reports 1% of the traffic behind the row's
+    cost, so a cached run grows cache_read/cache_write columns — RAW integers
+    like the other token columns, and the two classes kept apart because they
+    price apart. A non-caching trace keeps the narrow table it always had."""
+    cached = [_model_call("r1", "draft", "claude:sonnet", tin=1000, tout=500,
+                          cache_read=100000, cache_write=2000)]
+    rows = count_by_stage_model(cached)
+    assert rows[0]["tokens_cache_read"] == 100000, rows[0]
+    assert rows[0]["tokens_cache_write"] == 2000, rows[0]
+    out = counts_table(cached)
+    assert "cache_read" in out and "cache_write" in out, out
+    assert "100000" in out and "2000" in out, out
+    # ...and the fresh-input column still says FRESH, not the sum
+    assert "1000" in out, out
+
+    # no cached tokens anywhere -> the columns stay away entirely
+    plain = counts_table([_model_call("r1", "draft", "claude:sonnet")])
+    assert "cache_read" not in plain and "cache_write" not in plain, plain
+
+
 # ---------------------------------------------------------------- I/O behavior
 
 def scenario_malformed_line_raises_like_existing() -> None:
@@ -213,7 +238,8 @@ def scenario_json_stable_shape() -> None:
     dumped = json.loads(json.dumps(rows))           # must be JSON-serializable
     assert isinstance(dumped, list) and len(dumped) == 2
     required = {"stage", "model_ref", "ladder", "ladder_from", "calls",
-                "tokens_in", "tokens_out", "cost_usd", "priced",
+                "tokens_in", "tokens_cache_read", "tokens_cache_write",
+                "tokens_out", "cost_usd", "priced",
                 "p50_ms", "p95_ms", "n_durations"}
     for row in dumped:
         assert required.issubset(row.keys()), (required - set(row.keys()))
@@ -244,6 +270,7 @@ def main() -> None:
     scenario_unpriced_never_shows_zero_dollars()
     scenario_priced_cost_matches_seam()
     scenario_model_ref_preferred_for_pricing()
+    scenario_cache_columns_appear_only_when_cached()
     scenario_malformed_line_raises_like_existing()
     scenario_json_stable_shape()
     scenario_duration_from_truthful_field_only()

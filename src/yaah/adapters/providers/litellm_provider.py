@@ -35,7 +35,14 @@ from __future__ import annotations
 import json
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
-from ...agents.api_provider import ApiProvider, Context, StreamEvent, SupportsTurn, turn as collect_turn
+from ...agents.api_provider import (
+    ApiProvider,
+    Context,
+    StreamEvent,
+    SupportsTurn,
+    Usage,
+    turn as collect_turn,
+)
 
 
 # Agent-plumbing opts that claude-native backends consume but are NOT litellm /
@@ -91,18 +98,15 @@ def _report_usage(on_usage: Optional[Callable[..., Any]], resp: Any, model: Opti
     (cost capture off) or the response carries no usage. litellm normalizes usage
     to prompt_tokens / completion_tokens across providers.
 
-    The two CACHED input classes are reported separately from `tokens_in`
-    (same provider-agnostic contract as claude_cli_provider._map_usage) because
-    they bill at different rates — cache read ~0.1x the input rate, cache write
-    ~1.25x — and pricing them at the full input rate over-reports cache-heavy
-    stages several-fold.
+    The two CACHED input classes are reported separately from `tokens_in` (the
+    provider-agnostic api_provider.Usage contract claude_cli_provider also
+    reports); they bill at their own rates — see yaah.trace.aggregate.
 
-    UNLIKE claude's raw usage, litellm's `prompt_tokens` is cache-INCLUSIVE: the
-    OpenAI dialect counts `prompt_tokens_details.cached_tokens` inside it, and
-    litellm's anthropic shim likewise sums input + cache-read + cache-creation
-    into it. So the plain-rate remainder is prompt_tokens MINUS the two cache
-    classes, clamped at 0 (a provider that reports a cache count without folding
-    it into prompt_tokens would otherwise go negative and under-bill)."""
+    UNLIKE claude's raw usage, litellm's `prompt_tokens` is normally
+    cache-INCLUSIVE: the OpenAI dialect counts
+    `prompt_tokens_details.cached_tokens` inside it, and litellm's anthropic shim
+    likewise sums input + cache-read + cache-creation into it. So the plain-rate
+    remainder is prompt_tokens MINUS the two cache classes."""
     if on_usage is None:
         return
     resp = _as_dict(resp)
@@ -116,11 +120,21 @@ def _report_usage(on_usage: Optional[Callable[..., Any]], resp: Any, model: Opti
                       or details.get("cache_creation_tokens") or 0)
     prompt = int(usage.get("prompt_tokens", 0) or 0)
     resp_model = resp.get("model")
-    on_usage({"tokens_in": max(prompt - cache_read - cache_write, 0),
-              "tokens_cache_read": cache_read,
-              "tokens_cache_write": cache_write,
-              "tokens_out": usage.get("completion_tokens", 0),
-              "model": resp_model or model})
+    # A NEGATIVE remainder means prompt_tokens does not include everything we
+    # just subtracted. Usually the dialect is fully cache-EXCLUSIVE (litellm's
+    # shim has flipped before), in which case prompt_tokens already IS the fresh
+    # count; it can also be HYBRID (prompt_tokens counts cache reads but not
+    # cache creation), where using it as-is double-counts the reads and reads
+    # HIGH. Both fall back the same way, deliberately: over-reporting is visible
+    # and correctable, whereas clamping to 0 bills every fresh input token on
+    # such a provider at $0, silently and forever.
+    rest = prompt - cache_read - cache_write
+    reported: Usage = {"tokens_in": rest if rest >= 0 else prompt,
+                       "tokens_cache_read": cache_read,
+                       "tokens_cache_write": cache_write,
+                       "tokens_out": int(usage.get("completion_tokens", 0) or 0),
+                       "model": resp_model or model}
+    on_usage(reported)
 
 
 class LiteLLMProvider(ApiProvider, SupportsTurn):

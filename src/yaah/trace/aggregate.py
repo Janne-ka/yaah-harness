@@ -48,7 +48,8 @@ def cost_usd(model: Optional[str], tokens_in: int, tokens_out: int,
     cache args default to 0 — so an old trace prices exactly as it always did,
     i.e. everything at the full input rate. Such totals are an UPPER BOUND, not
     a correction: they cannot be re-priced, because the split the arithmetic
-    needs was never recorded."""
+    needs was never recorded. `aggregate` counts them
+    (`totals.unpriced_upper_bound_calls`) so a mixed rollup says so."""
     if not price_map or model not in price_map:
         return 0.0
     p = price_map[model]
@@ -69,9 +70,11 @@ def record_cost_usd(r: Dict[str, Any],
     when the map knows it, else the backend-RESOLVED `model` name (older
     records / maps keyed by API names). No silent $0 from the dialect gap.
 
-    `tokens_cache_read`/`tokens_cache_write` are OPTIONAL on the record (a
-    backend that reports no caching, or a pre-split trace, omits them) and
-    default to 0 — see cost_usd on what that means for old traces."""
+    `tokens_cache_read`/`tokens_cache_write` are absent only on a PRE-SPLIT
+    record (the cost contributor emits both unconditionally, zeros included) and
+    default to 0 — see cost_usd on what that means for old traces, and
+    `aggregate`'s `unpriced_upper_bound_calls` for how many such records a
+    rollup mixed in."""
     ref = r.get("model_ref")
     model = r.get("model")
     key = ref if (price_map and ref in price_map) else model
@@ -207,14 +210,29 @@ def aggregate(records: Iterable[Dict[str, Any]],
     n_stage_spans = 0
     n_model_calls = 0
     n_stage_failures = 0   # stage spans whose status isn't ok/suspended — used as the retry signal
+    n_upper_bound = 0      # model_calls whose cost is a pre-split UPPER BOUND (see below)
 
     for r in records:
         name = r.get("name")
         corr = r.get("corr") or "?"
         status = r.get("status")
         if status is not None and status not in ("ok", "suspended"):
-            errors.append({"name": name, "stage": r.get("stage") or r.get("role"),
-                           "status": status, "detail": r.get("error") or r.get("detail")})
+            err: Dict[str, Any] = {
+                "name": name, "stage": r.get("stage") or r.get("role"),
+                "status": status, "detail": r.get("error") or r.get("detail")}
+            # the retry CAUSE, when the emitting span carried it: which attempt,
+            # which transient retry, and the kind. Carried through so a consumer
+            # of the JSON metrics can tell four rejected attempts of one stage
+            # from four separate stage failures. (Records written before the
+            # 2026-08 rename spell the counter `n`; read it so an archived trace
+            # still aggregates, but always REPORT it as `error_retry_n`.)
+            for k in ("retry", "attempt"):
+                if k in r:
+                    err[k] = r[k]
+            retry_n = r.get("error_retry_n", r.get("n"))
+            if retry_n is not None:
+                err["error_retry_n"] = retry_n
+            errors.append(err)
         run = runs.setdefault(corr, {"tokens_in": 0, "tokens_out": 0,
                                      "tokens_cache_read": 0, "tokens_cache_write": 0,
                                      "cost_usd": 0.0,
@@ -230,9 +248,13 @@ def aggregate(records: Iterable[Dict[str, Any]],
             n_model_calls += 1
             run["model_calls"] += 1
             ti, to = r.get("tokens_in", 0), r.get("tokens_out", 0)
-            # cached-input classes ride alongside tokens_in (absent on records
-            # from a non-caching backend / a pre-split trace) — carried so the
-            # operator can SEE the cache hit rate behind a cost figure
+            # cached-input classes ride alongside tokens_in — carried so the
+            # operator can SEE the cache hit rate behind a cost figure. Absent
+            # only on a PRE-SPLIT record, whose tokens_in lumps all three classes
+            # and therefore prices as an upper bound; count those so the rollup
+            # can say how much of it is exact.
+            if "tokens_cache_read" not in r or "tokens_cache_write" not in r:
+                n_upper_bound += 1
             cr = r.get("tokens_cache_read", 0) or 0
             cw = r.get("tokens_cache_write", 0) or 0
             model = r.get("model")
@@ -271,6 +293,10 @@ def aggregate(records: Iterable[Dict[str, Any]],
         "stage_spans": n_stage_spans,
         "model_calls": n_model_calls,
         "tool_calls": sum(tools.values()),
+        # model_calls that carry no cache split (pre-2026-08 traces): their
+        # share of cost_usd is an UPPER BOUND priced at the full input rate, not
+        # a measurement. 0 means every priced call in this rollup was exact.
+        "unpriced_upper_bound_calls": n_upper_bound,
         "errors": len(errors),  # "what went wrong" count
         # Retry signal (assessment cluster 5 #5): count error-status stage spans.
         # The old `n_model_calls - n_stage_spans` over-reported for tool-loop
