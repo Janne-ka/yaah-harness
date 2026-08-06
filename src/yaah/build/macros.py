@@ -34,29 +34,34 @@ this codebase fails loud on.
 
 NOT the same thing as `{{key}}` interpolation. These macros are SINGLE-brace and
 expand at BUILD time; `{{db_url}}` is double-brace and is filled per invocation
-from the envelope at RUN time (yaah.templating). One string may carry both — the
-replace here matches only the exact single-brace tokens, so a `{{...}}`
-placeholder passes through untouched.
+from the envelope at RUN time (yaah.templating). One string may carry both, and a
+`{{run_dir}}`/`{{base_dir}}` placeholder is the case where they COLLIDE by name:
+the macro token is a substring of the placeholder, so a plain `str.replace` would
+rewrite `{{run_dir}}` to `{<abs path>}` at build and the run-time fill would never
+happen. The matcher below is brace-anchored (`_MATCHERS`) precisely so a token
+wrapped in a second pair of braces is left alone.
 
 Targets Python 3.9+.
 """
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+import re
+from typing import Any, Callable, Dict, Optional
 
+from ..templating import (BASE_DIR_MACRO as BASE_DIR, RUN_DIR_MACRO as RUN_DIR,
+                          macro_matcher)
 from .build_context import BuildContext
 
-BASE_DIR = "{base_dir}"
-RUN_DIR = "{run_dir}"
+
+def _base_dir(ctx: BuildContext) -> str:
+    if not ctx.base_dir:
+        raise ValueError(
+            "node config uses {base_dir} but no base_dir was passed to build()")
+    return os.path.abspath(ctx.base_dir)
 
 
-def _resolved(ctx: BuildContext, macro: str) -> str:
-    if macro == BASE_DIR:
-        if not ctx.base_dir:
-            raise ValueError(
-                "node config uses {base_dir} but no base_dir was passed to build()")
-        return os.path.abspath(ctx.base_dir)
+def _run_dir(ctx: BuildContext) -> str:
     if not ctx.run_dir:
         raise ValueError(
             "node config uses {run_dir} but the root config has no `run_dir` key — "
@@ -66,12 +71,32 @@ def _resolved(ctx: BuildContext, macro: str) -> str:
     return os.path.abspath(ctx.run_dir)
 
 
+# THE macro table: token -> what it resolves to for a given build. A third macro
+# is one entry here — the matcher and the walk derive from it.
+_MACROS: Dict[str, Callable[[BuildContext], str]] = {
+    BASE_DIR: _base_dir,
+    RUN_DIR: _run_dir,
+}
+
+# One compiled matcher per token, brace-anchored: a token WRAPPED in a second pair
+# of braces (`{{run_dir}}`) is a run-time placeholder for another layer to fill and
+# must survive the build untouched. The anchoring lives in `yaah.templating` — the
+# module that owns both brace dialects — so the lint seam that has to recognize the
+# same tokens in a path cannot anchor them differently.
+_MATCHERS: Dict[str, "re.Pattern"] = {token: macro_matcher(token) for token in _MACROS}
+
+
 def _expand_str(s: str, ctx: BuildContext) -> str:
     if "{" not in s:              # the overwhelmingly common case — no scan, no copy
         return s
-    for macro in (BASE_DIR, RUN_DIR):
-        if macro in s:
-            s = s.replace(macro, _resolved(ctx, macro))
+    for token, resolve in _MACROS.items():
+        matcher = _MATCHERS[token]
+        if matcher.search(s) is None:
+            continue              # absent, or present only as `{{token}}` — nothing to do
+        # The replacement is a callable, not a template string: a resolved path is
+        # a literal, and `sub`'s template dialect would eat a backslash in it.
+        value = resolve(ctx)
+        s = matcher.sub(lambda _m, v=value: v, s)
     return s
 
 

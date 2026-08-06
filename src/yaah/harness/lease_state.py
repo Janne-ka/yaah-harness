@@ -11,7 +11,14 @@ in another process, so every recovery was the CALLER asserting death. The owner
 stamp (`<host>/<pid>/<nonce>`, refreshed at every checkpoint) makes the common
 case — same host, dead pid — decidable by the engine.
 
-The three tiers, weakest evidence last:
+The tiers, weakest evidence last:
+  0. OUR OWN lease — the owner id is EXACTLY the caller's own (`self_owner`), so
+     the only thing that can have written it is a previous attempt by this same
+     Harness object. Never a reason to refuse that harness: reporting it as LIVE
+     would make it refuse its own retry and print a `--force` hint that is false
+     (the "live" pid is the one reading the message). The match is on the whole id
+     including its per-harness nonce — a DIFFERENT Harness in the same process
+     does not reach this tier, it reaches tier 2 and sees a live pid.
   1. NO owner — a pre-upgrade record. Allowed, with a note: the engine has no
      evidence either way and refusing would strand records written before the
      lease existed.
@@ -26,6 +33,16 @@ The three tiers, weakest evidence last:
      within it => refuse.
 
 v1 non-proofs, deliberate and documented rather than defended against:
+  - The owner id identifies a HARNESS OBJECT, not a run and not a process: it is
+    `<host>/<pid>/<nonce>` with a fresh nonce per Harness. So in a long-lived
+    embedded process, a run whose driving task died reads LIVE to everyone (tier 2
+    probes the pid, and the pid belongs to the still-live process) — including to
+    a SECOND Harness in that same process, which does not match tier 0 and sees
+    only a live pid. Tier 0 is narrow by construction: it covers ONE harness
+    re-driving a run it leased itself. What actually covers the embedded case is
+    the release arm on the failure path (`Harness._settle_leased` nulls the lease
+    when a drive raises) plus `--force`. Stamping the driving task's identity into
+    the owner id would close the general case; deferred until a deployment asks.
   - CLOCK SKEW between hosts distorts tier-3 ages; the horizon is a coarse
     fallback, not a consensus protocol.
   - A SIGSTOP'd process answers `kill(pid, 0)` and so refuses FOREVER — the
@@ -59,10 +76,12 @@ DEFAULT_LEASE_HORIZON = 3600.0
 
 # The label vocabulary, shared by the refusal messages and `yaah list`:
 #   none    — no owner stamped (pre-upgrade record)
+#   self    — the lease is the CALLER's own (only reachable when a caller says who
+#             it is; the inspection surfaces are a fresh process and never do)
 #   live    — the owning process answered a liveness probe
 #   stale   — presumed dead (dead pid on this host, or past the horizon elsewhere)
 #   foreign — owned by another host, lease still within the horizon
-NONE, LIVE, STALE, FOREIGN = "none", "live", "stale", "foreign"
+NONE, SELF, LIVE, STALE, FOREIGN = "none", "self", "live", "stale", "foreign"
 
 
 def _this_host() -> str:
@@ -95,7 +114,7 @@ def _age_label(age: Optional[float]) -> str:
 
 @dataclass
 class LeaseState:
-    state: str                    # NONE | LIVE | STALE | FOREIGN
+    state: str                    # NONE | SELF | LIVE | STALE | FOREIGN
     owner: Optional[str]
     age: Optional[float]          # seconds since the lease was stamped
     detail: str                   # one operator-readable sentence
@@ -103,24 +122,36 @@ class LeaseState:
     @property
     def recoverable(self) -> bool:
         """True when re-driving this checkpoint is allowed WITHOUT `--force`."""
-        return self.state in (NONE, STALE)
+        return self.state in (NONE, SELF, STALE)
 
     def label(self) -> str:
-        """The compact `yaah list` token: `live`, `none`, `stale(2h14m)`,
+        """The compact `yaah list` token: `live`, `none`, `self`, `stale(2h14m)`,
         `foreign(2h14m)`."""
-        if self.state in (NONE, LIVE):
+        if self.state in (NONE, SELF, LIVE):
             return self.state
         return "{}({})".format(self.state, _age_label(self.age))
 
     @classmethod
     def of(cls, baton: object, now: float,
-           horizon: float = DEFAULT_LEASE_HORIZON,
+           horizon: Optional[float] = None,
            host: Optional[str] = None,
-           alive: Optional[object] = None) -> "LeaseState":
+           alive: Optional[object] = None,
+           self_owner: Optional[str] = None) -> "LeaseState":
         """Probe the lease on `baton` as of wall-clock `now`. `host` (the root
         `lease_host` override; None = this host's name) and `alive` (a `pid -> bool`
         callable) are injectable so a test can drive every tier without spawning real
         processes; production defaults are `gethostname()` and `os.kill(pid, 0)`.
+
+        `horizon` None = DEFAULT_LEASE_HORIZON, normalized HERE so every caller that
+        reads an optional root key can hand it straight over — the default belongs to
+        the policy, and a second fallback at a call site is a second place for it to
+        drift.
+
+        `self_owner` is the CALLER's own owner id, when the caller has one (a Harness
+        recovering a run it may itself have leased). A lease matching it is tier 0 —
+        `self`, recoverable — because refusing a caller its own lease refuses the
+        exact retry the lease exists to make safe. Absent (the inspection surfaces: a
+        fresh process is never the owner) the tier is simply unreachable.
 
         `baton` is typed `object` and read with `getattr`, NOT typed as `Baton`, and
         that is the point: the dependency runs ONE WAY. `Baton` is the durable record;
@@ -129,13 +160,23 @@ class LeaseState:
         (a `Baton.lease` property), which is how a state module ends up owning
         decisions. The `getattr` defaults also make a pre-upgrade record — literally a
         Baton without these attributes — fall into the NONE tier instead of raising."""
+        horizon = DEFAULT_LEASE_HORIZON if horizon is None else horizon
         owner = getattr(baton, "owner", None)
         leased_at = getattr(baton, "leased_at", None)
         age = (now - leased_at) if leased_at is not None else None
         if not owner:
+            # Deliberately covers BOTH ways a record ends up unowned — it predates the
+            # lease (pre-upgrade), or a failed drive released its own stamp
+            # (Harness._settle_leased). Nulling is not distinguishable from never
+            # stamping once it has happened, so the sentence must not claim either.
             return cls(NONE, None, None,
-                       "unleased (pre-upgrade) record — no owner was ever stamped, "
-                       "so the engine has no liveness evidence either way")
+                       "no owner is stamped on this record — it either predates the "
+                       "lease (pre-upgrade) or a previous attempt released it; the "
+                       "engine has no liveness evidence either way")
+        if self_owner and owner == self_owner:
+            return cls(SELF, owner, age,
+                       "leased by THIS harness ({}) — a previous attempt of ours left "
+                       "the stamp, so it is ours to take back".format(owner))
         owner_host, _, rest = owner.partition("/")
         pid_text = rest.partition("/")[0]
         if owner_host == (host or _this_host()) and pid_text.isdigit():

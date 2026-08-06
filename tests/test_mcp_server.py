@@ -280,6 +280,11 @@ async def scenario_gate_roundtrip(client: _Client) -> None:
     # since a driver reading `yaah list --json` and then this tool must see one shape.
     assert out["batons"][0]["lease_state"] == "none", out["batons"][0]
     assert out["batons"][0]["owner"] is None, out["batons"][0]
+    # ...and so is the WIRING verdict, for the same reason: the tool passes the
+    # current wiring like `yaah list --json` does. Without it `wiring_mismatch` was
+    # permanently null here — "unknown" on a surface whose docstring claimed the
+    # drift check was wired.
+    assert out["batons"][0]["wiring_mismatch"] is False, out["batons"][0]
 
     is_err, out = await _call(client, "baton_schema", {"root_path": root, "baton_id": baton_id})
     assert not is_err, out

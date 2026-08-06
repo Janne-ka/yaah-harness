@@ -12,6 +12,7 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 import time
 import uuid
@@ -30,7 +31,7 @@ from .cleared import Cleared
 from .done import Done
 from .fork_coordinator import ForkCoordinator
 from .graph import Graph
-from .lease_state import DEFAULT_LEASE_HORIZON, LIVE, LeaseState, mint_owner
+from .lease_state import LIVE, LeaseState, mint_owner
 from .span_emitter import SpanEmitter
 from .stage import Stage
 from .stage_failed import DecisionRejected, StageFailed
@@ -135,7 +136,7 @@ class Harness:
                  strict_resume: bool = True,
                  owner: Optional[str] = None,
                  lease_host: Optional[str] = None,
-                 lease_horizon: float = DEFAULT_LEASE_HORIZON) -> None:
+                 lease_horizon: Optional[float] = None) -> None:
         self.comms = comms
         self.graph = graph
         # The name this deployment calls THIS host (root `lease_host`). Absent =
@@ -159,7 +160,9 @@ class Harness:
         self._owner = owner or mint_owner(lease_host)
         # How long a FOREIGN host's lease may go unrefreshed before its process is
         # presumed dead. Only tier 3 uses it — same-host liveness is probed, not
-        # guessed (LeaseState).
+        # guessed (LeaseState). None = LeaseState's own DEFAULT_LEASE_HORIZON, which
+        # is where the number lives: passing it through unresolved keeps this class
+        # from becoming a second place the default is written down.
         self._lease_horizon = lease_horizon
         # The graph's TOPOLOGY hash, computed ONCE here (the graph is immutable for
         # this harness's life) and stamped on each baton at mint. Recovery compares
@@ -339,9 +342,35 @@ class Harness:
         escalated after failing, the human's decision is MERGED onto the failed
         stage's last artifact (so downstream gets the real output plus the
         decision, not just the decision — early_review #18); a plain gate with no
-        prior artifact just uses the response. Branch routing sees the merge."""
+        prior artifact just uses the response. Branch routing sees the merge.
+
+        SINGLE-DELIVERY is CLAIMED, not merely checked, exactly as in
+        `resume_running`: the record is read with its revision and written back under
+        a CAS before anything is driven, so two operators answering the same gate at
+        the same moment cannot both drive the post-gate stage (advisory on a non-CAS
+        backend — BatonStore.claim). Every refusal (unknown/not-parked baton, a
+        nonconforming decision, a deleted stage) is raised BEFORE the claim and leaves
+        the gate parked and re-submittable — including a store failure at the claim
+        itself, which is loud here rather than swallowed as `_checkpoint` swallows its
+        own write.
+
+        THE BATON IS FULLY MUTATED BEFORE THE CLAIM, so that one write publishes a
+        record that is VALID on its own: gate fields cleared (a running record still
+        claiming to await a human at a past park time contradicts `yaah list` and the
+        debugging.md contract), cursor advanced past the gate, and the merged decision
+        stored as `cursor_input`. A crash in the window after it therefore leaves a
+        record `resume_running` ACCEPTS. Written the other way round — claim the flip,
+        checkpoint after — that same crash left a record NEITHER verb would take
+        (`resume` refuses a non-suspended baton, `resume_running` refuses one with no
+        cursor): the run was lost, where before the claim existed it stayed parked.
+
+        A gate whose route is TERMINAL (`_next_stage` -> None) is not claimed at all:
+        there is no post-gate stage for a second caller to double-drive, so a claim
+        would protect nothing while creating exactly that unrecoverable window (no
+        next stage means no cursor to checkpoint). It stays parked until `_settle`
+        deletes it on Done, so a crash there leaves the gate re-submittable."""
         await self.sweep_expired()  # an abandoned (TTL-expired) baton is gone by now
-        baton = await self.batons.load(baton_id)
+        baton, rev = await self.batons.load_rev(baton_id)
         if baton is None:
             raise KeyError(
                 "no resumable baton {!r} — run `yaah list`; each baton is "
@@ -364,45 +393,49 @@ class Harness:
         # baton (see `_settle`), which would strand a resumable run on a typo.
         self._enforce_decision_form(baton_id, baton.pending, response)
         self._check_gate_wiring(baton)
-        baton.status = "running"
         stage = self.graph.stages[baton.stage]
-        pending = baton.pending  # the gate's EMITTED artifact, captured before the merge clears it
+        pending = baton.pending    # the gate's EMITTED artifact, before the merge clears it
+        awaiting = baton.awaiting  # the open question, for the resume span (cleared below)
         resume_input = self._merge_decision(pending, response)
+        # CLEAR THE GATE FIELDS. They are read above, into locals, precisely so this
+        # can happen before the record is written: `awaiting`/`parked_at`/`pending`
+        # set on a `running` record would publish a checkpoint that still claims to be
+        # awaiting a human at a past park time — a contradiction in `yaah list` and a
+        # violation of the debugging.md contract ("awaiting/parked_at are null while
+        # running"), made PERMANENT by a crash before the next write.
         baton.pending = None
+        baton.awaiting = None
+        baton.parked_at = None
+        baton.status = "running"
+        baton.stage = self._next_stage(stage, resume_input)
+        if baton.stage is not None:
+            # FIRST-STAGE-AFTER-A-GATE CHECKPOINT (mirrors the one in `run`), folded
+            # INTO the claim: stamping the cursor + the merged decision first means
+            # the CAS write below is itself a valid running checkpoint, so the
+            # claim-to-checkpoint window that would otherwise strand the run does not
+            # exist. What makes the human's decision durable is that `cursor_input` IS
+            # `resume_input` — a recovery re-drives the post-gate stage with the
+            # decision already merged, and the gate never re-opens.
+            self._stamp_checkpoint(baton, resume_input)
+            await self._claim(baton, rev, "delivering a decision to it")
         # LOG THE OVERRIDE: without this record the human decision left no trace
         # at all — resume routes PAST the gate (no stage re-execution, so no
         # stage span) and the baton is deleted on completion, so the run's trace
-        # ended at status:suspended. Emitted BEFORE the run continues, so the
-        # decision is on record even if the continuation fails. Keys only, never
-        # values (the RESPONSE payload may be sensitive); corr rides the merged
-        # input, which keeps the parked run's correlation_id. `approver` (WHO
-        # overrode) rides the resume envelope's header — identity is recorded,
+        # ended at status:suspended. Emitted after the claim (a caller that LOST the
+        # race records no override — it delivered nothing) and before the run
+        # continues, so the decision is on record even if the continuation fails.
+        # Keys only, never values (the RESPONSE payload may be sensitive); corr rides
+        # the merged input, which keeps the parked run's correlation_id. `approver`
+        # (WHO overrode) rides the resume envelope's header — identity is recorded,
         # content is not. `decision_diff` is the emitted-vs-edited audit.
         await self._spans.resumed(stage.name, resume_input,
-                                  awaiting=baton.awaiting,
+                                  awaiting=awaiting,
                                   decision_keys=response.payload.keys(),
                                   approver=response.headers.get(_APPROVER_HEADER),
                                   decision_diff=self._decision_diff(pending, response))
-        # CLEAR THE GATE FIELDS now that the decision is delivered and recorded.
-        # `pending` was cleared above; `awaiting`/`parked_at` had to wait until the
-        # resumed span read them. Since Level 2 this baton is persisted AGAIN while
-        # running (the next `_checkpoint`), so leaving them set would publish a
-        # running checkpoint that still claims to be awaiting a human at a past
-        # park time — `yaah list` would show a contradiction and the debugging.md
-        # contract ("awaiting/parked_at are null while running") would be false.
-        baton.awaiting = None
-        baton.parked_at = None
-        baton.stage = self._next_stage(stage, resume_input)
-        # FIRST-STAGE-AFTER-A-GATE CHECKPOINT (mirrors the one in `run`): the human's
-        # decision is already MERGED into `resume_input`, so persisting here is what
-        # makes the decision itself durable. Before this, a kill in the post-gate
-        # stage left the SUSPENDED record in the store and the operator had to submit
-        # the decision AGAIN; now the run recovers with `resume-run` and the gate
-        # never re-opens. Guarded exactly like `_drive`'s: a gate that routed to a
-        # terminal `None` has no next stage to checkpoint.
-        if baton.stage is not None:
-            await self._checkpoint(baton, resume_input)
-        return await self._settle(baton, resume_input)
+        if baton.stage is None:            # terminal gate: nothing was claimed, so
+            return await self._settle(baton, resume_input)   # there is no lease to release
+        return await self._settle_leased(baton, resume_input)
 
     async def resume_running(self, baton_id: str, *, force: bool = False,
                              allow_rewiring: bool = False) -> Outcome:
@@ -451,7 +484,7 @@ class Harness:
                 "checkpointed, so there is no mid-run state to recover".format(baton_id))
         self._check_wiring(baton, allow_rewiring)
         lease = LeaseState.of(baton, self._wall(), self._lease_horizon,
-                              host=self._lease_host)
+                              host=self._lease_host, self_owner=self._owner)
         if not lease.recoverable and not force:
             raise ValueError(
                 "baton {!r} is LEASED: {}. Re-driving it would run every remaining "
@@ -463,28 +496,101 @@ class Harness:
                     " NB this store has no compare-and-set tier, so the "
                     "single-owner claim is ADVISORY here."))
         if not lease.recoverable and force:
-            print("warning: --force overriding a {} lease on baton {} (owner {}, "
-                  "lease age {:.0f}s) — if that process is actually alive, every "
-                  "remaining stage now runs twice.".format(
-                      lease.state, baton_id, lease.owner, lease.age or 0.0),
-                  file=sys.stderr, flush=True)
+            self._warn("--force overriding a {} lease on baton {} (owner {}, "
+                       "lease age {:.0f}s) — if that process is actually alive, every "
+                       "remaining stage now runs twice.".format(
+                           lease.state, baton_id, lease.owner, lease.age or 0.0))
         elif lease.state != LIVE:
-            print("note: recovering baton {} — {}".format(baton_id, lease.detail),
-                  file=sys.stderr, flush=True)
+            self._note("recovering baton {} — {}".format(baton_id, lease.detail))
         # TAKE the lease before re-driving, under a CAS on the revision we read at:
         # a second operator racing the same recovery loses the claim and is refused
         # rather than silently double-driving the run.
+        await self._claim(baton, rev, "recovering it")
+        return await self._settle_leased(baton, baton.cursor_input)
+
+    async def _settle_leased(self, baton: Baton, input: Envelope) -> Outcome:
+        """`_settle` for a caller that just CLAIMED the record: on a non-logical
+        failure the lease it took is RELEASED before the exception propagates. Shared
+        by both claiming paths (a recovery, a gate resume) so they cannot drift.
+
+        `_settle`'s non-logical arm preserves the checkpoint on purpose (it is what a
+        recovery re-drives), so without this the record keeps OUR owner stamp while
+        nobody is driving it: in a long-lived embedded process the pid stays alive,
+        every other reader sees a LIVE lease forever, and the `--force` hint the
+        refusal prints is false (the "live" process is the one printing it).
+
+        BELT AND BRACES with LeaseState's tier-0 self-owner check, deliberately: that
+        tier only covers the SAME Harness object retrying (the owner id carries a
+        per-harness nonce), while this release is what keeps the record honest for
+        everyone else — a second harness in this process, another operator, `yaah
+        list`. Neither one covers the other's case.
+
+        A StageFailed is the run's LOGICAL end: `_settle` already deleted the record,
+        so there is no lease left to release."""
+        try:
+            return await self._settle(baton, input)
+        except StageFailed:
+            raise
+        except BaseException:
+            baton.owner = None
+            baton.leased_at = None
+            # BaseException, not Exception: this save is best effort and its ONLY job
+            # is to be quiet. Letting anything it raises out — including a
+            # CancelledError or a KeyboardInterrupt arriving mid-write — would REPLACE
+            # the failure the caller is here to see with a bookkeeping one. A
+            # swallowed interrupt costs an unreleased lease, which tier 0 and
+            # `--force` both answer; a swallowed root cause costs the diagnosis.
+            with contextlib.suppress(BaseException):
+                await self.batons.save(baton)
+            raise
+
+    async def _claim(self, baton: Baton, rev: Optional[int], doing: str) -> None:
+        """Take single ownership of `baton` with a CAS on the revision it was read at
+        — the write half of read-decide-claim, shared by both resume paths. `doing`
+        names what the winner is now doing with the record, for the refusal message.
+        Raises rather than returning a flag: losing the claim is never a case a caller
+        should be able to ignore, because continuing means double-driving the run."""
         baton.owner = self._owner
         baton.leased_at = self._wall()
-        if not await self.batons.claim(baton, rev):
-            current = await self.batons.load(baton_id)
-            raise ValueError(
-                "lost the claim to {} on baton {!r} — another process wrote this "
-                "record between our read and our claim, so it is now recovering it. "
-                "Do NOT retry blindly; re-check `yaah list`.".format(
-                    (current.owner if current is not None else None) or "another writer",
-                    baton_id))
-        return await self._settle(baton, baton.cursor_input)
+        if await self.batons.claim(baton, rev):
+            return
+        current = await self.batons.load(baton.id)
+        raise ValueError(
+            "lost the claim to {} on baton {!r} — another process wrote this "
+            "record between our read and our claim, so it is now {}. "
+            "Do NOT retry blindly; re-check `yaah list`.".format(
+                (current.owner if current is not None else None) or "another writer",
+                baton.id, doing))
+
+    def _require_stage_exists(self, baton: Baton) -> None:
+        """The stage a baton points at must still BE in the graph — checked before
+        either resume path commits anything. Both of them index
+        `self.graph.stages[baton.stage]` a few lines later, so without this the
+        pipeline having been edited surfaces as a bare KeyError: at a gate with no
+        explanation of what happened, and on the recovery path AFTER the CAS claim has
+        already taken the lease (which is why it is hoisted ahead of every
+        short-circuit — a `--allow-rewiring` or a pre-fingerprint baton skips the
+        topology comparison but must not skip this)."""
+        if baton.stage is None or baton.stage in self.graph.stages:
+            return
+        raise ValueError(
+            "baton {!r} points at stage {!r}, which NO LONGER EXISTS in the current "
+            "graph — the pipeline was edited while this run was parked/checkpointed, "
+            "so there is nowhere to continue it. Restore the stage (or the graph the "
+            "run started on) and try again; `yaah clear --baton {}` abandons the run "
+            "instead.".format(baton.id, baton.stage, baton.id))
+
+    @staticmethod
+    def _warn(msg: str) -> None:
+        """Operator-facing WARNING on stderr: something happened that may cost you (an
+        override taken, a durability guarantee lost). `_note` is the informational half
+        of the same channel. One pair of helpers so the sites cannot drift in prefix,
+        stream or flush discipline."""
+        print("warning: " + msg, file=sys.stderr, flush=True)
+
+    @staticmethod
+    def _note(msg: str) -> None:
+        print("note: " + msg, file=sys.stderr, flush=True)
 
     def _check_gate_wiring(self, baton: Baton) -> None:
         """The GATE-resume half of the wiring check, deliberately WEAKER than
@@ -492,47 +598,57 @@ class Harness:
         because a stage was added elsewhere in the graph would be a hostile way to
         lose work, and the gate's own stage is the only wiring the resume needs. So
         a mismatch WARNS and continues — EXCEPT when the parked stage itself is gone
-        from the current graph, which is not a warning but a broken resume: the very
-        next line (`self.graph.stages[baton.stage]`) would raise a bare KeyError with
-        no explanation of what happened."""
-        if baton.stage is not None and baton.stage not in self.graph.stages:
-            raise ValueError(
-                "baton {!r} is parked at stage {!r}, which NO LONGER EXISTS in the "
-                "current graph — the pipeline was edited while this gate was parked, "
-                "so there is nowhere to deliver the decision. Restore the stage (or "
-                "the graph the run started on) and resume again; `yaah clear --baton "
-                "{}` abandons the run instead.".format(
-                    baton.id, baton.stage, baton.id))
+        from the current graph (`_require_stage_exists`), which is not a warning but a
+        broken resume."""
+        self._require_stage_exists(baton)
         if baton.wiring is not None and baton.wiring != self._wiring:
-            print("warning: baton {} was parked on a DIFFERENT graph topology "
-                  "(wiring {} vs the current {}); its gate stage {!r} still exists, "
-                  "so the decision is being delivered — but the stages AFTER it may "
-                  "not be the ones this run was started on.".format(
-                      baton.id, baton.wiring[:12], self._wiring[:12], baton.stage),
-                  file=sys.stderr, flush=True)
+            self._warn("baton {} was parked on a DIFFERENT graph topology "
+                       "(wiring {} vs the current {}); its gate stage {!r} still exists, "
+                       "so the decision is being delivered — but the stages AFTER it may "
+                       "not be the ones this run was started on.".format(
+                           baton.id, baton.wiring[:12], self._wiring[:12], baton.stage))
 
     def _check_wiring(self, baton: Baton, allow_rewiring: bool) -> None:
         """Refuse to re-drive a cursor into a graph that was REWIRED since the baton
         was minted. A pre-upgrade baton carries no fingerprint — skip with a note
         rather than refuse, since refusing would strand every record written before
-        the stamp existed and the engine genuinely has no evidence."""
+        the stamp existed and the engine genuinely has no evidence.
+
+        The cursor stage still EXISTING is a separate, stronger question, so it is
+        asked first and by the shared check: it is the one condition no override
+        answers (`--allow-rewiring` asserts an edit is cursor-compatible, which a
+        deleted cursor stage can never be), and both short-circuits below would
+        otherwise carry it past the claim into a bare KeyError."""
+        self._require_stage_exists(baton)
         if baton.wiring is None:
-            print("note: baton {} predates the wiring fingerprint — recovering "
-                  "WITHOUT a topology check (a graph edit since the kill would go "
-                  "undetected).".format(baton.id), file=sys.stderr, flush=True)
+            self._note("baton {} predates the wiring fingerprint — recovering "
+                       "WITHOUT a topology check (a graph edit since the kill would go "
+                       "undetected).".format(baton.id))
             return
         if baton.wiring == self._wiring or allow_rewiring:
             return
         raise ValueError(
             "baton {!r} was minted on a DIFFERENT graph topology (wiring {} vs the "
-            "current {}) and its cursor is at stage {!r}, which {}. Re-driving it "
-            "would resume onto wiring the run never took. Restore the graph the run "
+            "current {}) and its cursor is at stage {!r}, which still exists. Re-driving "
+            "it would resume onto wiring the run never took. Restore the graph the run "
             "started on, or pass --allow-rewiring if the edit is cursor-compatible. "
             "(Prompt/model/timeout edits do NOT trip this check — only topology: "
             "stages, targets, branch routes, fork/fan-in shape.)".format(
-                baton.id, baton.wiring[:12], self._wiring[:12], baton.stage,
-                "no longer exists in the current graph"
-                if baton.stage not in self.graph.stages else "still exists"))
+                baton.id, baton.wiring[:12], self._wiring[:12], baton.stage))
+
+    def _stamp_checkpoint(self, baton: Baton, next_input: Envelope) -> None:
+        """Set the Level 2 checkpoint FIELDS on `baton` — the cursor's input, the
+        checkpoint clock, the lease and the wiring — WITHOUT writing. Split from the
+        save (`_checkpoint`) for the one caller that is about to write the record for
+        another reason: the gate resume's CAS claim, which must publish a complete
+        running checkpoint in ONE write rather than a bare status flip followed by a
+        second save it might not live to make. What each field means, and why the
+        lease and the wiring ride this write, is on `_checkpoint`."""
+        baton.cursor_input = next_input
+        baton.checkpointed_at = self._wall()
+        baton.owner = self._owner
+        baton.leased_at = baton.checkpointed_at
+        baton.wiring = self._wiring
 
     async def _checkpoint(self, baton: Baton, next_input: Envelope) -> None:
         """LEVEL 2 write (docs/durable-state.md §5): after a stage completes and the
@@ -577,11 +693,7 @@ class Harness:
         it as such (`_check_wiring` / `_check_gate_wiring` both ask "does this cursor
         match the graph I am about to drive?"), and a run's origin belongs on the
         trace, not on a record that is rewritten every stage."""
-        baton.cursor_input = next_input
-        baton.checkpointed_at = self._wall()
-        baton.owner = self._owner
-        baton.leased_at = baton.checkpointed_at
-        baton.wiring = self._wiring
+        self._stamp_checkpoint(baton, next_input)
         try:
             await self.batons.save(baton)
         except Exception as e:
@@ -589,12 +701,11 @@ class Harness:
                                    attrs={"event": "checkpoint_failed", "error": repr(e)})
             if not self._checkpoint_warned:
                 self._checkpoint_warned = True
-                print("warning: checkpoint write failed at stage {!r} ({!r}) — "
-                      "crash recovery is OFF for this run (a kill will leave "
-                      "nothing to `yaah resume-run`); parked human gates are "
-                      "unaffected. Further failures are on the trace only "
-                      "(event: checkpoint_failed).".format(baton.stage or "?", e),
-                      file=sys.stderr, flush=True)
+                self._warn("checkpoint write failed at stage {!r} ({!r}) — "
+                           "crash recovery is OFF for this run (a kill will leave "
+                           "nothing to `yaah resume-run`); parked human gates are "
+                           "unaffected. Further failures are on the trace only "
+                           "(event: checkpoint_failed).".format(baton.stage or "?", e))
 
     def _enforce_decision_form(self, baton_id: str, pending: Optional[Envelope],
                                response: Envelope) -> None:
@@ -1008,7 +1119,8 @@ class Harness:
             if errors < stage.error_retries and self._is_transient_verdict(verdict):
                 errors += 1
                 await self._spans.note(stage.name, input, status="error", attrs={
-                    "retry": "transient", "n": errors, "error": self._verdict_detail(verdict)})
+                    "retry": "transient", "error_retry_n": errors,
+                    "error": self._verdict_detail(verdict)})
                 await self._sleep(self._backoff(errors))
                 continue
             attempt += 1

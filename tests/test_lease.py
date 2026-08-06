@@ -2,17 +2,24 @@
 
 Every checkpoint write stamps `owner` (`<host>/<pid>/<nonce>`) and `leased_at` on
 the baton, so `resume_running` can probe instead of asking the operator to assert
-death. Three tiers (LeaseState): no owner -> allow with a note; same host -> a real
-`os.kill(pid, 0)` probe; foreign host -> the lease AGE against `lease_horizon`.
-The decision is then CLAIMED with a compare-and-set, so two operators racing the
-same recovery cannot both win.
+death. The tiers (LeaseState): our OWN lease -> always ours to take back; no owner
+-> allow with a note; same host -> a real `os.kill(pid, 0)` probe; foreign host ->
+the lease AGE against `lease_horizon`. The decision is then CLAIMED with a
+compare-and-set, so two operators racing the same recovery cannot both win — and
+the same claim now fences a gate `resume`.
 
 Covers: a dead pid on this host resumes; our OWN live pid refuses; `--force`
-overrides that refusal loudly; a foreign host inside the horizon refuses and
-outside it resumes; a park CLEARS the lease (a parked gate has no owning process);
-a lost CAS claim on FileBackend across two event loops refuses naming the winner;
-the `yaah list --json` lease labels; and the `yaah list` PROSE line, where the
-`resume-run` hint must be suppressed for a live lease.
+overrides that refusal loudly; a FAILED recovery releases the lease it took and
+stays recoverable by the SAME HARNESS (tier 0 — which is per-harness-object, not
+per-process: a sibling harness here reads LIVE, and the release arm is what covers
+it); a second resume of one parked gate loses the claim and never drives the
+post-gate stage; the gate claim's write is a clean, complete running checkpoint, so
+a crash right after it recovers with the decision already merged; a foreign host
+inside the horizon refuses and outside it resumes; a park CLEARS the lease (a
+parked gate has no owning process); a lost CAS claim on FileBackend across two
+event loops refuses naming the winner; the `yaah list --json` lease labels; and the
+`yaah list` PROSE line, where the `resume-run` hint must be suppressed for a live
+lease.
 
 Mirrors tests/test_checkpoint_resume.py's kill/re-drive harness (its `Step`,
 `KillOnce`, `Gate` and `dead_pid_owner` are imported rather than re-typed).
@@ -32,7 +39,7 @@ import tempfile
 from yaah import Done, Envelope, Graph, Harness, InProcessComms, Stage, Suspended
 from yaah.adapters.stores import FileBackend
 from yaah.harness import BatonStore, LeaseState
-from yaah.harness.lease_state import FOREIGN, LIVE, NONE, STALE, mint_owner
+from yaah.harness.lease_state import FOREIGN, LIVE, NONE, SELF, STALE, mint_owner
 from yaah.runtime import _baton_json
 from yaah.store import MemoryBackend
 
@@ -174,6 +181,209 @@ async def scenario_own_live_pid_refuses_and_force_overrides() -> None:
     print("PASS our own LIVE pid refuses (naming host/pid); --force overrides, loudly")
 
 
+class KillTwice(KillOnce):
+    """Raises on the first TWO calls: the original kill, then AGAIN on the recovery
+    re-drive. Models the failure path — a recovery that claims the lease and then
+    blows up — that used to leave the record leased forever."""
+
+    async def invoke(self, env, config):
+        self.calls += 1
+        if self.calls <= 2:
+            raise InfraError("blew up at " + self.name)
+        return env.reply("result", steps=list(env.payload.get("steps", [])) + [self.name])
+
+
+async def scenario_a_failed_recovery_releases_and_stays_recoverable() -> None:
+    """A recovery TAKES the lease and then the re-drive fails non-logically. The
+    checkpoint is preserved on purpose (it is what the next recovery re-drives), so
+    the lease must not be: in a long-lived embedded process the owning pid is still
+    alive, and the record then reads LIVE forever — the harness refuses its own retry
+    and the `--force` hint it prints names the process reading it.
+
+    Two independent guarantees, and this pins both: the lease is RELEASED on the way
+    out (so every OTHER reader sees the truth), and the tier-0 self-owner check makes
+    the record ours to take back even if that release never happened."""
+    store = MemoryBackend()
+    comms = InProcessComms()
+    comms.register("role:a", Step("a"))
+    comms.register("role:b", KillTwice("b"))
+    comms.register("role:c", Step("c"))
+    h = Harness(comms, _graph(), baton_store=BatonStore(store), owner=dead_pid_owner())
+    try:
+        await h.run(Envelope("task", {"steps": []}))
+    except InfraError:
+        pass
+    cp = (await BatonStore(store).list_running())[0]
+
+    h2 = Harness(comms, _graph(), baton_store=BatonStore(store))   # a LIVE owner (us)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        try:
+            await h2.resume_running(cp.id)
+        except InfraError:
+            pass
+    after = await BatonStore(store).load(cp.id)
+    assert after is not None, "the checkpoint itself must survive the failure"
+    assert after.owner is None and after.leased_at is None, \
+        ("a failed recovery must not leave the record leased", after.owner)
+
+    # ...and even with the stamp back on, OUR OWN lease never refuses US.
+    after.owner, after.leased_at = h2._owner, after.checkpointed_at   # noqa: SLF001
+    await BatonStore(store).save(after)
+    lease = LeaseState.of(after, 0.0, self_owner=h2._owner)           # noqa: SLF001
+    assert lease.state == SELF and lease.recoverable and lease.label() == "self", lease
+    with contextlib.redirect_stderr(io.StringIO()):
+        out = await h2.resume_running(cp.id)          # no --force needed
+    assert isinstance(out, Done), out
+    assert out.output.payload["steps"] == ["a", "b", "c"], out.output.payload
+    print("PASS a failed recovery releases the lease, and our own lease never refuses us")
+
+
+async def scenario_gate_resume_claims_the_baton() -> None:
+    """A parked gate's resume had no claim at all: two operators answering the same
+    gate both passed the `suspended` check and both drove the post-gate stage. It is
+    now read-decide-CLAIM like `resume_running`, so the loser is refused."""
+    with tempfile.TemporaryDirectory() as d:
+        comms = InProcessComms()
+        post_gate = Step("c")
+        comms.register("role:gate", Gate())
+        comms.register("role:c", post_gate)
+        graph = Graph.of(Stage("gate", node="role:gate", then="c"),
+                         Stage("c", node="role:c"))
+        h = Harness(comms, graph, baton_store=BatonStore(FileBackend(d)))
+        out = await h.run(Envelope("task", {"steps": []}))
+        assert isinstance(out, Suspended), out
+
+        # The other operator writes INSIDE our read-claim window (same technique as
+        # the recovery race below: a claim against a superseded revision loses).
+        real_load_rev = h.batons.load_rev
+
+        async def racing_load_rev(bid):
+            baton, at_rev = await real_load_rev(bid)
+            interloper, cur = await real_load_rev(bid)
+            interloper.owner = "other-host/1/00000000"
+            assert await h.batons.claim(interloper, cur), "the interloper must win"
+            return baton, at_rev
+
+        h.batons.load_rev = racing_load_rev
+        refused = None
+        try:
+            await h.resume(out.baton_id, Envelope("resume", {"human": "approve"}))
+        except ValueError as e:
+            refused = e
+    assert refused is not None, "the second resume of one gate must be refused"
+    assert "lost the claim" in str(refused), refused
+    assert "other-host/1/00000000" in str(refused), refused
+    assert "delivering a decision" in str(refused), refused
+    assert post_gate.calls == 0, "the loser must not drive the post-gate stage"
+    print("PASS a second resume of the same gate loses the claim and is refused")
+
+
+def scenario_self_tier_is_per_harness_not_per_process() -> None:
+    """Tier 0 matches the WHOLE owner id, per-harness nonce included — so two Harness
+    objects in ONE process do not see each other's leases as their own. The second
+    reads the first's stamp as tier 2 LIVE (same host, and the pid is this very
+    process), which is the honest answer: it cannot know that harness is finished.
+    What covers that case is the RELEASE arm on the failure path, not this tier."""
+    h1 = Harness(_comms(), _graph(), baton_store=BatonStore(MemoryBackend()))
+    h2 = Harness(_comms(), _graph(), baton_store=BatonStore(MemoryBackend()))
+    assert h1._owner != h2._owner, "each Harness mints its own owner id"   # noqa: SLF001
+
+    class B:
+        def __init__(self, owner):
+            self.owner, self.leased_at = owner, 100.0
+
+    mine = LeaseState.of(B(h1._owner), 200.0, self_owner=h1._owner)        # noqa: SLF001
+    assert mine.state == SELF and mine.recoverable, mine
+    sibling = LeaseState.of(B(h1._owner), 200.0, self_owner=h2._owner)     # noqa: SLF001
+    assert sibling.state == LIVE and not sibling.recoverable, sibling
+    # ...and a RELEASED record (owner nulled by the failure path) is not claimed to be
+    # a pre-upgrade one — the wording has to cover both, since they are identical.
+    released = LeaseState.of(B(None), 200.0)
+    assert released.state == NONE and released.recoverable, released
+    assert "released it" in released.detail and "pre-upgrade" in released.detail, released
+    print("PASS tier 0 is per-HARNESS: a sibling harness in the same process reads LIVE")
+
+
+async def scenario_gate_claim_publishes_a_recoverable_checkpoint() -> None:
+    """The gate claim's write IS the first post-gate checkpoint, not a bare status
+    flip. Two things must hold of it: the record is valid on its own (no
+    awaiting/parked_at/pending on a `running` baton — the debugging.md contract), and
+    `resume_running` accepts it (cursor + the merged decision as its input).
+
+    Written the other way round — claim, then checkpoint — a crash in between left a
+    record NEITHER verb would take (`resume` refuses a non-suspended baton,
+    `resume_running` refuses one with no cursor), losing a run that before the claim
+    existed would simply have stayed parked."""
+    store = MemoryBackend()
+    comms = InProcessComms()
+    comms.register("role:gate", Gate())
+    comms.register("role:c", KillOnce("c"))     # dies on the FIRST post-gate call
+    graph = Graph.of(Stage("gate", node="role:gate", then="c"),
+                     Stage("c", node="role:c"))
+    h = Harness(comms, graph, baton_store=BatonStore(store))
+    parked = await h.run(Envelope("task", {"steps": []}))
+    assert isinstance(parked, Suspended), parked
+
+    claimed: dict = {}
+    real_claim = h.batons.claim
+
+    async def spy(baton, rev):
+        claimed.update(baton.to_dict())        # the record exactly AS CLAIMED
+        return await real_claim(baton, rev)
+
+    h.batons.claim = spy
+    try:
+        await h.resume(parked.baton_id, Envelope("resume", {"human": "approve"}))
+    except InfraError:
+        pass
+    assert claimed, "the gate resume must claim the record"
+    assert claimed["status"] == "running" and claimed["stage"] == "c", claimed
+    assert claimed["awaiting"] is None and claimed["parked_at"] is None, claimed
+    assert claimed["pending"] is None, claimed
+    assert claimed["cursor_input"] is not None, claimed
+    assert claimed["cursor_input"]["payload"]["human"] == "approve", claimed
+
+    after = await BatonStore(store).load(parked.baton_id)
+    assert after.owner is None and after.leased_at is None, \
+        ("the failed drive must release the lease it took", after.owner)
+    assert await BatonStore(store).list_suspended() == [], "the gate was answered"
+    assert len(await BatonStore(store).list_running()) == 1, "…and left a checkpoint"
+    # THE DECISION IS DURABLE: it is the recovery's input, so the human is not asked
+    # again. This is what the pre-claim ordering lost.
+    assert after.cursor_input.payload["human"] == "approve", after.cursor_input.payload
+
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        out = await Harness(comms, graph, baton_store=BatonStore(store)
+                            ).resume_running(parked.baton_id)
+    assert isinstance(out, Done), out
+    assert await BatonStore(store).list_suspended() == [], "the gate must not re-open"
+
+    # THE TERMINAL GATE is deliberately NOT claimed: no post-gate stage to
+    # double-drive, and no cursor to checkpoint — a claim there would buy nothing and
+    # create the unrecoverable window this scenario exists to close.
+    store2 = MemoryBackend()
+    comms2 = InProcessComms()
+    comms2.register("role:gate", Gate())
+    last = Harness(comms2, Graph.of(Stage("gate", node="role:gate")),
+                   baton_store=BatonStore(store2))
+    parked2 = await last.run(Envelope("task", {}))
+    claimed.clear()
+    real_claim2 = last.batons.claim
+
+    async def spy2(baton, rev):
+        claimed.update(baton.to_dict())
+        return await real_claim2(baton, rev)
+
+    last.batons.claim = spy2
+    done = await last.resume(parked2.baton_id, Envelope("resume", {"human": "approve"}))
+    assert isinstance(done, Done), done
+    assert not claimed, "a terminal gate must not be claimed"
+    assert await BatonStore(store2).list_running() == [], "…and leaves no checkpoint"
+    print("PASS the gate claim publishes a clean record a crash can recover from")
+
+
 async def scenario_foreign_host_inside_and_outside_the_horizon() -> None:
     store = MemoryBackend()
     cp, comms = await _killed(store, owner="other-host/4242/abcd1234")
@@ -238,13 +448,14 @@ async def scenario_lease_host_reaches_the_owner_and_the_tier() -> None:
     # ...and the default is untouched: no lease_host = gethostname().
     assert mint_owner().startswith(HOST + "/"), mint_owner()
 
-    # THE ROOT PATH. `_lease_kw` passes each knob only when the root actually set it,
-    # so an unset key leaves the Harness default as the single place it is written
-    # down — and `build()` carries it through to the Harness.
-    from yaah.build.build import _lease_kw, build
-    assert _lease_kw(None, None) == {}, "unset root keys must pass NOTHING"
-    assert _lease_kw(60, "node-7") == {"lease_horizon": 60.0, "lease_host": "node-7"}
-    assert _lease_kw(None, "node-7") == {"lease_host": "node-7"}
+    # THE ROOT PATH. Both knobs pass straight through `build()` to the Harness, and
+    # an UNSET one stays None all the way into LeaseState — which owns the default,
+    # so it is written down in exactly one place.
+    from yaah.build.build import build
+    unset = build({"nodes": {"role:t": {"type": "transform", "target": "fn:json:loads"}},
+                   "graph": {"start": "s", "stages": {"s": {"node": "role:t"}}}})
+    assert unset._lease_horizon is None, unset._lease_horizon    # noqa: SLF001
+    assert unset._lease_host is None, unset._lease_host          # noqa: SLF001
     built = build({"nodes": {"role:t": {"type": "transform", "target": "fn:json:loads"}},
                    "graph": {"start": "s", "stages": {"s": {"node": "role:t"}}}},
                   lease_host="node-7", lease_horizon=60)
@@ -478,6 +689,10 @@ def main() -> None:
     scenario_pid_probe_errno_arms()
     asyncio.run(scenario_dead_pid_on_this_host_resumes())
     asyncio.run(scenario_own_live_pid_refuses_and_force_overrides())
+    asyncio.run(scenario_a_failed_recovery_releases_and_stays_recoverable())
+    asyncio.run(scenario_gate_resume_claims_the_baton())
+    asyncio.run(scenario_gate_claim_publishes_a_recoverable_checkpoint())
+    scenario_self_tier_is_per_harness_not_per_process()
     asyncio.run(scenario_foreign_host_inside_and_outside_the_horizon())
     asyncio.run(scenario_lease_host_reaches_the_owner_and_the_tier())
     asyncio.run(scenario_park_clears_the_lease())

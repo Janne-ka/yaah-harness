@@ -115,8 +115,12 @@ async def scenario_renamed_stage_refuses_naming_it() -> None:
     except ValueError as e:
         refused = e
     assert refused is not None, "a rewired graph must refuse"
-    assert "DIFFERENT graph topology" in str(refused), refused
-    assert "'b'" in str(refused) and "no longer exists" in str(refused), refused
+    # The DELETED-CURSOR-STAGE refusal wins over the topology one, deliberately: it
+    # is the condition no override answers (--allow-rewiring asserts the edit is
+    # cursor-compatible, which a vanished cursor stage can never be), so pointing at
+    # the rewiring flag here would send the operator down a path that also refuses.
+    assert "NO LONGER EXISTS" in str(refused) and "'b'" in str(refused), refused
+    assert "--allow-rewiring" not in str(refused), refused
     print("PASS a stage renamed between the kill and the recovery refuses, naming it")
 
 
@@ -176,6 +180,32 @@ async def scenario_allow_rewiring_proceeds() -> None:
     assert isinstance(out, Done), out
     assert out.output.payload["steps"] == ["a", "b", "c"], out.output.payload
     print("PASS --allow-rewiring proceeds against the edited graph")
+
+
+async def scenario_allow_rewiring_still_refuses_a_deleted_cursor_stage() -> None:
+    """`--allow-rewiring` asserts the edit is CURSOR-COMPATIBLE, and a deleted cursor
+    stage never is. It used to short-circuit the whole check and die on
+    `self.graph.stages[baton.stage]` with a bare KeyError — after the CAS claim had
+    committed, so the failed attempt also left the record leased to a run nobody was
+    driving."""
+    store = MemoryBackend()
+    cp, comms = await _killed_checkpoint(store, _graph())
+    without_b = Graph.of(Stage("a", node="role:a", then="c"),
+                         Stage("c", node="role:c"))
+    h2 = Harness(comms, without_b, baton_store=BatonStore(store))
+    refused = None
+    try:
+        await h2.resume_running(cp.id, allow_rewiring=True)
+    except KeyError as e:                    # the OLD failure mode — must not happen
+        raise AssertionError("a deleted cursor stage raised a bare KeyError: {!r}".format(e))
+    except ValueError as e:
+        refused = e
+    assert refused is not None, "a deleted cursor stage must refuse even with the flag"
+    assert "NO LONGER EXISTS" in str(refused) and "'b'" in str(refused), refused
+    # ...and it refused BEFORE the claim, so the record is exactly as it was.
+    still = await BatonStore(store).load(cp.id)
+    assert still.owner == cp.owner and still.leased_at == cp.leased_at, still
+    print("PASS --allow-rewiring still refuses a DELETED cursor stage, before claiming")
 
 
 async def scenario_gate_resume_across_edited_graph_warns() -> None:
@@ -314,6 +344,7 @@ async def main() -> None:
     await scenario_rerouted_branch_refuses()
     await scenario_prompt_edit_resumes_clean()
     await scenario_allow_rewiring_proceeds()
+    await scenario_allow_rewiring_still_refuses_a_deleted_cursor_stage()
     await scenario_gate_resume_across_edited_graph_warns()
     await scenario_gate_resume_onto_vanished_stage_refuses_cleanly()
     await scenario_pre_upgrade_baton_skips_with_a_note()

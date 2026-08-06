@@ -514,11 +514,17 @@ def test_custom_node_type_keys_are_not_checked() -> None:
                        "graph": {"start": "s1", "stages": {"s1": {"node": "x"}}}})
 
 
-def test_allow_unknown_node_keys_escape_hatch() -> None:
-    # the release valve for a pipeline authored against a NEWER engine
+def test_unknown_node_key_has_no_blanket_opt_out() -> None:
+    # the escape hatch is GONE (it silenced the whole check, was set by nobody, and
+    # refused nothing in-repo). The flag itself is now just an unknown top-level key.
     p = _shell_pipeline(bogus_key_xyz=1)
     p["allow_unknown_node_keys"] = True
-    validate_pipeline(p)
+    try:
+        validate_pipeline(p)
+    except ValueError as e:
+        assert "bogus_key_xyz" in str(e), str(e)
+        return
+    raise AssertionError("an unknown node key must raise regardless of any flag")
 
 
 def test_node_key_table_covers_every_built_in_type() -> None:
@@ -536,9 +542,15 @@ def test_node_key_table_covers_every_spec_read_in_builders() -> None:
     # The scan is WIDER than builders.py. `builders.py` holds most of the reads, but
     # not all: `build/live_leaf_config.py` re-reads the NodeConfig scalars per
     # invocation, `build/build.py` and `build/registry.py` read `_role`/`type`, and
-    # `validate.py` / `replay.py` are the two non-build modules that read a node spec
-    # by that name. Scanning only builders.py meant a new key read in any of them
-    # would be rejected by the very validator meant to allow it.
+    # `runtime.py` reads a spec for the serve selector and the blast-radius summary.
+    # `validate.py` / `replay.py` are scanned as the two non-build modules that would
+    # read a node spec under that name — today neither has such a read, so they are
+    # future-proofing, not load-bearing. Scanning only builders.py meant a new key
+    # read in any of them would be rejected by the very validator meant to allow it.
+    #
+    # The pattern accepts either quote style and interior whitespace: matching only
+    # `spec.get("k")` written exactly one way meant a reformat could silently drop a
+    # read out of the guard's sight.
     import glob
     import os
     import re
@@ -547,15 +559,17 @@ def test_node_key_table_covers_every_spec_read_in_builders() -> None:
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     src = os.path.join(root, "src", "yaah")
     files = sorted(glob.glob(os.path.join(src, "build", "*.py")))
-    files += [os.path.join(src, "validate.py"), os.path.join(src, "replay.py")]
+    files += [os.path.join(src, "validate.py"), os.path.join(src, "replay.py"),
+              os.path.join(src, "runtime.py")]
     assert os.path.join(src, "build", "builders.py") in files, files
     read = set()
     for path in files:
         with open(path) as f:
-            read |= set(re.findall(r'spec(?:\.get\(|\[)"(\w+)"', f.read()))
+            read |= set(re.findall(r"""spec\s*(?:\.get\(\s*|\[\s*)['"](\w+)['"]""",
+                                   f.read()))
     known = set(COMMON_NODE_KEYS).union(*BUILTIN_NODE_KEYS.values())
     missing = sorted(k for k in read if not k.startswith("_") and k not in known)
-    assert not missing, "build/validate/replay read node keys absent from node_keys: {}".format(
+    assert not missing, "build/validate/replay/runtime read node keys absent from node_keys: {}".format(
         missing)
 
 
@@ -725,6 +739,46 @@ def test_budget_lease_horizon_must_fit_the_checkpoint_window() -> None:
     validate_budgets({"lease_horizon": 3600}, p)
     validate_budgets({"checkpoint_ttl": 3600, "lease_horizon": 3600}, p)   # equal is fine
     validate_budgets({}, p)
+
+
+def test_budget_window_keys_must_be_numbers() -> None:
+    """A QUOTED number is not comparable to a number, so the coherence check above
+    simply did not fire on it and the incoherent window shipped silently. The type
+    is now the error — and `null` stays legal (never expire / use the default)."""
+    from yaah.validate import validate_budgets
+    p = _valid_pipeline()
+    for key, bad in (("lease_horizon", "3600"), ("checkpoint_ttl", "600"),
+                     ("baton_ttl", True)):
+        try:
+            validate_budgets({key: bad}, p)
+        except ValueError as e:
+            assert key in str(e) and "number of seconds" in str(e), str(e)
+        else:
+            raise AssertionError("{}={!r} must be a type error".format(key, bad))
+
+    # the quoted pair used to pass BOTH checks; now the type error names them
+    try:
+        validate_budgets({"lease_horizon": "3600", "checkpoint_ttl": "600"}, p)
+    except ValueError as e:
+        assert "lease_horizon" in str(e) and "checkpoint_ttl" in str(e), str(e)
+    else:
+        raise AssertionError("a quoted window pair must not pass silently")
+
+    validate_budgets({"lease_horizon": None, "checkpoint_ttl": None,
+                      "baton_ttl": None}, p)     # explicit null is legal on all three
+    validate_budgets({"checkpoint_ttl": 600.5, "lease_horizon": 60}, p)   # floats fine
+
+
+def test_root_run_dir_must_be_a_string() -> None:
+    """`run_dir` is joined + abspathed on the way in and is the `{run_dir}` macro's
+    target, so a non-string used to die as a bare TypeError inside assembly."""
+    try:
+        validate_root({"run_dir": ["artifacts", "run-9"]})
+    except ValueError as e:
+        assert "run_dir" in str(e) and "path string" in str(e), str(e)
+    else:
+        raise AssertionError("a non-string run_dir must be a root error")
+    validate_root({"run_dir": "artifacts/run-9"})
 
 
 def test_budget_inproc_has_no_reply_window() -> None:
@@ -939,6 +993,8 @@ def main() -> None:
     test_budget_node_timeout_exceeds_transport_window()
     test_budget_inproc_has_no_reply_window()
     test_budget_lease_horizon_must_fit_the_checkpoint_window()
+    test_budget_window_keys_must_be_numbers()
+    test_root_run_dir_must_be_a_string()
     test_budget_fork_wait_smaller_than_branch_node_timeout()
     test_stage_error_retries_is_a_known_key()
     test_min_success_rules()
@@ -950,7 +1006,7 @@ def main() -> None:
     test_node_underscore_keys_are_legal_everywhere()
     test_node_common_keys_legal_on_every_type()
     test_custom_node_type_keys_are_not_checked()
-    test_allow_unknown_node_keys_escape_hatch()
+    test_unknown_node_key_has_no_blanket_opt_out()
     test_node_key_table_covers_every_built_in_type()
     test_node_key_table_covers_every_spec_read_in_builders()
     test_shell_interpolate_from_key_never_produced_fails_at_load()
@@ -958,7 +1014,7 @@ def main() -> None:
     test_shell_reads_satisfied_upstream_pass()
     test_shell_placeholder_without_interpolate_from_reads_nothing()
     test_shell_declared_but_unused_interpolate_key_is_not_a_read()
-    print("test_validate: PASS (58 scenarios)")
+    print("test_validate: PASS (62 scenarios)")
 
 
 if __name__ == "__main__":

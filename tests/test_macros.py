@@ -127,6 +127,29 @@ def scenario_no_collision_with_runtime_interpolation() -> None:
     assert out["command"] == ["psql", "{{db_url}}", "-o", "/runs/q/dump.sql"], out["command"]
     assert out["template_text"] == "wrote {{count}} rows to /runs/q", out["template_text"]
 
+    # THE NAME COLLISION: a run-time placeholder that happens to be CALLED
+    # `{{run_dir}}`/`{{base_dir}}` contains the macro token as a substring. A plain
+    # replace rewrote it to `{/runs/q}` at build — a silently corrupted template at
+    # exit 0, with the run-time fill it was waiting for never happening.
+    both = expand_macros({"template_text": "{{run_dir}}/x and {run_dir}/y",
+                          "out": "{{base_dir}}/a and {base_dir}/b"}, ctx)
+    assert both["template_text"] == "{{run_dir}}/x and /runs/q/y", both["template_text"]
+    base = os.path.abspath("rel/dir")
+    assert both["out"] == "{{base_dir}}/a and " + base + "/b", both["out"]
+
+    # ...and a spec whose ONLY use is the double-brace placeholder must not even
+    # RESOLVE the macro — no `run_dir` root key, no error, because no macro is used.
+    placeholder_only = expand_macros({"template_text": "{{run_dir}}/x"}, _ctx(run=None))
+    assert placeholder_only["template_text"] == "{{run_dir}}/x", placeholder_only
+
+    # THE ADJACENCY EDGES, pinned because they are documented as accepted limits
+    # (templating.macro_matcher): a LOPSIDED brace is neither dialect and is left
+    # alone, silently — guessing which one it meant is worse. And a triple brace
+    # composes: the build skips the brace-wrapped token, the run-time fill takes the
+    # inner pair, and the outer braces stay literal.
+    edges = expand_macros(["{{run_dir}", "{run_dir}}", "{{{run_dir}}}"], ctx)
+    assert edges == ["{{run_dir}", "{run_dir}}", "{{{run_dir}}}"], edges
+
     # a string with no brace at all short-circuits untouched
     assert expand_macros("plain/path", ctx) == "plain/path"
     print("PASS `{run_dir}` and `{{key}}` coexist: build-time vs run-time, no collision")

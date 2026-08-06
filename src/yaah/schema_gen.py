@@ -325,9 +325,6 @@ def build_pipeline_schema() -> Dict[str, Any]:
                 "additionalProperties": node_spec_schema,
             },
             "graph": graph_schema,
-            # the per-node-type key check's release valve (validate._check_node_keys):
-            # a pipeline authored against a newer engine, knowingly loaded by an older one.
-            "allow_unknown_node_keys": {"type": "boolean"},
             # editor-side schema pointer (see build_root_schema).
             "$schema": {"type": "string"},
         },

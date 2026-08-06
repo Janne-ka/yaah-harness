@@ -72,7 +72,8 @@ async def scenario_per_attempt_history_traced() -> None:
     retries = [s.attrs for s in h._tracer.spans
                if s.name == "stage" and s.attrs.get("retry") == "transient"]
     assert len(retries) == 2, retries  # two transient retries before success
-    assert retries[0].get("n") == 1 and retries[1].get("n") == 2, retries
+    assert (retries[0].get("error_retry_n") == 1
+            and retries[1].get("error_retry_n") == 2), retries
     print("PASS each transient retry emits its own note span (per-attempt history)")
 
 

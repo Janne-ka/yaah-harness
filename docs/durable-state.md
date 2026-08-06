@@ -271,14 +271,42 @@ runs, exactly as `_batons` does today.
   because since the first-stage checkpoint every stage boundary is already a store
   write, so the lease refreshes exactly as often as the run makes progress. A park
   CLEARS both (a parked gate has no owning process). `resume_running` then decides in
-  three tiers (`LeaseState`): **no owner** → allow with a note (a pre-upgrade
-  record); **same host** → a real `os.kill(pid, 0)` probe, dead ⇒ recover, alive ⇒
-  REFUSE naming host/pid (escape: `--force`, with a loud stderr line); **foreign
-  host** → no probe is possible, so fall back to the lease age against root
-  `lease_horizon` (default 3600s) — past it ⇒ allow with a warning, within it ⇒
-  refuse. The decision is then CLAIMED with `BatonStore.claim(baton, expected_rev)`
-  (CAS on the revision it was read at), so two operators racing the same recovery
-  cannot both win; the loser is refused naming the winner.
+  tiers (`LeaseState`): **our own lease** → always recoverable (an owner id matching
+  the caller's OWN, nonce included, can only have been left by that same harness's
+  previous attempt, and refusing it would make a harness refuse its own retry and
+  print a `--force` hint naming itself — note this is per-HARNESS-OBJECT, so a
+  second harness in the same process does not match and falls to the pid tier);
+  **no owner** → allow with a note (a record that predates the lease, or one a
+  failed drive released); **same
+  host** → a real `os.kill(pid, 0)` probe, dead ⇒ recover, alive ⇒ REFUSE naming
+  host/pid (escape: `--force`, with a loud stderr line); **foreign host** → no probe
+  is possible, so fall back to the lease age against root `lease_horizon` (default
+  3600s) — past it ⇒ allow with a warning, within it ⇒ refuse. The decision is then
+  CLAIMED with `BatonStore.claim(baton, expected_rev)` (CAS on the revision it was
+  read at), so two operators racing the same recovery cannot both win; the loser is
+  refused naming the winner. A recovery whose re-drive then FAILS releases the lease
+  on its way out (the checkpoint is kept — it is what the next recovery re-drives),
+  so no other reader is left looking at a lease nobody holds.
+
+  The SAME claim fences a gate `resume`: the parked record is read with its revision
+  and written back under a CAS before the decision is driven, so two operators
+  answering one gate cannot both drive the post-gate stage. Every refusal (unknown
+  baton, not parked, a nonconforming decision, a deleted stage) is raised BEFORE the
+  claim, so a rejected decision leaves the gate parked and re-submittable, and the
+  same release arm covers the drive that fails afterwards.
+
+  That claim write is also the FIRST POST-GATE CHECKPOINT, not a status flip: the
+  baton is fully mutated first — gate fields cleared, cursor advanced past the gate,
+  `cursor_input` = the envelope with the human's decision already merged — so one
+  write publishes a record that is valid on its own (no `awaiting`/`parked_at` on a
+  `running` record, per the debugging contract) and that `resume_running` accepts.
+  Ordered the other way round, a crash between the claim and the checkpoint left a
+  record NEITHER verb would take — `resume` refuses a non-suspended baton,
+  `resume_running` refuses one with no cursor — losing a run that would otherwise
+  have stayed parked. A gate whose route is TERMINAL is deliberately NOT claimed:
+  there is no post-gate stage for a second caller to double-drive and no cursor to
+  checkpoint, so claiming would protect nothing while creating exactly that
+  unrecoverable window; it stays parked until the run completes.
 
   `--force` and `--allow-rewiring` are SEPARATE flags on purpose: they waive two
   different assertions ("that process is dead" / "this graph edit is
@@ -289,7 +317,14 @@ runs, exactly as `_batons` does today.
   hosts distorts the foreign-host age (the horizon is a coarse fallback, not a
   consensus protocol). A SIGSTOP'd process answers the liveness probe and so refuses
   forever — the escape is `--force`. PID REUSE can report a dead owner as live (a
-  false REFUSE, the safe direction). **The CAS claim fences RECOVERY, not the
+  false REFUSE, the safe direction). The owner id names a HARNESS OBJECT, not a run
+  and not a process, so an embedding app driving many runs in one long-lived process
+  reads a dead run's lease as live for as long as that process lives — including
+  from a second harness inside it, which does not match the self tier and sees only
+  a live pid. What covers the embedded case is the release arm on the failure path
+  (a drive that raises nulls the lease it took) plus `--force`; the self tier only
+  covers ONE harness re-driving a run it leased itself. Stamping the driving task's
+  identity into the owner id would close the general case; deferred. **The CAS claim fences RECOVERY, not the
   INCUMBENT: `_checkpoint` saves unconditionally, so an owner wrongly presumed dead
   (the foreign-host-past-horizon case) re-takes the record at its next stage boundary
   and the two drivers alternate ownership rather than one being stopped.**
@@ -313,7 +348,7 @@ runs, exactly as `_batons` does today.
   automatic, and `yaah run` does NOT gate on the presence of running checkpoints
   (that would deadlock a fleet whose concurrent runs each hold a live checkpoint on
   the shared store). `yaah list` now labels each RUNNING line
-  `owner=… lease=live|stale(2h14m)|foreign(2h14m)|none` and prints the `resume-run`
+  `owner=… lease=live|stale(2h14m)|foreign(2h14m)|none` (`self` is reachable only from inside the harness that holds the lease, never from a fresh CLI process) and prints the `resume-run`
   hint ONLY when the lease is not live.
 
 ## 6. `IdempotencyStore` — execute-once for side effects

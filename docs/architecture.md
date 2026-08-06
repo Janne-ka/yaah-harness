@@ -281,10 +281,9 @@ The same generic stages get their pipeline behaviour from declarative fields the
   "fork_partial": {"fork":     "<forking stage name>",
                    "reason":   "wait_timeout" | "branch_failed" | "fanin_unmeetable",
                    "detail":   "<error text>",          // only on a determined degrade
-                   "arrived":  ["<branch-id>", ...],    // sorted ids that landed
-                   "results":  {"<branch-id>": {…payload…}},
+                   "results":  {"<branch-id>": {…payload…}},   // the ids that landed
                    "expected": ["<branch-id>", ...],    // what fanin.expect named
-                   "missing":  ["<branch-id>", ...]}    // expected - arrived
+                   "missing":  ["<branch-id>", ...]}    // expected - the ids in results
   ```
 
   - **Absent when nothing arrived.** Zero arrivals returns the pre-fork envelope byte-identically — fully backwards compatible, and a degrade with nothing to show stays loud downstream.

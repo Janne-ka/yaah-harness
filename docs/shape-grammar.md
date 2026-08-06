@@ -124,8 +124,9 @@ is `src/yaah/node_keys.py` (one row per builder), and the error names the node,
 the key and the whole legal set. A key that is legal on a *different* type is
 still rejected — that is the residue an `_extends` overlay leaves when it flips a
 node's `type`. A type the engine does not build (an app-registered custom type) is
-not checked. Escape hatch for a pipeline authored against a newer engine:
-`"allow_unknown_node_keys": true` at the pipeline top level.
+not checked. There is no blanket opt-out: a pipeline carrying keys this engine
+cannot read is a pipeline whose features are not there, which is the exact failure
+this check exists to end — pin the engine the pipeline was authored against.
 
 ## Agent node — the extras
 

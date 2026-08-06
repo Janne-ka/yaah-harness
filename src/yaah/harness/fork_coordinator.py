@@ -49,16 +49,6 @@ class _WaitDetermined(Exception):
         super().__init__(reason)
 
 
-def _expect_count(expect: dict) -> "Optional[int]":
-    """The `n` of a `{"count": n}` fan-in expect, or None when it is not a
-    number. Never raises: it is read on the DEGRADE path, where a malformed
-    config must cost the caller a nameable `expected` set, not the salvage."""
-    try:
-        return int(expect.get("count", 1))
-    except (TypeError, ValueError):
-        return None
-
-
 def _safe_set(fut: "asyncio.Future", value: object) -> None:
     """Idempotent future.set_result — drops the call if the future is already
     done (a race between two clear publishers). Scheduled via
@@ -199,8 +189,8 @@ class ForkCoordinator:
         is missing, and let the app decide — never silently discard them.
 
         The engine stays domain-free: it delivers the arrivals under the reserved
-        `fork_partial` key ({fork, reason, detail, arrived, results:{branch_id:
-        payload}}) and takes no view of their shape. A reducer is NOT run — the
+        `fork_partial` key ({fork, reason, detail, results:{branch_id: payload},
+        expected, missing}) and takes no view of their shape. A reducer is NOT run — the
         fan-in's `reduce` is declared for a MET policy, and calling it on a
         partial set would fabricate a full-fork result. With NO arrivals the
         pre-fork input is returned exactly as before (fully backwards
@@ -225,8 +215,11 @@ class ForkCoordinator:
             return input
         if not arrived:
             return input
-        partial = {"fork": stage.name, "reason": reason,
-                   "arrived": sorted(arrived), "results": arrived,
+        # No `arrived` list: it is exactly `sorted(results)`, and a derivable field
+        # on a published contract is a field that can go stale. `missing` stays —
+        # it is NOT derivable from `results` alone (it needs `expected`) and is the
+        # one an app actually branches on.
+        partial = {"fork": stage.name, "reason": reason, "results": arrived,
                    # what the join WANTED, so a listener can name the arm that
                    # never landed (see _collect_parked for when it is knowable)
                    "expected": sorted(expected),
@@ -277,7 +270,12 @@ class ForkCoordinator:
             exp = (self._h.graph.stages[name].fanin or {}).get("expect")
             if isinstance(exp, list):
                 expected.update(exp)
-            elif isinstance(exp, dict) and _expect_count(exp) == len(stage.fork or []):
+            elif isinstance(exp, dict) and exp.get("count") == len(stage.fork or []):
+                # `.get("count")` with NO default: an expect that names no count
+                # ({"any": true}) wanted no particular set, and defaulting it to 1
+                # made a width-1 fork report `expected: [that arm]` for a policy
+                # that never asked for it — guessing, in the method that says it
+                # will not. A non-numeric count simply never equals the width.
                 expected.update(stage.fork or [])
         return arrived, expected
 

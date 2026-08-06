@@ -27,13 +27,26 @@ from __future__ import annotations
 import json
 from typing import List, Optional, Tuple
 
-from ..store import ScannableBackend, StoreBackedFacade
+from ..store import CompareAndSet, ScannableBackend, StoreBackedFacade
 from .baton import Baton
 
 
 class BatonStore(StoreBackedFacade[ScannableBackend]):  # +SCAN: sweep/list need scan
     PREFIX = "baton:"
     REQUIRES = ScannableBackend  # checked at construction (fail fast)
+
+    def __init__(self, backend: ScannableBackend) -> None:
+        super().__init__(backend)
+        # The OPTIONAL +CAS tier, resolved ONCE. It used to be probed per call, once
+        # per method, which made a HALF tier representable: a backend with `get_rev`
+        # but no `cas` handed `load_rev` a real revision that `claim` then ignored —
+        # a single-owner claim that silently could not fail. Resolved here it is all
+        # or nothing. Method presence rather than isinstance, for the reason
+        # StoreBackedFacade.__init__ gives (a __getattr__-delegating proxy is a
+        # legitimate backend, and isinstance stopped seeing those in 3.12).
+        missing = [m for m in getattr(CompareAndSet, "__abstractmethods__", ())
+                   if not callable(getattr(backend, m, None))]
+        self._cas: Optional[CompareAndSet] = None if missing else backend
 
     async def save(self, baton: Baton) -> None:
         await self._store.put(self.PREFIX + baton.id, json.dumps(baton.to_dict()).encode())
@@ -47,10 +60,9 @@ class BatonStore(StoreBackedFacade[ScannableBackend]):  # +SCAN: sweep/list need
         of the read-decide-claim sequence in `Harness.resume_running`. On a backend
         without the +CAS tier the revision is None, which `claim` treats as "no
         conflict detection available" (see there)."""
-        get_rev = getattr(self._store, "get_rev", None)
-        if get_rev is None:
+        if self._cas is None:
             return await self.load(baton_id), None
-        raw, rev = await get_rev(self.PREFIX + baton_id)
+        raw, rev = await self._cas.get_rev(self.PREFIX + baton_id)
         return (Baton.from_dict(json.loads(raw.decode())) if raw is not None else None), rev
 
     async def claim(self, baton: Baton, expected_rev: Optional[int]) -> bool:
@@ -59,26 +71,26 @@ class BatonStore(StoreBackedFacade[ScannableBackend]):  # +SCAN: sweep/list need
         False when the claim was LOST — another process got there first, and the
         caller must refuse rather than double-drive the run.
 
-        The +CAS tier is OPTIONAL, probed by `getattr` — the same stance the
-        facades take toward `close()`: a backend that has it gets the real
+        The +CAS tier is OPTIONAL (resolved once in `__init__`) — the same stance
+        the facades take toward `close()`: a backend that has it gets the real
         guarantee, one that does not still works. On a non-CAS backend this falls
         back to a plain `put` and returns True, so the claim is ADVISORY there;
         the refusal message says so, because "your store cannot prove this" is an
         operator fact, not an engine detail to hide. FileBackend's CAS is
         flock-serialized, which is itself advisory over NFS."""
-        cas = getattr(self._store, "cas", None)
-        if cas is None:
+        if self._cas is None:
             await self.save(baton)
             return True
-        rev = await cas(self.PREFIX + baton.id,
-                        json.dumps(baton.to_dict()).encode(), expected=expected_rev)
+        rev = await self._cas.cas(self.PREFIX + baton.id,
+                                  json.dumps(baton.to_dict()).encode(),
+                                  expected=expected_rev)
         return rev is not None
 
     def has_cas(self) -> bool:
         """Whether this store can actually PROVE a claim (the +CAS tier). Read by
         the refusal/warning messages so an operator on a memory/blob backend is
         told the single-owner check was advisory."""
-        return callable(getattr(self._store, "cas", None))
+        return self._cas is not None
 
     async def delete(self, baton_id: str) -> None:
         await self._store.delete(self.PREFIX + baton_id)

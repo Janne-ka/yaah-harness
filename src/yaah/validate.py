@@ -192,6 +192,13 @@ def _check_shapes(root: Dict[str, Any], errs: List[str]) -> None:
         if k in root and not isinstance(root[k], str):
             errs.append("{!r}: expected string, got {} {!r}".format(
                 k, type(root[k]).__name__, root[k]))
+    rd = root.get("run_dir")
+    if rd is not None and not isinstance(rd, str):
+        errs.append("'run_dir': expected a path string (this run's artifact root, "
+                    "base-relative or absolute), got {} {!r} — it is joined against "
+                    "the config's own directory on the way in and is what the "
+                    "{{run_dir}} node-spec macro expands to, so a non-string dies as "
+                    "a bare TypeError inside assembly".format(type(rd).__name__, rd))
     if "input" in root and not isinstance(root["input"], (str, dict)):
         errs.append("'input': expected a fixture path or an inline payload object, got {} {!r}".format(
             type(root["input"]).__name__, root["input"]))
@@ -649,14 +656,12 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None, *
     raised here. `build()` passes the harness's own strict_resume so the load-time verdict
     matches the run's actual enforcement.
 
-    `allow_unknown_node_keys` (pipeline top-level, default false) is the release
-    valve for the per-node-type key check: a pipeline authored against a NEWER
-    engine carries keys this one cannot read, and a consumer who knowingly accepts
-    that (rather than pinning the engine) sets it. Deliberately explicit and
-    per-pipeline — silent tolerance is the exact failure this check exists to end,
-    so there is no WARN-only mode to drift back into."""
+    The per-node-type key check has NO blanket opt-out, deliberately: a pipeline
+    carrying keys this engine cannot read is a pipeline whose features are simply not
+    there (the five-week `target_from` silence this table was built for), and a flag
+    that tolerates them tolerates exactly that. A pipeline authored against a newer
+    engine is answered by pinning the engine, not by silencing the reader."""
     nodes = set(config.get("nodes", {}))
-    allow_unknown_node_keys = bool(config.get("allow_unknown_node_keys"))
     g = config.get("graph") or {}
     stages = g.get("stages", {})
     errs: List[str] = []
@@ -673,8 +678,7 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None, *
                 "overlay, the base pipeline has no such node (stale overlay key "
                 "after a rename/removal?)".format(role, _suggest(role, nodes - {role})))
             continue
-        if not allow_unknown_node_keys:
-            _check_node_keys(role, n, errs)
+        _check_node_keys(role, n, errs)
         # ADR-0005 `provides` (data-flow contract): the keys a node GUARANTEES on the
         # payload. Required to lint across an envelope-transform (whose output keys are
         # otherwise opaque), optional elsewhere as an explicit override. Must be a list
@@ -1025,6 +1029,7 @@ def lint_pipeline(config: Dict[str, Any], base_path: Optional[str] = None,
     if not strict_resume:
         for st, key, form, enum in _gate_dead_routes(nodes, stages):
             warnings.append(_gate_dead_route_msg(st, key, form, enum, lenient=True))
+    _lint_render_template_unreadable(nodes, warnings)
     _lint_rollback_without_effects(nodes, stages, warnings)
     _lint_reserved_key_collision(nodes, stages, sticky, warnings)
     _lint_clear_is_not_rollback(nodes, stages, warnings)
@@ -1077,6 +1082,33 @@ def _lint_weak_output_schema(nodes: Dict[str, Any], warnings: List[str]) -> None
                 "type/enum). A parseable-but-wrong value then passes check_schema and "
                 "surfaces far downstream — declare type/enum on each so bad output is "
                 "caught here. [lint: weak-output-schema]".format(role, required, untyped))
+
+
+def _lint_render_template_unreadable(nodes: Dict[str, Any], warnings: List[str]) -> None:
+    """Rule `render-template-unreadable`. A render whose `template_file` is macro'd with
+    `{run_dir}` cannot be read where templates are read statically — that artifact root
+    exists only once a run starts — so the consumes lint sees no `{{key}}` reads and every
+    data-flow check on this node passes vacuously. Say so: "reads nothing checkable" and
+    "could not be read" are different verdicts and only one of them is a clean bill.
+
+    `{base_dir}` does NOT fire this: it IS the lint's `base_path`, so those templates are
+    expanded and read (templating.render_template_text). `allow_unfilled: true` silences
+    it — the author already declared they accept literal holes."""
+    from .templating import unresolvable_macro
+    for role, node in nodes.items():
+        if role.startswith("_") or not isinstance(node, dict):
+            continue
+        if node.get("type") != "render" or node.get("allow_unfilled"):
+            continue
+        macro = unresolvable_macro(node)
+        if macro:
+            warnings.append(
+                "node {!r}: `template_file` contains {}, which resolves only at run start "
+                "— the lint could NOT read this template, so its {{{{key}}}} reads are "
+                "UNCHECKED (a key missing from the payload renders a literal hole into the "
+                "output at exit 0). Keep the template under {} where the lint can read it, "
+                "or set allow_unfilled:true to accept the gap explicitly. "
+                "[lint: render-template-unreadable]".format(role, macro, "{base_dir}"))
 
 
 def _lint_attach_undeclared_keys(nodes: Dict[str, Any], warnings: List[str]) -> None:
@@ -1602,6 +1634,20 @@ def validate_budgets(root: Dict[str, Any], pipeline: Dict[str, Any]) -> None:
     from .harness.lease_state import DEFAULT_LEASE_HORIZON
 
     errs: List[str] = []
+    # TYPE FIRST, coherence second. A QUOTED number ("3600") is not comparable to a
+    # number in py3, so the coherence check below did not fire on it — the config
+    # was accepted and the window it describes was never checked. A wrong type IS
+    # the config bug; report it rather than step over it. `null` stays legal on all
+    # three (the ttls mean "never expire", the horizon means "use the default"),
+    # and a bool is not a number here even though Python says it is.
+    for key in ("lease_horizon", "checkpoint_ttl", "baton_ttl"):
+        v = root.get(key)
+        if key in root and v is not None and (isinstance(v, bool)
+                                              or not isinstance(v, (int, float))):
+            errs.append(
+                "{}: expected a number of seconds (or null), got {} {!r} — a quoted "
+                "number is not a number, and the lease/sweep coherence check below "
+                "cannot compare what it cannot read".format(key, type(v).__name__, v))
     horizon = root.get("lease_horizon", DEFAULT_LEASE_HORIZON)
     checkpoint_window = root.get("checkpoint_ttl",
                                  root.get("baton_ttl", DEFAULT_BATON_TTL))

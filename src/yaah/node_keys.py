@@ -14,10 +14,11 @@ is the enforcement: one entry per builder in `build/builders.py`, so a new
 The drift guard behind that promise is `test_validate.py::
 test_node_key_table_covers_every_spec_read_in_builders`, and its reach is worth
 stating precisely rather than claiming totality: it regex-scans `build/*.py`,
-`validate.py` and `replay.py` for LITERAL `spec.get("k")` / `spec["k"]` reads. A key
-reached some other way — a computed name, a different variable, a module outside
-that set — is not seen by it. So the table is enforced against the way node keys
-are actually read today, not against every conceivable read.
+`runtime.py`, `validate.py` and `replay.py` for LITERAL `spec.get("k")` /
+`spec["k"]` reads, either quote style. A key reached some other way — a computed
+name, a different variable, a module outside that set — is not seen by it. So the
+table is enforced against the way node keys are actually read today, not against
+every conceivable read.
 
 It lives here rather than in `build/builders.py` for the reason
 `node_contract.BUILTIN_CONTRACTS` does: `validate` must stay cheap to import

@@ -301,6 +301,60 @@ def quiet_render_template_file_unreadable() -> None:
         assert not _has_render_warn(cfg, base_path=d)
 
 
+def render_template_file_expands_the_base_dir_macro() -> None:
+    """`{base_dir}` IS the lint's `base_path`, so a macro'd `template_file` must be
+    read like any other. Before, the lint opened the literal "{base_dir}/out.html",
+    got an OSError, and silently concluded the render reads nothing checkable — the
+    node's every data-flow check then passed vacuously."""
+    import os
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "out.html"), "w") as f:
+            f.write("<h1>{{verdict}}</h1>")
+        cfg = _render_cfg(template_file="{base_dir}/out.html",
+                          schema={"properties": {"other": {"type": "string"}}})
+        assert _has_render_warn(cfg, base_path=d), lint_pipeline(cfg, d)
+        assert not _has(cfg, "render-template-unreadable", base_path=d), lint_pipeline(cfg, d)
+
+
+def render_template_file_base_dir_macro_with_a_relative_base() -> None:
+    """The macro expands to the ABSOLUTE base, so the expanded path must not ALSO be
+    joined against `base_path`. With a relative base ("../tmpXXXX", which is what a
+    root config loaded by a relative path gives) the second join prefixed the base
+    twice, the open failed, and the lint read the None as "nothing to check"."""
+    import os
+    import tempfile
+
+    from yaah.templating import render_template_text
+    with tempfile.TemporaryDirectory() as d:
+        with open(os.path.join(d, "out.html"), "w") as f:
+            f.write("<h1>{{verdict}}</h1>")
+        rel = os.path.relpath(d, os.getcwd())
+        assert not os.path.isabs(rel), rel
+        got = render_template_text({"template_file": "{base_dir}/out.html"}, rel)
+        assert got == "<h1>{{verdict}}</h1>", got
+        # the un-macro'd path still resolves relative to the base, as it always did
+        assert render_template_text({"template_file": "out.html"}, rel) == got
+
+
+def warns_render_template_file_macroed_with_run_dir() -> None:
+    """`{run_dir}` resolves only once a run starts, so the template genuinely CANNOT
+    be read at lint time. That is a finding, not a clean bill: "reads nothing
+    checkable" and "could not be read" are different verdicts, and the silent second
+    one turned an unchecked render into a pass."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        cfg = _render_cfg(template_file="{run_dir}/report.html",
+                          schema={"properties": {"other": {"type": "string"}}})
+        w = lint_pipeline(cfg, d)
+        assert any("render-template-unreadable" in m and "render" in m for m in w), w
+        assert any("{run_dir}" in m for m in w), w
+        # allow_unfilled is the explicit acceptance of exactly this gap
+        ok = _render_cfg(template_file="{run_dir}/report.html", allow_unfilled=True,
+                         schema={"properties": {"other": {"type": "string"}}})
+        assert not _has(ok, "render-template-unreadable", base_path=d), lint_pipeline(ok, d)
+
+
 def render_template_file_resolves_against_root_dir() -> None:
     """Regression: the render lint resolves `template_file` against the ROOT config
     dir (what the runtime passes as base_dir), NOT the pipeline file's dir. A pipeline
@@ -2427,6 +2481,9 @@ def main() -> None:
     quiet_render_template_file_without_base()
     warns_render_template_file_read_from_base()
     quiet_render_template_file_unreadable()
+    render_template_file_expands_the_base_dir_macro()
+    render_template_file_base_dir_macro_with_a_relative_base()
+    warns_render_template_file_macroed_with_run_dir()
     render_template_file_resolves_against_root_dir()
     warns_render_multipath_one_path_missing()
     quiet_render_multipath_both_provide()

@@ -418,7 +418,7 @@ async def scenario_dead_arm_under_timed_wait_degrades_immediately() -> None:
     assert seen and seen[0].get("seed") == 1, seen  # pre-fork payload survives
     # …and since the M33 review's HIGH-1 the healthy arm rides out with it: this
     # graph's arm `a` DID deposit at the join before `bad` killed the fork.
-    assert seen[0].get("fork_partial", {}).get("arrived") == ["a"], seen[0]
+    assert sorted(seen[0].get("fork_partial", {}).get("results") or {}) == ["a"], seen[0]
 
 
 async def scenario_timed_wait_happy_path_clears_normally() -> None:
@@ -524,7 +524,7 @@ async def scenario_timeout_delivers_completed_arm() -> None:
         assert len(seen) == 1, seen
         part = seen[0].get("fork_partial")
         assert part is not None, ("the completed arm must reach the continuation", seen[0])
-        assert part["arrived"] == ["b"], part
+        assert sorted(part["results"]) == ["b"], part
         assert part["expected"] == ["a", "b"] and part["missing"] == ["a"], part
         assert part["fork"] == "spread" and part["reason"] == "wait_timeout", part
         assert part["results"]["b"]["findings"] == [{"id": "B"}], part
@@ -571,7 +571,7 @@ async def scenario_branch_failed_delivers_completed_arm() -> None:
         assert len(errs) == 1 and errs[0].payload["reason"] == "branch_failed", errs
         part = seen[0].get("fork_partial")
         assert part is not None, ("branch_failed must deliver the completed arm", seen[0])
-        assert part["arrived"] == ["b"] and part["reason"] == "branch_failed", part
+        assert sorted(part["results"]) == ["b"] and part["reason"] == "branch_failed", part
         assert part["expected"] == ["a", "b"] and part["missing"] == ["a"], part
         assert part["results"]["b"]["findings"] == [{"id": "B"}], part
         assert "branch output not ok" in part.get("detail", ""), part
@@ -612,7 +612,7 @@ async def scenario_fanin_unmeetable_delivers_completed_arm() -> None:
         assert len(errs) == 1 and errs[0].payload["reason"] == "fanin_unmeetable", errs
         part = seen[0].get("fork_partial")
         assert part is not None, ("fanin_unmeetable must deliver the completed arm", seen[0])
-        assert part["arrived"] == ["b"] and part["reason"] == "fanin_unmeetable", part
+        assert sorted(part["results"]) == ["b"] and part["reason"] == "fanin_unmeetable", part
         assert part["expected"] == ["a", "b"] and part["missing"] == ["a"], part
         assert part["results"]["b"]["findings"] == [{"id": "B"}], part
         assert seen[0].get("seed") == "S", ("pre-fork payload must survive", seen[0])
@@ -658,7 +658,7 @@ async def scenario_fanin_own_timeout_still_salvages() -> None:
         assert len(errs) == 1 and errs[0].payload["reason"] == "wait_timeout", errs
         part = seen[0].get("fork_partial")
         assert part is not None, ("an early fan-in must not erase the salvage", seen[0])
-        assert part["arrived"] == ["b"], part
+        assert sorted(part["results"]) == ["b"], part
         assert part["results"]["b"]["findings"] == [{"id": "B"}], part
         assert await es.list("") == [], "parked set must be released on the degrade"
 
@@ -738,12 +738,46 @@ async def scenario_partial_names_arms_under_a_count_expect() -> None:
 
     # count == the fork's width: "every arm", so the missing one is nameable
     full = await _run(("a",), ("b",), 2)
-    assert full["arrived"] == ["b"], full
+    assert sorted(full["results"]) == ["b"], full
     assert full["expected"] == ["a", "b"] and full["missing"] == ["a"], full
     # count SHORTER than the fork: which two of the three? the engine won't guess
     partial = await _run(("a", "b"), ("c",), 2)
-    assert partial["arrived"] == ["c"], partial       # the salvage is unchanged
+    assert sorted(partial["results"]) == ["c"], partial   # the salvage is unchanged
     assert partial["expected"] == [] and partial["missing"] == [], partial
+
+
+def boom_reduce(arrived):    # fn: reduce target — always raises
+    raise RuntimeError("reduce target is broken")
+
+
+async def scenario_partial_invents_nothing_for_a_countless_expect() -> None:
+    """An expect dict that names NO count names no ARMS either, whatever the fork's
+    width. Reading it with a default of 1 made `{"any": true}` on a WIDTH-1 fork
+    equal the fork's width, so the degrade reported an arm the policy had never
+    asked for — the one thing this path says it will not do.
+
+    Reaching a degrade WITH an arrival on a width-1 fork takes a broken `reduce`:
+    the policy is met, the reduce raises, the join publishes its error and releases
+    its snapshot, and the fork sits out `wait.timeout` and degrades on what landed."""
+    seen = []
+    comms = InProcessComms()
+    comms.register("role:a", Emit("A", []))
+    comms.register("role:summary", Capture(seen))
+    graph = Graph.of(
+        Stage("spread", node="", fork=["a"], then="summary", wait={"timeout": 0.2}),
+        Stage("a", node="role:a", then="join"),
+        Stage("join", node="", then=None,
+              fanin={"expect": {"any": True}, "wait": "all",
+                     "reduce": "fn:test_fork_join:boom_reduce"}),
+        Stage("summary", node="role:summary", then=None),
+    )
+    out = await asyncio.wait_for(
+        Harness(comms, graph).run(Envelope(Kind.TASK, {})), timeout=5)
+    assert isinstance(out, Done), out
+    part = seen[0]["fork_partial"]
+    assert sorted(part["results"]) == ["a"], part          # the salvage is unchanged
+    assert part["expected"] == [] and part["missing"] == [], part
+    print("PASS a countless expect names no arms, even when the fork's width is 1")
 
 
 async def scenario_terminal_fork_branch_failure_surfaces() -> None:
@@ -898,6 +932,7 @@ async def main() -> None:
     await scenario_fanin_own_timeout_still_salvages()
     await scenario_degrade_survives_a_broken_store()
     await scenario_partial_names_arms_under_a_count_expect()
+    await scenario_partial_invents_nothing_for_a_countless_expect()
     await scenario_branch_failure_fails_fork_instead_of_hanging()
     await scenario_terminal_fork_branch_failure_surfaces()
     await scenario_branch_soft_concerns_surface()

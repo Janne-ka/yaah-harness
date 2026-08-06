@@ -78,14 +78,18 @@ async def _tool_list_gates(args: Dict[str, Any]) -> Dict[str, Any]:
     shape as `yaah list --json` (runtime._baton_json, the documented stable
     contract for driver skills).
 
-    `root` is PASSED to `_baton_json`: the lease horizon is a root fact, and without
-    it `lease_state` comes back null on every baton — the same field `yaah list
-    --json` populates. A driver skill reading one surface and then the other would
-    have seen the field simply vanish."""
-    from ...runtime import _baton_json, list_gates
+    `root` and the CURRENT WIRING are both passed to `_baton_json`, exactly as
+    `yaah list --json` passes them: the lease horizon and the pipeline's topology are
+    root facts, and without them `lease_state` and `wiring_mismatch` come back null on
+    every baton. A driver skill reading one surface and then the other would have seen
+    those fields simply vanish. `current_wiring` never raises — an unreadable pipeline
+    yields None, i.e. "unknown", never "matches"."""
+    from ...runtime import _baton_json, current_wiring, list_gates
     root, base = _load_root(args["root_path"])
     validate_root(root)
-    return {"batons": [_baton_json(b, root) for b in await list_gates(root, base)]}
+    wiring = current_wiring(root, base)
+    return {"batons": [_baton_json(b, root, wiring)
+                       for b in await list_gates(root, base)]}
 
 
 async def _tool_baton_schema(args: Dict[str, Any]) -> Dict[str, Any]:

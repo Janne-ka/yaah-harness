@@ -109,22 +109,14 @@ def build(
     live = LiveLeafConfig(live_config_path) if live_config_path else None
     for role, node, node_cfg in _built_nodes(config, registry, ctx, live):
         register(role, node, node_cfg)
+    # Both lease knobs are passed straight through: None means "unset" to the
+    # Harness too, so the horizon number (DEFAULT_LEASE_HORIZON, normalized inside
+    # LeaseState) and the host-name source (socket.gethostname()) stay written down
+    # in exactly one place each.
     return Harness(comms, build_graph(config["graph"]),
                    baton_store=baton_store, envelope_store=envelope_store, tracer=tracer,
-                   strict_resume=strict_resume, **_lease_kw(lease_horizon, lease_host))
-
-
-def _lease_kw(lease_horizon: Optional[float],
-              lease_host: Optional[str] = None) -> Dict[str, Any]:
-    """Pass each lease knob only when the root actually set it, so the Harness
-    defaults stay the single place the horizon number and the host-name source are
-    written down (`DEFAULT_LEASE_HORIZON` / `socket.gethostname()`)."""
-    kw: Dict[str, Any] = {}
-    if lease_horizon is not None:
-        kw["lease_horizon"] = float(lease_horizon)
-    if lease_host is not None:
-        kw["lease_host"] = str(lease_host)
-    return kw
+                   strict_resume=strict_resume,
+                   lease_horizon=lease_horizon, lease_host=lease_host)
 
 
 def _build_named(registry: Registry, spec: Dict[str, Any], ctx: BuildContext,
@@ -182,7 +174,8 @@ def harness_from_config(config: Dict[str, Any], comms: Comms,
     validate_pipeline(config, strict_resume=strict_resume)
     return Harness(comms, build_graph(config["graph"]),
                    baton_store=baton_store, envelope_store=envelope_store, tracer=tracer,
-                   strict_resume=strict_resume, **_lease_kw(lease_horizon, lease_host))
+                   strict_resume=strict_resume,
+                   lease_horizon=lease_horizon, lease_host=lease_host)
 
 
 async def serve_from_config(

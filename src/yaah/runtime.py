@@ -56,7 +56,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .build import build, build_graph, harness_from_config, serve_from_config
 from .build.macros import resolve_run_dir
 from .core import Envelope, Kind
-from .harness import (DEFAULT_LEASE_HORIZON, Baton, BatonStore, LeaseState, Outcome,
+from .harness import (Baton, BatonStore, LeaseState, Outcome,
                       build_decider as _build_decider, drive, wiring_fingerprint)
 from .store import EnvelopeStore, IdempotencyStore
 # Config-block → runtime-leaf factories (the maps + builders, split out so this
@@ -296,18 +296,24 @@ def current_wiring(root: Dict[str, Any], base: str) -> "Optional[str]":
         return None
 
 
-def baton_lease(b: "Baton", root: Dict[str, Any]) -> LeaseState:
+def baton_lease(b: "Baton", root: Dict[str, Any],
+                self_owner: "Optional[str]" = None) -> LeaseState:
     """This baton's liveness lease as of now, under the root's `lease_horizon` and
     `lease_host`. ONE call site's worth of policy, shared by `yaah list`'s label and
     (through `Harness.resume_running`) the recovery refusal — see LeaseState. Both
     root keys are read HERE as well as in `_assemble_harness`, so the label an
     operator reads and the tier the recovery decides on can never disagree: a
     container that set `lease_host` must show `lease=live` for its own runs, not
-    `foreign`."""
-    horizon = root.get("lease_horizon")
-    return LeaseState.of(b, time.time(),
-                         float(horizon) if horizon is not None else DEFAULT_LEASE_HORIZON,
-                         host=root.get("lease_host"))
+    `foreign`. An absent `lease_horizon` is handed over as None — LeaseState owns the
+    default, and resolving it here too would be a second place for it to drift.
+
+    `self_owner` is the caller's OWN owner id, for a caller that has one — a harness
+    asking about a run it may itself have leased (`Harness.resume_running` makes the
+    same LeaseState call directly, passing its own). The inspection surfaces pass
+    nothing: a fresh CLI process is never the owner, so for them the tier is simply
+    unreachable."""
+    return LeaseState.of(b, time.time(), root.get("lease_horizon"),
+                         host=root.get("lease_host"), self_owner=self_owner)
 
 
 def _baton_json(b: "Baton", root: Optional[Dict[str, Any]] = None,
