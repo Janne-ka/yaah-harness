@@ -294,3 +294,13 @@ and don't score it as a missed trap.
   with `on_exhaustion: repeat_last` on `draft`. The loop runs twice in all three
   L4 states (verify via stderr trace: draft→judge→tally×2 before gate). Without
   cycling, STATE 2's blind-loop claim was untestable offline.
+- **`max_attempts` moved node → stage, POST-HOC, and is inert.** The kit shipped
+  `"max_attempts": 3` inside the `role:draft` NODE spec. `max_attempts` is a STAGE
+  key (`build_graph` reads it off the stage; `node_keys.py` has no row for it), so
+  once `validate_pipeline` began rejecting unknown node keys the kit failed to load
+  for a reason that is not a landmine. It was moved to the `draft` STAGE, where it
+  had always belonged. **This is not a seeded trap and it changes no measurement:**
+  `draft` declares no `validators`, so the attempt budget is never consumed — the
+  loop is driven by `tally`'s branch, not by attempts. Verified after the move:
+  `selfcheck.py` still reports ALL 5 CHECKS PASSED and every landmine surfaces as
+  documented above.

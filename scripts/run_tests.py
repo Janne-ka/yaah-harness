@@ -3,8 +3,10 @@
 Used by: the pixi `test` task, CI, and any dev who wants one command instead of
 the hand-rolled shell loop. Each test is a self-contained script with an
 `if __name__ == "__main__"` runner; this executes them all and aggregates
-PASS/FAIL, exiting nonzero if any failed. Sets PYTHONPATH=src so it works whether
-or not yaah is installed (editable in a pixi env, or raw source in CI).
+PASS/FAIL, exiting nonzero if any failed. Sets PYTHONPATH=`src` (so it works
+whether or not yaah is installed — editable in a pixi env, or raw source in CI)
+PLUS the repo ROOT (so `from tests import ...` resolves), and runs from the repo
+root; the suite is therefore independent of the caller's cwd and PYTHONPATH.
 
 Coverage floor (HARD GATE, 2026-06-22): each test runs under `coverage run -p`
 and the combined report enforces `[tool.coverage.report] fail_under` in
@@ -111,7 +113,21 @@ def main(argv=None) -> int:
     use_cov = force_cov or (not no_cov and _coverage_available())
 
     env = dict(os.environ)
-    env["PYTHONPATH"] = SRC + os.pathsep + env.get("PYTHONPATH", "")
+    # BOTH entries are load-bearing and BOTH are explicit:
+    #   SRC  — import `yaah` whether or not it is installed.
+    #   ROOT — import `tests` as a package (`from tests import fixtures_...`, which
+    #          test_agent_loop.py does). Running `python3 tests/test_x.py` puts
+    #          `tests/` on sys.path, never the repo root, so without this the
+    #          package import fails.
+    # ROOT used to arrive by ACCIDENT: `SRC + os.pathsep + env.get("PYTHONPATH", "")`
+    # left a trailing EMPTY component when the caller had no PYTHONPATH, and Python
+    # reads an empty entry as the cwd (= ROOT, since we pass cwd=ROOT). Any caller
+    # who DID export PYTHONPATH — e.g. a cross-repo `PYTHONPATH=…/yaah/src` — closed
+    # that hole and the suite failed with `ModuleNotFoundError: No module named
+    # 'tests'` for them and nobody else. Naming ROOT makes the suite env-independent.
+    inherited = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = os.pathsep.join(
+        [SRC, ROOT] + ([inherited] if inherited else []))
 
     if use_cov:
         subprocess.run([sys.executable, "-m", "coverage", "erase"],

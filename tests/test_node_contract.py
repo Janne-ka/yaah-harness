@@ -301,6 +301,56 @@ def closed_implies_complete() -> None:
     assert reset({"k"}, closed=True).complete is True
 
 
+# --- shell consumes (interpolate_from + target_from) ---------------------------------------
+
+def shell_consumes_reads_argv_placeholders_when_declared() -> None:
+    c = resolve_consumes("shell", {"type": "shell", "interpolate_from": ["db_url", "branch"],
+                                   "command": ["run", "--db={{db_url}}", "{{branch}}"]}, None)
+    assert c == frozenset({"db_url", "branch"}), c
+
+def shell_consumes_ignores_placeholders_without_the_opt_in() -> None:
+    # no interpolate_from → `{{db_url}}` stays the literal it has always been
+    c = resolve_consumes("shell", {"type": "shell", "command": ["run", "--db={{db_url}}"]}, None)
+    assert c == frozenset(), c
+
+def shell_consumes_declared_but_unused_key_is_not_read() -> None:
+    # interpolate_from is the ALLOW-list; the argv is the read-set. A pipeline that
+    # declares the key centrally while a host overlay decides whether its command
+    # carries the token must not be flagged.
+    c = resolve_consumes("shell", {"type": "shell", "interpolate_from": ["db_url"],
+                                   "command": ["run"]}, None)
+    assert c == frozenset(), c
+
+def shell_consumes_string_command_reads_nothing() -> None:
+    # a tokened STRING command is refused at build; a token-free one cannot substitute
+    c = resolve_consumes("shell", {"type": "shell", "interpolate_from": ["db_url"],
+                                   "command": "make test"}, None)
+    assert c == frozenset(), c
+
+def shell_consumes_includes_target_from() -> None:
+    c = resolve_consumes("shell", {"type": "shell", "command": ["run"],
+                                   "target_from": "written_tests"}, None)
+    assert c == frozenset({"written_tests"}), c
+
+def shell_check_shares_the_shell_read_set() -> None:
+    cfg = {"type": "shell_check", "command": ["run", "{{x}}"], "interpolate_from": ["x"],
+           "target_from": "t"}
+    assert resolve_consumes("shell_check", cfg, None) == frozenset({"x", "t"})
+
+def shell_consumes_never_raises_on_malformed_config() -> None:
+    assert resolve_consumes("shell", {"type": "shell", "interpolate_from": "db_url",
+                                      "command": 5}, None) == frozenset()
+    assert resolve_consumes("shell", {"type": "shell", "target_from": ["a"]}, None) == frozenset()
+
+def shell_is_a_builtin_consumer_so_inline_consumes_is_ignored() -> None:
+    # the built-in read-set is exact (ADR-0006 precedence); an inline `consumes` on a
+    # shell would fabricate a read the node never performs
+    c = resolve_consumes("shell", {"type": "shell", "command": ["run"], "consumes": ["ghost"]},
+                         None)
+    assert c == frozenset(), c
+    assert builtin_consumes_for("shell", {"type": "shell", "command": ["run"]}, None) == frozenset()
+
+
 def main() -> None:
     # discovery, not a hand-list: every module-level test function runs (a new
     # test can't be silently forgotten). Tests = public functions defined HERE.

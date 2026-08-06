@@ -101,6 +101,62 @@ async def scenario_baton_store() -> None:
     assert await bs.list_suspended() == []
 
 
+async def scenario_baton_roundtrip_of_the_recovery_fields() -> None:
+    """Every Level-2 recovery field survives the store: the split sweep window
+    (`checkpoint_ttl`), the liveness lease (`owner`/`leased_at`) and the topology
+    stamp (`wiring`). And — the upgrade contract — a record written by an OLDER
+    engine, which has none of these keys, still LOADS with them None instead of
+    stranding a parked gate that is already in somebody's store."""
+    bs = BatonStore(MemoryBackend())
+    full = Baton(id="full", stage="code", status="running",
+                 cursor_input=Envelope("result", {"steps": ["a"]}),
+                 checkpointed_at=1000.0, ttl=72.0, checkpoint_ttl=600.0,
+                 owner="host-a/321/deadbeef", leased_at=1000.0, wiring="ff00")
+    await bs.save(full)
+    got = await bs.load("full")
+    assert got is not None
+    assert (got.checkpoint_ttl, got.owner, got.leased_at, got.wiring) == \
+        (600.0, "host-a/321/deadbeef", 1000.0, "ff00"), got
+    assert got.to_dict() == full.to_dict(), "round-trip must be exact"
+
+    old = Baton.from_dict({"id": "old", "stage": "review", "status": "suspended",
+                           "parked_at": 5.0, "ttl": 100.0, "concerns": [],
+                           "pending": None, "awaiting": "human"})
+    assert (old.checkpoint_ttl, old.owner, old.leased_at, old.wiring) == \
+        (None, None, None, None), old
+    assert old.awaiting == "human" and old.parked_at == 5.0, old
+
+
+def test_expiry_window_resolution() -> None:
+    """Which clock and which window each status is swept on. A SUSPENDED gate uses
+    `ttl` from `parked_at` (the human window); a RUNNING checkpoint uses
+    `checkpoint_ttl` from `checkpointed_at`, INHERITING `ttl` when it is unset — the
+    pre-split behaviour, so an upgrade cannot silently shorten a live deployment's
+    recovery window."""
+    gate = Baton(id="g", stage="s", status="suspended", parked_at=0.0, ttl=100.0,
+                 checkpoint_ttl=5.0)
+    assert not gate.is_expired(99.0)
+    assert gate.is_expired(101.0)
+    assert not gate.is_expired(6.0), "checkpoint_ttl must NOT shorten a parked gate"
+
+    inherited = Baton(id="i", stage="s", status="running", checkpointed_at=0.0,
+                      ttl=100.0)
+    assert not inherited.is_expired(99.0), "absent checkpoint_ttl inherits ttl"
+    assert inherited.is_expired(101.0)
+
+    split = Baton(id="c", stage="s", status="running", checkpointed_at=0.0,
+                  ttl=100.0, checkpoint_ttl=600.0)
+    assert not split.is_expired(500.0), "checkpoint_ttl overrides ttl while running"
+    assert split.is_expired(601.0)
+
+    # ttl None = never expire, still; and a checkpoint_ttl alone works with it.
+    assert not Baton(id="n", stage="s", status="running", checkpointed_at=0.0,
+                     ttl=None).is_expired(1e9)
+    assert Baton(id="n2", stage="s", status="running", checkpointed_at=0.0,
+                 ttl=None, checkpoint_ttl=10.0).is_expired(11.0)
+    print("PASS baton expiry: parked_at/ttl vs checkpointed_at/checkpoint_ttl→ttl")
+
+
 async def scenario_file_store() -> None:
     """The durable FileBackend extender: same tiers as memory, but persisted to disk
     so a SECOND store over the same dir (a fresh process) sees what the first wrote."""
@@ -295,6 +351,8 @@ async def main() -> None:
     await scenario_memory_store()
     await scenario_file_store()
     await scenario_baton_store()
+    await scenario_baton_roundtrip_of_the_recovery_fields()
+    test_expiry_window_resolution()
     await scenario_idempotency_once()
     await scenario_idempotency_does_not_cache_failures()
     await scenario_idempotency_finalize_uses_cas_when_available()

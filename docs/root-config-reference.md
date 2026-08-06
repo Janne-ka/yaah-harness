@@ -55,7 +55,11 @@ type-specific fields the new type doesn't accept.
 | `input` | path or inline object | the task payload; absent → empty payload. |
 | `serve` | `"all"` / list / `{placement}` | which roles THIS host runs (distributed). |
 | `run` | bool | run the pipeline now, or stay a serve-only worker (default: run iff `input` present). |
-| `baton_ttl` | **seconds** | how long a baton survives before the sweep (default `259200` = 72h, so a Friday gate is resumable Monday). Two meanings, one knob: for a **suspended gate** it is the abandon window (time since `parked_at`); for a **Level 2 running checkpoint** it also bounds how long a single stage may be in flight before its recovery record is swept (time since the last `checkpointed_at`). Set it above your slowest stage's wall-clock, or a long-running stage's crash becomes unrecoverable. (Earlier revisions of this table said "minutes" — wrong: the value is passed straight to `Baton.ttl`, which is seconds.) |
+| `baton_ttl` | **seconds** | how long a **suspended gate** survives before the sweep (time since `parked_at`); default `259200` = 72h, so a Friday gate is resumable Monday. This is a *human patience* window. (Earlier revisions of this table said "minutes" — wrong: the value is passed straight to `Baton.ttl`, which is seconds.) |
+| `checkpoint_ttl` | **seconds** | how long a **Level 2 running checkpoint** stays recoverable (time since the last `checkpointed_at`). The clock restarts at every completed stage, so this really bounds *how long one stage may be in flight* before its recovery record is swept — a crash after that point is unrecoverable. **Absent → inherits `baton_ttl`**, which is the pre-split behaviour; there is deliberately **no engine default**, because a number here would silently *shorten* an existing deployment's recovery window on upgrade. Recommended explicit value: `21600` (6h) — comfortably above a slow agent stage, far below the 72h human window. |
+| `lease_horizon` | **seconds** | how long a liveness lease from **another host** may go unrefreshed before its process is presumed dead and its run declared recoverable (default `3600` = 1h). Only the foreign-host tier uses it — a lease on *this* host is probed with `kill(pid, 0)`, not guessed. Must be **≤ the effective checkpoint window** (`checkpoint_ttl`, or `baton_ttl` when absent): a record swept before it can be declared stale could never be recovered at all, and `validate` rejects that combination. |
+| `lease_host` | string | what this deployment calls **this host** in a lease owner id (`<host>/<pid>/<nonce>`). **Default: `socket.gethostname()`** — leave it unset on a normal machine. Set it in a **container**, where `gethostname()` is the pod/container id and is different on every restart: the same machine then looks like a new host each time, so every one of its own runs is labelled `foreign` and falls back to the coarse `lease_horizon` age guess instead of the real `kill(pid, 0)` probe. Use a stable identity that is **unique per kernel** (the k8s node name, the VM hostname); two containers on *different* kernels sharing one `lease_host` would probe each other's pid namespace and read a coincidental pid as "the owner is alive". |
+| `run_dir` | path | this run's artifact root, base-relative or absolute — what the `{run_dir}` node-spec macro expands to (see `docs/node-reference.md`). Created at load if missing. **No default:** using `{run_dir}` without this key is a build error naming it, rather than a quiet fall back to the launcher's cwd. |
 | `strict_resume` | bool | enforce a parked gate's declared `form` at `resume` (default **true**). A decision that violates the form is rejected (`decision_rejected`, exit 1) instead of silently taking the branch default; the gate stays parked and re-submittable. `false` restores the old blind merge — set it only for a gate whose form is genuinely mis-declared. No effect on a gate with no `form`. See ADR-0002. |
 | `live_config` | bool | re-read mutable node leaves from the pipeline file per call (no restart). |
 | `decisions` / `interactive` | map / bool | gate-driver answers (auto-drive) / stdin prompting. |
@@ -138,12 +142,43 @@ store is what lets `--list`/`--resume` work cross-process and survive a crash.
                     {"type": "file", "path": "trace.jsonl"}]}
 ```
 `capture` is an orthogonal SET, not a verbosity level — `phase` (stage/status/
-duration, default-on), `cost` (tokens/model), `tools`, `live` (mid-call
+duration + the retry cause, default-on; see below), `cost` (tokens/model),
+`tools`, `live` (mid-call
 monitoring pulses: turn started / a throttled chars-so-far heartbeat / each tool
 call / done — answers "alive or hung?" while a model call runs; sizes and names
 only, never model text). `stats_file` takes a `price_map` (tokens→$).
+
+**What `cost` projects.** `model`, `model_ref`, `tokens_out`, and the input
+tokens split into the three classes that bill at different rates: `tokens_in`
+(fresh, uncached input), `tokens_cache_read` (~0.1x the input rate) and
+`tokens_cache_write` (~1.25x). The two cache keys appear only when non-zero, so
+a backend that reports no prompt-cache usage writes the record shape it always
+did. Price-map rows are `{"input": usd_per_1k, "output": usd_per_1k}`; the two
+cache rates derive from `input` via those multipliers unless a row states an
+explicit `"cache_read"` / `"cache_write"` per-1k rate (needed for e.g. 1h-TTL
+cache writes, which bill at 2x — the record carries no TTL).
 Cross-field checks reject silently-dropped config (e.g. `sinks` under
 `mode: none`). `--explain` shows the effective trace block.
+
+**What `phase` projects.** Always `status` + `duration_ms` (beside the
+structural `id`/`corr`/`parent`/`name`/`t_start`/`t_end` every record carries),
+plus these attrs when the emitting span sets them: `stage`, `awaiting`,
+`artifact` (park context), `ladder_from`/`ladder_trigger` (model-ladder rung),
+`resumed`/`decision_keys`/`approver`/`decision_diff` (human-override audit —
+payload KEYS and an identity only, never decision VALUES),
+`effects`/`effects_truncated`/`effects_head` (rollback handle),
+the saga buckets `rolled_back`/`skipped_costly`/`impossible`/`failed`/
+`not_attempted`/`skipped`, and the **retry cause** on a stage-error span:
+`retry` (kind — `transient` | `retry` | `feedback`), `attempt` (which attempt,
+against `max_attempts`), `n` (which transient retry, against the separate
+`error_retries` budget), and `error` (the failing verdict's detail).
+`error` is the only free-text value here and is therefore **truncated at 500
+chars** with a trailing `...[truncated]` marker: trace files are line-oriented
+JSONL, and one unbounded validator message (a schema dump, a diffed payload)
+would blow a single line to megabytes and make the file hostile to
+`tail`/`jq`/grep. Read the full message from the stage's own artifact or the
+run's failure output; the trace carries the diagnostic, not the corpus.
+
 Pipelines in which any node declares `rollback:` — or arm the auto-saga
 (`graph.on_failure: "rollback"`, ADR-0009: automatic unwind of completed stages
 on terminal failure; cheap-only unless `include_costly`; always re-raises; on a

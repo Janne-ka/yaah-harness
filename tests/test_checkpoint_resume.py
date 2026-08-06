@@ -11,8 +11,15 @@ completes with the correct final output; the checkpoint is deleted on completion
 and on a gate park; resume_running refuses a non-running / unknown baton; a
 checkpoint-write failure does not fail the run but warns ONCE (F9); a gate resume
 clears awaiting/parked_at so the next checkpoint is clean (F5); clear() drops
-running checkpoints (F2); the TTL sweep reclaims an abandoned running checkpoint.
-See docs/durable-state.md §5.
+running checkpoints (F2); the TTL sweep reclaims an abandoned running checkpoint;
+the FIRST stage of a run and the first stage after a gate resume are both inside
+the recoverable window. See docs/durable-state.md §5.
+
+The killed harness is given a DEAD-PID owner (`dead_pid_owner`) because that is
+what a real crash leaves behind — a lease naming a process that is gone. Without
+it the recovery would (correctly) refuse: the test process is itself alive, and
+the liveness lease cannot tell "the pid that crashed" from "the pid running this
+test" when they are the same pid. Lease behaviour itself is tests/test_lease.py.
 
 Run: cd yaah && PYTHONPATH=src python3 tests/test_checkpoint_resume.py
 """
@@ -21,10 +28,22 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import socket
+import subprocess
+import sys
 
 from yaah import Done, Envelope, Graph, Harness, InProcessComms, Stage, Suspended
 from yaah.harness import Baton, BatonStore
 from yaah.store import MemoryBackend
+
+
+def dead_pid_owner() -> str:
+    """An owner id on THIS host whose pid is reliably gone: spawn a trivial child,
+    wait for it to be reaped, then name it. Deterministic — the pid existed and no
+    longer does — where a made-up number could collide with a live process."""
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return "{}/{}/deadbeef".format(socket.gethostname(), p.pid)
 
 
 class InfraError(BaseException):
@@ -76,11 +95,11 @@ def _linear_graph() -> Graph:
     )
 
 
-def _harness(store, nodes) -> Harness:
+def _harness(store, nodes, owner=None) -> Harness:
     comms = InProcessComms()
     for role, node in nodes.items():
         comms.register(role, node)
-    return Harness(comms, _linear_graph(), baton_store=BatonStore(store))
+    return Harness(comms, _linear_graph(), baton_store=BatonStore(store), owner=owner)
 
 
 async def scenario_kill_then_recover() -> None:
@@ -88,10 +107,12 @@ async def scenario_kill_then_recover() -> None:
     a, b, c, d = Step("a"), Step("b"), KillOnce("c"), Step("d")
     nodes = {"role:a": a, "role:b": b, "role:c": c, "role:d": d}
 
-    # First run: A, B complete (each checkpointed), C is killed mid-flight.
+    # First run: A, B complete (each checkpointed), C is killed mid-flight. The
+    # crashed process's lease names a pid that is gone (see dead_pid_owner).
     killed = None
     try:
-        await _harness(store, nodes).run(Envelope("task", {"steps": []}))
+        await _harness(store, nodes, owner=dead_pid_owner()).run(
+            Envelope("task", {"steps": []}))
     except BaseException as e:  # noqa: BLE001 — the simulated kill
         killed = e
     assert isinstance(killed, InfraError), killed
@@ -282,8 +303,141 @@ async def scenario_ttl_sweep_reclaims_running_checkpoint() -> None:
     print("PASS TTL sweep reclaims an abandoned running checkpoint, keeps a fresh one")
 
 
+async def scenario_first_stage_is_checkpointed() -> None:
+    """The FIRST stage of a run is inside the recoverable window: `run` persists the
+    baton BEFORE driving, so a kill in `graph.start` leaves a checkpoint to
+    `resume-run` instead of nothing. (Before this write the whole first stage was a
+    hole — exactly where a long seeding/discovery stage sits.)"""
+    store = MemoryBackend()
+    a, b, c, d = KillOnce("a"), Step("b"), Step("c"), Step("d")
+    nodes = {"role:a": a, "role:b": b, "role:c": c, "role:d": d}
+    try:
+        await _harness(store, nodes, owner=dead_pid_owner()).run(
+            Envelope("task", {"steps": []}))
+    except InfraError:
+        pass
+
+    running = await BatonStore(store).list_running()
+    assert len(running) == 1, running
+    cp = running[0]
+    assert cp.stage == "a", cp.stage                       # cursor at the FIRST stage
+    assert cp.cursor_input is not None and cp.cursor_input.payload["steps"] == [], cp
+
+    out = await _harness(store, nodes).resume_running(cp.id)
+    assert isinstance(out, Done), out
+    assert out.output.payload["steps"] == ["a", "b", "c", "d"], out.output.payload
+    assert a.calls == 2, a.calls                           # the killed first stage re-ran
+    print("PASS a kill in the FIRST stage leaves a recoverable checkpoint")
+
+
+async def scenario_post_gate_stage_is_checkpointed() -> None:
+    """Post-gate recovery: the human's decision is persisted with the resume's own
+    checkpoint, so a kill in the stage AFTER the gate recovers via `resume-run` with
+    the decision keys intact — and the gate does NOT re-open (the record is running,
+    so `resume()` refuses it)."""
+    store = MemoryBackend()
+    comms = InProcessComms()
+    comms.register("role:gate", Gate())
+    comms.register("role:b", KillOnce("b"))
+    comms.register("role:c", Step("c"))
+    graph = Graph.of(Stage("gate", node="role:gate", then="b"),
+                     Stage("b", node="role:b", then="c"),
+                     Stage("c", node="role:c"))
+    h = Harness(comms, graph, baton_store=BatonStore(store), owner=dead_pid_owner())
+
+    out = await h.run(Envelope("task", {"steps": []}))
+    assert isinstance(out, Suspended), out
+    try:
+        await h.resume(out.baton_id, Envelope("resume", {"human": "approve"}))
+    except InfraError:
+        pass
+
+    running = await BatonStore(store).list_running()
+    assert len(running) == 1, running
+    cp = running[0]
+    assert cp.stage == "b", cp.stage
+    # THE DECISION SURVIVED — this is the whole point: recovery does not ask the
+    # human again.
+    assert cp.cursor_input.payload.get("human") == "approve", cp.cursor_input.payload
+    assert await BatonStore(store).list_suspended() == [], "the gate must not still be open"
+
+    h2 = Harness(comms, graph, baton_store=BatonStore(store))
+    # The gate cannot be re-answered: the record is a running checkpoint now.
+    refused = None
+    try:
+        await h2.resume(cp.id, Envelope("resume", {"human": "approve"}))
+    except ValueError as e:
+        refused = e
+    assert refused is not None and "not 'suspended'" in str(refused), refused
+
+    done = await h2.resume_running(cp.id)
+    assert isinstance(done, Done), done
+    assert done.output.payload["steps"] == ["b", "c"], done.output.payload
+    print("PASS post-gate kill recovers with the decision intact; the gate never re-opens")
+
+
+async def scenario_checkpoint_ttl_sweeps_the_run_not_the_gate() -> None:
+    """THE SPLIT WINDOW, end to end. `run(checkpoint_ttl=...)` is the only way the
+    running-checkpoint sweep window differs from the human-patience one, and until now
+    nothing drove it: `Harness.run`'s `baton.checkpoint_ttl = checkpoint_ttl` was
+    uncovered, so the two windows were only ever proven on a hand-built Baton.
+
+    The proof needs BOTH kinds alive at the SAME clock, which is what makes it a split
+    rather than one number: a gate parked at t and a running checkpoint written at t,
+    a huge `ttl` and a `checkpoint_ttl` of one second. Advance two seconds and sweep —
+    the crashed run's recovery record is reclaimed and the human's gate is untouched.
+    An inherited (unsplit) window would have kept both."""
+    now = [1000.0]
+    store = MemoryBackend()
+    bs = BatonStore(store)
+
+    def wall() -> float:
+        return now[0]
+
+    # (1) A GATE parks at t=1000. `ttl` is the human-patience window: enormous.
+    gate_comms = InProcessComms()
+    gate_comms.register("role:gate", Gate())
+    gate_h = Harness(gate_comms, Graph.of(Stage("gate", node="role:gate")),
+                     baton_store=BatonStore(store), wall_clock=wall)
+    parked = await gate_h.run(Envelope("task", {}), ttl=100000.0, checkpoint_ttl=1.0)
+    assert isinstance(parked, Suspended), parked
+    gate_baton = await bs.load(parked.baton_id)
+    assert gate_baton.parked_at == 1000.0 and gate_baton.ttl == 100000.0, gate_baton
+
+    # (2) A run is KILLED mid-flight at the same t=1000, carrying the same two windows.
+    kill_comms = InProcessComms()
+    kill_comms.register("role:a", KillOnce("a"))
+    kill_h = Harness(kill_comms, Graph.of(Stage("a", node="role:a")),
+                     baton_store=BatonStore(store), wall_clock=wall,
+                     owner=dead_pid_owner())
+    try:
+        await kill_h.run(Envelope("task", {"steps": []}), ttl=100000.0, checkpoint_ttl=1.0)
+    except InfraError:
+        pass
+    running = await bs.list_running()
+    assert len(running) == 1, running
+    cp = running[0]
+    assert (cp.ttl, cp.checkpoint_ttl) == (100000.0, 1.0), cp
+    assert cp.checkpointed_at == 1000.0, cp
+
+    # (3) Two seconds later: past `checkpoint_ttl`, nowhere near `ttl`.
+    now[0] = 1002.0
+    dead = await kill_h.sweep_expired()
+    assert dead == [cp.id], dead
+    assert await bs.load(cp.id) is None, "the running checkpoint is past checkpoint_ttl"
+    survivor = await bs.load(parked.baton_id)
+    assert survivor is not None, \
+        "the gate parked at the SAME clock must survive — its window is `ttl`, not " \
+        "`checkpoint_ttl`; sweeping it here would mean the split never happened"
+    assert survivor.status == "suspended", survivor
+    print("PASS split windows: checkpoint_ttl reclaims the crashed run, the gate keeps `ttl`")
+
+
 async def main() -> None:
     await scenario_kill_then_recover()
+    await scenario_checkpoint_ttl_sweeps_the_run_not_the_gate()
+    await scenario_first_stage_is_checkpointed()
+    await scenario_post_gate_stage_is_checkpointed()
     await scenario_checkpoint_cleared_on_gate_park()
     await scenario_refuse_non_running()
     await scenario_checkpoint_write_failure_tolerated()

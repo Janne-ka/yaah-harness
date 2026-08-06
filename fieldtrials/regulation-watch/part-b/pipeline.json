@@ -17,7 +17,6 @@
       "model": "fake:draft",
       "stage": "draft",
       "strict_render": true,
-      "max_attempts": 3,
       "output_schema": {
         "type": "object",
         "properties": {"summary": {"type": "string"}, "confidence": {"type": "string"}},
@@ -66,7 +65,7 @@
     "stages": {
       "classify": {"node": "role:classify",
                    "branch": {"on": "high_impact", "routes": {"true": "draft"}, "default": "draft"}},
-      "draft":    {"node": "role:draft", "then": "judge"},
+      "draft":    {"node": "role:draft", "max_attempts": 3, "then": "judge"},
       "judge":    {"node": "role:judge", "then": "tally"},
       "tally":    {"node": "role:tally",
                    "branch": {"on": "loop_done", "routes": {"no": "draft"}, "default": "gate"}},

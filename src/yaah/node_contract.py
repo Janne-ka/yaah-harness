@@ -260,11 +260,43 @@ def render_consumes(cfg: Dict[str, Any], base_path: Optional[str]) -> frozenset:
     return frozenset(PLACEHOLDER.findall(text)) if text is not None else frozenset()
 
 
-# type name → consumes function. Only render reads its inbound payload among the built-ins
-# today (agent prompts / human_gate `ask` also do — that is the reviewed broadening, a later
-# slice). Every other built-in reads nothing checkable → absent here → empty.
+def shell_consumes(cfg: Dict[str, Any], base_path: Optional[str]) -> frozenset:
+    """The payload keys a shell-family node reads from its INBOUND payload: every `{{key}}`
+    its argv interpolates, plus the key `target_from` names (nodes/_target.py). Both reads
+    fail LATE today — a declared `{{key}}` absent from the payload raises TargetError mid-run,
+    and an absent `target_from` key silently runs the command WITHOUT the argument the node
+    exists to append — so both belong at load time.
+
+    Reads nothing unless `interpolate_from` opts in: without it a `{{key}}` in the command
+    stays the literal it has always been. The ARGV is parsed rather than the `interpolate_from`
+    list taken whole, because the list is the ALLOW-list (a key may be declared and unused)
+    while the placeholders are what is actually looked up — parsing gives the exact read-set
+    and never over-reports. A STRING command contributes nothing: `check_command` refuses a
+    tokened one at build, and a token-free one cannot substitute."""
+    keys = set()
+    target_from = cfg.get("target_from")
+    if isinstance(target_from, str) and target_from:
+        keys.add(target_from)
+    if isinstance(cfg.get("interpolate_from"), list):
+        command = cfg.get("command")
+        if isinstance(command, list):
+            for element in command:
+                if isinstance(element, str):
+                    keys.update(PLACEHOLDER.findall(element))
+    return frozenset(keys)
+
+
+# type name → consumes function. render parses its template; shell/shell_check report the
+# payload keys their argv interpolates and target — THE reviewed broadening the earlier
+# "a later slice" note deferred, taken because both shell reads are load-time provable and
+# were failing at run time instead. (agent prompts / human_gate `ask` remain deferred: an
+# agent's `{{?key}}` is optional by dialect and a gate's ask is human-facing prose, so
+# neither is the same clean provable read.) Every other built-in reads nothing checkable →
+# absent here → empty.
 BUILTIN_CONSUMES: Dict[str, Callable[[Dict[str, Any], Optional[str]], frozenset]] = {
     "render": render_consumes,
+    "shell": shell_consumes,
+    "shell_check": shell_consumes,
 }
 
 ConsumesFor = Callable[[Any, Dict[str, Any], Optional[str]], Optional[frozenset]]

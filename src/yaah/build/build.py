@@ -26,6 +26,7 @@ from .build_context import BuildContext
 from .builders import _node_config, _wrap_node, default_registry
 from .live_config_node import LiveConfigNode
 from .live_leaf_config import LiveLeafConfig
+from .macros import expand_macros
 from .registry import Registry
 
 
@@ -78,8 +79,11 @@ def build(
     tracer: Optional[Any] = None,
     registry: Optional[Registry] = None,
     base_dir: Optional[str] = None,
+    run_dir: Optional[str] = None,
     live_config_path: Optional[str] = None,
     strict_resume: bool = True,
+    lease_horizon: Optional[float] = None,
+    lease_host: Optional[str] = None,
 ) -> Harness:
     # strict_resume MUST be forwarded to validate_pipeline: it tiers the
     # gate-route-not-in-form finding (ERROR when this harness will enforce the
@@ -91,7 +95,8 @@ def build(
     registry = registry or default_registry()
     ctx = BuildContext(comms=comms, backend=backend, prompt_source=prompt_source,
                        data_source=data_source, data_sink=data_sink, mcp_source=mcp_source,
-                       idempotency_store=idempotency_store, tracer=tracer, base_dir=base_dir)
+                       idempotency_store=idempotency_store, tracer=tracer, base_dir=base_dir,
+                       run_dir=run_dir)
     register = getattr(comms, "register", None)
     if register is None:
         raise TypeError(
@@ -106,7 +111,20 @@ def build(
         register(role, node, node_cfg)
     return Harness(comms, build_graph(config["graph"]),
                    baton_store=baton_store, envelope_store=envelope_store, tracer=tracer,
-                   strict_resume=strict_resume)
+                   strict_resume=strict_resume, **_lease_kw(lease_horizon, lease_host))
+
+
+def _lease_kw(lease_horizon: Optional[float],
+              lease_host: Optional[str] = None) -> Dict[str, Any]:
+    """Pass each lease knob only when the root actually set it, so the Harness
+    defaults stay the single place the horizon number and the host-name source are
+    written down (`DEFAULT_LEASE_HORIZON` / `socket.gethostname()`)."""
+    kw: Dict[str, Any] = {}
+    if lease_horizon is not None:
+        kw["lease_horizon"] = float(lease_horizon)
+    if lease_host is not None:
+        kw["lease_host"] = str(lease_host)
+    return kw
 
 
 def _build_named(registry: Registry, spec: Dict[str, Any], ctx: BuildContext,
@@ -131,6 +149,21 @@ def _built_nodes(config: Dict[str, Any], registry: Registry, ctx: BuildContext,
             continue
         spec = dict(spec)
         spec["_role"] = role
+        # EXPAND THE PATH MACROS ONCE, HERE — this is the canonical build seam, and
+        # everything downstream must see the SAME expanded spec. Before this line the
+        # expansion happened only inside `registry.build`, which expands a COPY: the
+        # builder got resolved paths but `_node_config(spec)` below still read the
+        # ORIGINAL, so a `config: {"repo_root": "{run_dir}/repo"}` reached
+        # `NodeConfig.extras` with the macro UNEXPANDED and a node reading its extras
+        # got the literal string `{run_dir}/repo`. `_wrap_node` had the same blind
+        # spot. Expanding here fixes both at once.
+        #
+        # `registry.build` KEEPS its own expansion deliberately: it is a public seam
+        # an embedding app may call directly (`registry.build(spec, ctx)`), and that
+        # path has no `_built_nodes` above it. Double expansion is a no-op — the
+        # macro tokens are CONSUMED by the first pass, so the second finds nothing to
+        # substitute (a surviving `{{key}}` is double-brace and never matches).
+        spec = expand_macros(spec, ctx)
         node = _wrap_node(_build_named(registry, spec, ctx, role), spec, ctx)
         if live is not None:
             node = LiveConfigNode(node, role, live)
@@ -141,13 +174,15 @@ def harness_from_config(config: Dict[str, Any], comms: Comms,
                         *, baton_store: Optional[Any] = None,
                         envelope_store: Optional[Any] = None,
                         tracer: Optional[Any] = None,
-                        strict_resume: bool = True) -> Harness:
+                        strict_resume: bool = True,
+                        lease_horizon: Optional[float] = None,
+                        lease_host: Optional[str] = None) -> Harness:
     """Orchestrator side: build just the Graph + Harness over an existing Comms.
     Use with a distributed Comms whose nodes are served via serve_from_config()."""
     validate_pipeline(config, strict_resume=strict_resume)
     return Harness(comms, build_graph(config["graph"]),
                    baton_store=baton_store, envelope_store=envelope_store, tracer=tracer,
-                   strict_resume=strict_resume)
+                   strict_resume=strict_resume, **_lease_kw(lease_horizon, lease_host))
 
 
 async def serve_from_config(
@@ -164,6 +199,7 @@ async def serve_from_config(
     registry: Optional[Registry] = None,
     roles: Optional[Any] = None,
     base_dir: Optional[str] = None,
+    run_dir: Optional[str] = None,
     live_config_path: Optional[str] = None,
 ) -> list:
     """Worker side: build each node from config and serve it over the bus.
@@ -173,7 +209,8 @@ async def serve_from_config(
     registry = registry or default_registry()
     ctx = BuildContext(comms=comms, backend=backend, prompt_source=prompt_source,
                        data_source=data_source, data_sink=data_sink, mcp_source=mcp_source,
-                       idempotency_store=idempotency_store, tracer=tracer, base_dir=base_dir)
+                       idempotency_store=idempotency_store, tracer=tracer, base_dir=base_dir,
+                       run_dir=run_dir)
     serve = getattr(comms, "serve_node", None)
     if serve is None:
         raise TypeError("this Comms has no serve_node(); use build() for in-process register()")

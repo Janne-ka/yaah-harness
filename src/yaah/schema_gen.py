@@ -133,9 +133,31 @@ def build_root_schema() -> Dict[str, Any]:
     props["plugins"] = {"type": "array", "items": {"type": "string", "minLength": 1}}
 
     # baton_ttl: SECONDS (positive number) — passed straight to Baton.ttl, whose
-    # default is 72*60*60.0 seconds. Bounds both a parked gate's abandon window and
-    # a Level 2 running checkpoint's recovery window (docs/root-config-reference.md).
+    # default is 72*60*60.0 seconds. The PARKED-GATE abandon window
+    # (docs/root-config-reference.md).
     props["baton_ttl"] = {"type": "number", "minimum": 0}
+
+    # checkpoint_ttl: SECONDS — the RUNNING-checkpoint sweep window, i.e. how long
+    # one stage may be in flight before its recovery record is swept. Absent =
+    # inherit baton_ttl (no engine default: a number here would silently shorten an
+    # existing deployment's recovery window on upgrade).
+    props["checkpoint_ttl"] = {"type": "number", "minimum": 0}
+
+    # lease_horizon: SECONDS — how long a FOREIGN host's liveness lease may go
+    # unrefreshed before its process is presumed dead (default 3600). Must fit the
+    # effective checkpoint window; validate_budgets enforces that.
+    props["lease_horizon"] = {"type": "number", "minimum": 0}
+
+    # lease_host: what this deployment calls THIS host in a lease owner id. Absent =
+    # socket.gethostname(). Set it in a CONTAINER, where gethostname() is the pod id
+    # and changes every restart, permanently demoting every lease to the coarse
+    # foreign-host age tier; a stable per-NODE name restores the pid probe.
+    props["lease_host"] = {"type": "string", "minLength": 1}
+
+    # run_dir: the per-run artifact root the `{run_dir}` node-spec macro expands to
+    # (base-relative or absolute). No engine default — `{run_dir}` without this key
+    # is a build error naming it.
+    props["run_dir"] = {"type": "string", "minLength": 1}
 
     # decisions: map of <gate-stage-name> → {auto: "approve"|"revise"|...}
     props["decisions"] = {
@@ -303,6 +325,9 @@ def build_pipeline_schema() -> Dict[str, Any]:
                 "additionalProperties": node_spec_schema,
             },
             "graph": graph_schema,
+            # the per-node-type key check's release valve (validate._check_node_keys):
+            # a pipeline authored against a newer engine, knowingly loaded by an older one.
+            "allow_unknown_node_keys": {"type": "boolean"},
             # editor-side schema pointer (see build_root_schema).
             "$schema": {"type": "string"},
         },

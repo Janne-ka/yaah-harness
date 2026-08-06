@@ -83,10 +83,12 @@ async def claude_build_args_covers_mcp_perm_and_tools() -> None:
 
 
 async def claude_stream_cost_bridge_feeds_on_usage() -> None:
-    # Cost bridge over the stream seam: the result event's usage is summed
-    # (input + both cache buckets) and fed to on_usage — so a plain agent
-    # collecting via api_provider.complete() still tracks cost now that the
-    # complete() --output-format json path was removed.
+    # Cost bridge over the stream seam: the result event's usage is fed to
+    # on_usage — so a plain agent collecting via api_provider.complete() still
+    # tracks cost now that the complete() --output-format json path was removed.
+    # The three INPUT classes stay SEPARATE (they bill at different rates: cache
+    # read ~0.1x input, cache write ~1.25x); summing them into tokens_in — what
+    # this did until 2026-08 — made every cache-heavy stage unpriceable.
     lines = [
         b'{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}\n',
         b'{"type":"result","subtype":"success","stop_reason":"end_turn","model":"claude-sonnet",'
@@ -97,7 +99,9 @@ async def claude_stream_cost_bridge_feeds_on_usage() -> None:
     be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
     events = await _drain(be.stream({"messages": [{"role": "user", "content": "hi"}]},
                                     on_usage=usage.update))
-    assert usage == {"tokens_in": 125, "tokens_out": 30, "model": "claude-sonnet"}, usage
+    assert usage == {"tokens_in": 100, "tokens_cache_read": 20,
+                     "tokens_cache_write": 5, "tokens_out": 30,
+                     "model": "claude-sonnet"}, usage
     assert [e["type"] for e in events] == ["start", "text_delta", "done"]
 
 

@@ -438,7 +438,7 @@ def _canned_configs() -> Dict[str, Dict[str, Any]]:
 
     cfgs["shell-then-summarize"] = _canned_root({
         "nodes": {
-            "role:run": {"type": "shell", "cmd": ["echo", "ok"], "stage": "run"},
+            "role:run": {"type": "shell", "command": ["echo", "ok"]},
             "role:summarize": agent("summarize",
                                     "Summarize as JSON {\"summary\": \"...\"}:\n{{stdout}}"),
             "role:report": {"type": "render", "template_text": "{{summary}}", "out": "out.txt"},

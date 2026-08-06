@@ -245,10 +245,23 @@ _ROOT_GLOSS = {
     "input": "fixture path or inline object — the run's first payload",
     "decisions": "decision-fixture path for scripted human gates",
     "serve": "serve node role(s) as a remote worker instead of driving a run",
-    "baton_ttl": ("seconds a baton stays claimable — a parked human gate before it "
-                  "is abandoned, AND a Level 2 running checkpoint before its "
-                  "recovery record is swept (so it also bounds how long one stage "
-                  "may be in flight); default 259200 (72h)"),
+    "baton_ttl": ("seconds a PARKED HUMAN GATE stays claimable before it is "
+                  "abandoned; default 259200 (72h)"),
+    "checkpoint_ttl": ("seconds a RUNNING CHECKPOINT stays recoverable — the clock "
+                       "restarts each completed stage, so it bounds how long ONE "
+                       "stage may be in flight; absent = inherit baton_ttl "
+                       "(recommended explicit value: 21600 = 6h)"),
+    "lease_horizon": ("seconds a lease from ANOTHER HOST may go unrefreshed before "
+                      "its process is presumed dead and its run recoverable; "
+                      "default 3600. Must fit checkpoint_ttl"),
+    "lease_host": ("what this deployment calls THIS host in a lease owner id; "
+                   "default socket.gethostname(). Set it in a CONTAINER, where "
+                   "gethostname() is the pod id and changes every restart — which "
+                   "makes every own run look FOREIGN and disables the pid probe. "
+                   "Use a stable identity that is unique per kernel (the node name)"),
+    "run_dir": ("per-run artifact root the `{run_dir}` node-spec macro expands to "
+                "(base-relative or absolute); no default — using the macro without "
+                "it is a build error"),
     "plugins": "module paths imported before validation (register_type extensions)",
 }
 

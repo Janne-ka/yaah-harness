@@ -31,8 +31,16 @@ This file is the compressed essence, not the source of truth.
   // Durability + control plane
   "state":       {type: "memory" | "file", ...},        // backs resume + idempotency
   "trace":       {mode, capture: [...], sink: {...}},   // observability
-  "baton_ttl":   259200,                                 // SECONDS; default 72h. Bounds both a
-                                                         //   parked gate and a running checkpoint
+  "baton_ttl":      259200,                              // SECONDS; default 72h. A PARKED GATE's
+                                                         //   abandon window (human patience)
+  "checkpoint_ttl": 21600,                               // SECONDS; absent = inherit baton_ttl.
+                                                         //   A RUNNING CHECKPOINT's window, i.e.
+                                                         //   how long ONE stage may be in flight
+  "lease_horizon":  3600,                                // SECONDS; default 1h. How long another
+                                                         //   HOST's lease may go unrefreshed
+                                                         //   before its run is recoverable.
+                                                         //   Must be <= checkpoint_ttl
+  "run_dir":     "artifacts/run-1",                      // what `{run_dir}` expands to; no default
   "live_config": false,                                  // re-read mutable leaves per call
   "decisions":   {<gate-stage>: {auto: "approve"}},      // unattended-run answers
   "interactive": false,                                  // stdin prompts on suspend
@@ -68,7 +76,10 @@ This file is the compressed essence, not the source of truth.
                                             // this stage's output (its payload is the final word)
         "validators":   ["<node-id>", ...], "max_attempts": 1, "feedback": false,
         "branch":       {"on": "<payload-key>", "routes": {"<value>": "<stage>"}},
-        "fork":         ["<branch-stage>", ...],
+        "fork":         ["<branch-stage>", ...],   // a bounded `wait:` that degrades delivers
+                                            // whatever arrived under the reserved payload key
+                                            // `fork_partial` (architecture.md §4) — never a
+                                            // reduced result, never a silent discard
         "fanin":        {"expect": ["<branch-stage>", ...], "wait": "all" | "any",
                           "reduce": "fn:module:func"},
         "foreach":      {"items": "<payload-key>", "into": "item",   // dynamic per-item fan-out
@@ -105,8 +116,16 @@ This file is the compressed essence, not the source of truth.
 
 Common keys on EVERY node spec: `model`, `effort`, `temperature`,
 `timeout`, `retries`, `config:`, `idempotency_key:`, `idempotent:`,
-`cwd_from:`, `rollback:`, `note:`, `_<anything>:`. Unknown keys are rejected by
-`validate_pipeline`.
+`placement:`, `provides:`, `consumes:`, `rollback:`, `note:`, `_<anything>:`.
+(`cwd_from:` is per-type — the agent, shell family, `get` and `post` read it.)
+
+Unknown keys are rejected by `validate_pipeline`, **per node type**: the legal set
+is `src/yaah/node_keys.py` (one row per builder), and the error names the node,
+the key and the whole legal set. A key that is legal on a *different* type is
+still rejected — that is the residue an `_extends` overlay leaves when it flips a
+node's `type`. A type the engine does not build (an app-registered custom type) is
+not checked. Escape hatch for a pipeline authored against a newer engine:
+`"allow_unknown_node_keys": true` at the pipeline top level.
 
 ## Agent node — the extras
 

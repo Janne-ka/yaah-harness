@@ -25,7 +25,7 @@ Targets Python 3.9+.
 from __future__ import annotations
 
 import json
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from ..store import ScannableBackend, StoreBackedFacade
 from .baton import Baton
@@ -41,6 +41,44 @@ class BatonStore(StoreBackedFacade[ScannableBackend]):  # +SCAN: sweep/list need
     async def load(self, baton_id: str) -> Optional[Baton]:
         raw = await self._store.get(self.PREFIX + baton_id)
         return Baton.from_dict(json.loads(raw.decode())) if raw is not None else None
+
+    async def load_rev(self, baton_id: str) -> "Tuple[Optional[Baton], Optional[int]]":
+        """`load` plus the backend REVISION the record was read at — the first half
+        of the read-decide-claim sequence in `Harness.resume_running`. On a backend
+        without the +CAS tier the revision is None, which `claim` treats as "no
+        conflict detection available" (see there)."""
+        get_rev = getattr(self._store, "get_rev", None)
+        if get_rev is None:
+            return await self.load(baton_id), None
+        raw, rev = await get_rev(self.PREFIX + baton_id)
+        return (Baton.from_dict(json.loads(raw.decode())) if raw is not None else None), rev
+
+    async def claim(self, baton: Baton, expected_rev: Optional[int]) -> bool:
+        """CLAIM the record: write it back only if nobody else wrote it since
+        `expected_rev` (docs/durable-state.md §10, "single-owner baton"). Returns
+        False when the claim was LOST — another process got there first, and the
+        caller must refuse rather than double-drive the run.
+
+        The +CAS tier is OPTIONAL, probed by `getattr` — the same stance the
+        facades take toward `close()`: a backend that has it gets the real
+        guarantee, one that does not still works. On a non-CAS backend this falls
+        back to a plain `put` and returns True, so the claim is ADVISORY there;
+        the refusal message says so, because "your store cannot prove this" is an
+        operator fact, not an engine detail to hide. FileBackend's CAS is
+        flock-serialized, which is itself advisory over NFS."""
+        cas = getattr(self._store, "cas", None)
+        if cas is None:
+            await self.save(baton)
+            return True
+        rev = await cas(self.PREFIX + baton.id,
+                        json.dumps(baton.to_dict()).encode(), expected=expected_rev)
+        return rev is not None
+
+    def has_cas(self) -> bool:
+        """Whether this store can actually PROVE a claim (the +CAS tier). Read by
+        the refusal/warning messages so an operator on a memory/blob backend is
+        told the single-owner check was advisory."""
+        return callable(getattr(self._store, "cas", None))
 
     async def delete(self, baton_id: str) -> None:
         await self._store.delete(self.PREFIX + baton_id)
@@ -85,12 +123,15 @@ class BatonStore(StoreBackedFacade[ScannableBackend]):  # +SCAN: sweep/list need
     async def list_running(self) -> List[Baton]:
         """Every RUNNING checkpoint (Level 2) — a baton persisted mid-run with a
         `cursor_input`. On a shared durable store these are either LIVE runs (a
-        process still driving them) or CRASHED ones a `resume_running` can recover;
-        the store can't tell them apart without a liveness lease (CAS single-owner
-        is deferred — docs/durable-state.md §10). The recovery/inspection surface
-        (`yaah list`, factory resume-run) shows them distinctly from suspended gates
-        so an operator can pick a dead run to re-drive. Empty on the default memory
-        backend after the process that ran them exits (the dict died with it)."""
+        process still driving them) or CRASHED ones a `resume_running` can recover.
+        Which one is answered by the LIVENESS LEASE each record carries
+        (`owner`/`leased_at` → `LeaseState`, docs/durable-state.md §10), so the
+        inspection surface labels them `live` / `stale` / `foreign` / `none` rather
+        than making the operator assert death; `yaah list` prints the `resume-run`
+        hint only when the lease is not live. Since the first-stage checkpoint this
+        includes runs that have not yet completed a single stage. Empty on the
+        default memory backend after the process that ran them exits (the dict died
+        with it)."""
         out: List[Baton] = []
         async for _key, raw in self._store.scan(self.PREFIX):
             baton = Baton.from_dict(json.loads(raw.decode()))

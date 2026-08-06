@@ -26,6 +26,10 @@
       "minimum": 0,
       "type": "number"
     },
+    "checkpoint_ttl": {
+      "minimum": 0,
+      "type": "number"
+    },
     "data_sinks": {
       "additionalProperties": {
         "additionalProperties": true,
@@ -97,6 +101,14 @@
     },
     "interactive": {
       "type": "boolean"
+    },
+    "lease_horizon": {
+      "minimum": 0,
+      "type": "number"
+    },
+    "lease_host": {
+      "minLength": 1,
+      "type": "string"
     },
     "live_config": {
       "type": "boolean"
@@ -182,6 +194,10 @@
     },
     "run": {
       "type": "boolean"
+    },
+    "run_dir": {
+      "minLength": 1,
+      "type": "string"
     },
     "serve": {
       "oneOf": [

@@ -448,6 +448,172 @@ def test_pipeline_typeless_node_names_stale_overlay() -> None:
     raise AssertionError("typeless node should raise")
 
 
+# ----- per-node-type spec keys (the silent-no-op class, one level below _STAGE_KEYS) -----
+
+def _shell_pipeline(**node_extra: Any) -> Dict[str, Any]:
+    node = {"type": "shell", "command": ["true"]}
+    node.update(node_extra)
+    return {"nodes": {"x": node},
+            "graph": {"start": "s1", "stages": {"s1": {"node": "x"}}}}
+
+
+def test_node_unknown_key_rejected() -> None:
+    # docs/shape-grammar.md promised this since it was written; nothing enforced it,
+    # and a pipeline carried target_from/interpolate_from for five weeks against an
+    # engine that dropped both silently.
+    try:
+        validate_pipeline(_shell_pipeline(bogus_key_xyz=1))
+    except ValueError as e:
+        msg = str(e)
+        assert "'x'" in msg and "bogus_key_xyz" in msg, msg
+        assert "shell" in msg, msg
+        assert "target_from" in msg and "command" in msg, msg   # the legal set is printed
+        return
+    raise AssertionError("an unknown node key should raise")
+
+
+def test_node_unknown_key_did_you_mean() -> None:
+    try:
+        validate_pipeline(_shell_pipeline(targt_from="written_tests"))
+    except ValueError as e:
+        assert "did you mean 'target_from'?" in str(e), str(e)
+        return
+    raise AssertionError("a near-miss node key should raise")
+
+
+def test_node_key_legal_on_another_type_is_still_rejected() -> None:
+    # `prompt` is an agent key. On a transform nothing reads it — which is exactly
+    # what an overlay that flips a node's `type` leaves behind.
+    p = {"nodes": {"x": {"type": "transform", "target": "fn:m:f", "prompt": "file:x"}},
+         "graph": {"start": "s1", "stages": {"s1": {"node": "x"}}}}
+    try:
+        validate_pipeline(p)
+    except ValueError as e:
+        assert "'prompt'" in str(e) and "transform" in str(e), str(e)
+        return
+    raise AssertionError("a foreign-type node key should raise")
+
+
+def test_node_underscore_keys_are_legal_everywhere() -> None:
+    validate_pipeline(_shell_pipeline(_comment="why", _about="doc",
+                                      _interpolate_from_note="see the overlay"))
+
+
+def test_node_common_keys_legal_on_every_type() -> None:
+    validate_pipeline(_shell_pipeline(model="claude:haiku", timeout=30, retries=1,
+                                      note="a comment", placement="cloud",
+                                      provides=["exit_code"], idempotent=False,
+                                      config={"k": 1}, effort="low",
+                                      temperature=0.0, idempotency_key="k"))
+
+
+def test_custom_node_type_keys_are_not_checked() -> None:
+    # an embedding app's registered type: the engine has no builder for it, so its
+    # keys are the app's business (the same sound skip the contract resolver takes)
+    validate_pipeline({"nodes": {"x": {"type": "widget", "whatever": 1}},
+                       "graph": {"start": "s1", "stages": {"s1": {"node": "x"}}}})
+
+
+def test_allow_unknown_node_keys_escape_hatch() -> None:
+    # the release valve for a pipeline authored against a NEWER engine
+    p = _shell_pipeline(bogus_key_xyz=1)
+    p["allow_unknown_node_keys"] = True
+    validate_pipeline(p)
+
+
+def test_node_key_table_covers_every_built_in_type() -> None:
+    # the drift guard: a new builder with no key row would silently check nothing.
+    from yaah.build.builders import default_registry
+    from yaah.node_keys import BUILTIN_NODE_KEYS
+    built = set(default_registry()._builders)          # noqa: SLF001
+    assert built == set(BUILTIN_NODE_KEYS), (built ^ set(BUILTIN_NODE_KEYS))
+
+
+def test_node_key_table_covers_every_spec_read_in_builders() -> None:
+    # the OTHER drift direction: a builder that starts reading a new `spec` key
+    # without adding it to the table would reject the very config it now supports.
+    #
+    # The scan is WIDER than builders.py. `builders.py` holds most of the reads, but
+    # not all: `build/live_leaf_config.py` re-reads the NodeConfig scalars per
+    # invocation, `build/build.py` and `build/registry.py` read `_role`/`type`, and
+    # `validate.py` / `replay.py` are the two non-build modules that read a node spec
+    # by that name. Scanning only builders.py meant a new key read in any of them
+    # would be rejected by the very validator meant to allow it.
+    import glob
+    import os
+    import re
+
+    from yaah.node_keys import BUILTIN_NODE_KEYS, COMMON_NODE_KEYS
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    src = os.path.join(root, "src", "yaah")
+    files = sorted(glob.glob(os.path.join(src, "build", "*.py")))
+    files += [os.path.join(src, "validate.py"), os.path.join(src, "replay.py")]
+    assert os.path.join(src, "build", "builders.py") in files, files
+    read = set()
+    for path in files:
+        with open(path) as f:
+            read |= set(re.findall(r'spec(?:\.get\(|\[)"(\w+)"', f.read()))
+    known = set(COMMON_NODE_KEYS).union(*BUILTIN_NODE_KEYS.values())
+    missing = sorted(k for k in read if not k.startswith("_") and k not in known)
+    assert not missing, "build/validate/replay read node keys absent from node_keys: {}".format(
+        missing)
+
+
+# ----- shell consumes: interpolate_from / target_from checked at LOAD (ADR-0006) -----
+
+def _worktree_then_shell(**shell_extra: Any) -> Dict[str, Any]:
+    # a worktree contract is CLOSED ({workdir, branch, repo, base}), so a read of
+    # anything else downstream is provably absent -> an ERROR tier, not a warning
+    node = {"type": "shell", "command": ["run"]}
+    node.update(shell_extra)
+    return {
+        "nodes": {"wt": {"type": "worktree", "repo": "/tmp/repo"}, "run": node},
+        "graph": {"start": "s1", "stages": {"s1": {"node": "wt", "then": "s2"},
+                                            "s2": {"node": "run"}}},
+    }
+
+
+def test_shell_interpolate_from_key_never_produced_fails_at_load() -> None:
+    # was a runtime TargetError deep in the run; now a load error naming the stage
+    p = _worktree_then_shell(command=["run", "--db={{db_url}}"], interpolate_from=["db_url"])
+    try:
+        validate_pipeline(p)
+    except ValueError as e:
+        msg = str(e)
+        assert "db_url" in msg and "s2" in msg, msg
+        assert "shell-key-absent" in msg, msg
+        return
+    raise AssertionError("an unproduced interpolate_from key should fail at load")
+
+
+def test_shell_target_from_key_never_produced_fails_at_load() -> None:
+    p = _worktree_then_shell(target_from="written_tests")
+    try:
+        validate_pipeline(p)
+    except ValueError as e:
+        assert "written_tests" in str(e), str(e)
+        return
+    raise AssertionError("an unproduced target_from key should fail at load")
+
+
+def test_shell_reads_satisfied_upstream_pass() -> None:
+    validate_pipeline(_worktree_then_shell(command=["run", "--in={{workdir}}"],
+                                           interpolate_from=["workdir"],
+                                           target_from="branch"))
+
+
+def test_shell_placeholder_without_interpolate_from_reads_nothing() -> None:
+    # without the opt-in a `{{key}}` stays a LITERAL — nothing is read, nothing to check
+    validate_pipeline(_worktree_then_shell(command=["run", "--db={{db_url}}"]))
+
+
+def test_shell_declared_but_unused_interpolate_key_is_not_a_read() -> None:
+    # s_factory declares interpolate_from: ["db_url"] centrally while a host overlay
+    # decides whether its runner command carries the token. Taking the declared LIST
+    # as the read-set would false-alarm on every consumer that doesn't.
+    validate_pipeline(_worktree_then_shell(command=["run"], interpolate_from=["db_url"]))
+
+
 # ----- ordering constraints (gate-ordering rules as config) -----
 
 def _branchy_pipeline() -> Dict[str, Any]:
@@ -529,6 +695,36 @@ def test_budget_node_timeout_exceeds_transport_window() -> None:
         assert "'x'" in msg and "120" in msg and "60" in msg, msg
         return
     raise AssertionError("node timeout > request_timeout should raise")
+
+
+def test_budget_lease_horizon_must_fit_the_checkpoint_window() -> None:
+    """A record swept before it can be declared stale is incoherent: a crashed run on
+    ANOTHER host would be deleted by the TTL sweep while still inside the window that
+    says "too fresh to recover", so it could never be recovered at all."""
+    from yaah.validate import validate_budgets
+    p = _valid_pipeline()
+    try:
+        validate_budgets({"checkpoint_ttl": 600, "lease_horizon": 3600}, p)
+    except ValueError as e:
+        msg = str(e)
+        assert "lease_horizon" in msg and "3600" in msg and "600" in msg, msg
+        assert "checkpoint_ttl" in msg, msg
+    else:
+        raise AssertionError("lease_horizon > checkpoint_ttl should raise")
+
+    # checkpoint_ttl absent -> the window is baton_ttl, and the message says which
+    try:
+        validate_budgets({"baton_ttl": 60, "lease_horizon": 3600}, p)
+    except ValueError as e:
+        assert "baton_ttl" in str(e), str(e)
+    else:
+        raise AssertionError("lease_horizon > baton_ttl should raise")
+
+    # coherent combinations, and the defaults (3600 vs the 72h default), must pass
+    validate_budgets({"checkpoint_ttl": 21600, "lease_horizon": 3600}, p)
+    validate_budgets({"lease_horizon": 3600}, p)
+    validate_budgets({"checkpoint_ttl": 3600, "lease_horizon": 3600}, p)   # equal is fine
+    validate_budgets({}, p)
 
 
 def test_budget_inproc_has_no_reply_window() -> None:
@@ -742,12 +938,27 @@ def main() -> None:
     test_constraint_unknown_key_and_shape()
     test_budget_node_timeout_exceeds_transport_window()
     test_budget_inproc_has_no_reply_window()
+    test_budget_lease_horizon_must_fit_the_checkpoint_window()
     test_budget_fork_wait_smaller_than_branch_node_timeout()
     test_stage_error_retries_is_a_known_key()
     test_min_success_rules()
     test_branch_string_is_a_clean_structural_error()
     test_branch_non_dict_does_not_crash_dataflow()
-    print("test_validate: PASS (44 scenarios)")
+    test_node_unknown_key_rejected()
+    test_node_unknown_key_did_you_mean()
+    test_node_key_legal_on_another_type_is_still_rejected()
+    test_node_underscore_keys_are_legal_everywhere()
+    test_node_common_keys_legal_on_every_type()
+    test_custom_node_type_keys_are_not_checked()
+    test_allow_unknown_node_keys_escape_hatch()
+    test_node_key_table_covers_every_built_in_type()
+    test_node_key_table_covers_every_spec_read_in_builders()
+    test_shell_interpolate_from_key_never_produced_fails_at_load()
+    test_shell_target_from_key_never_produced_fails_at_load()
+    test_shell_reads_satisfied_upstream_pass()
+    test_shell_placeholder_without_interpolate_from_reads_nothing()
+    test_shell_declared_but_unused_interpolate_key_is_not_a_read()
+    print("test_validate: PASS (58 scenarios)")
 
 
 if __name__ == "__main__":

@@ -162,6 +162,14 @@ yaah trace state/trace.jsonl --cost prices.json        # spend rollup
 The per-run tree shows every stage's duration, status, and any model_call /
 tool_call children. ✓ = ok, ✗ = error, ⏸ = suspended (parked).
 
+Each rejected attempt is its own `status: error` record carrying **why** it was
+rejected: `retry` (`transient` | `retry` | `feedback`), `attempt`/`n` (which
+attempt, on the `max_attempts` and `error_retries` budgets respectively), and
+`error` — the failing verdict's detail, truncated at 500 chars with a trailing
+`...[truncated]` marker (JSONL stays line-readable; the full text lives in the
+stage's artifact). This is the answer to "four paid model calls ran and the
+stage still failed — what did the validator object to?".
+
 Use when: a run completed but the output is wrong (the trace shows which
 stage's verdict was a retry vs. a final), a stage took longer than expected
 (latency p95s in `--cost` output for tokens, individual `duration_ms` in
@@ -193,6 +201,22 @@ which model, from which stage, and how long" view — a cross-run cousin of
   unknown) — never a silent `$0.00`. Same "cost is opt-in" rule as `--cost`.
 - **Zero-token rows are kept** — they're a forensic signal (a call that ran but
   produced nothing), not noise.
+
+### What the `$` figure is made of
+
+A `model_call` record splits INPUT into three classes, because they bill at
+three rates: `tokens_in` (fresh input, the `"input"` rate), `tokens_cache_read`
+(~0.1x that) and `tokens_cache_write` (~1.25x). `--cost` / `--counts` price each
+separately; a price-map row can override the two derived cache rates with an
+explicit `"cache_read"` / `"cache_write"` per-1k rate (do that for 1h-TTL cache
+writes, which bill at 2x — the trace records no TTL).
+
+> **Old traces are an upper bound, not a wrong number.** Records written before
+> 2026-08 carry only `tokens_in`, and it is the SUM of all three classes, so the
+> whole prompt prices at the full input rate. On a long, cache-heavy agentic
+> stage that over-reports spend several-fold. Such traces cannot be re-priced —
+> the split the arithmetic needs was never recorded — so read their `$` as a
+> ceiling and don't compare them against a post-fix run.
 
 Use when: you want the per-stage/per-model call breakdown for a cost or latency
 story, or to confirm a laddered stage escalated as expected (the `(ladder)` row

@@ -30,10 +30,12 @@ from .cleared import Cleared
 from .done import Done
 from .fork_coordinator import ForkCoordinator
 from .graph import Graph
+from .lease_state import DEFAULT_LEASE_HORIZON, LIVE, LeaseState, mint_owner
 from .span_emitter import SpanEmitter
 from .stage import Stage
 from .stage_failed import DecisionRejected, StageFailed
 from .suspended import Suspended
+from .wiring_fingerprint import wiring_fingerprint
 
 Outcome = Union[Done, Suspended, Cleared]
 
@@ -130,9 +132,39 @@ class Harness:
                  baton_store: Optional[BatonStore] = None,
                  envelope_store: Optional[EnvelopeStore] = None,
                  tracer: Optional[object] = None,
-                 strict_resume: bool = True) -> None:
+                 strict_resume: bool = True,
+                 owner: Optional[str] = None,
+                 lease_host: Optional[str] = None,
+                 lease_horizon: float = DEFAULT_LEASE_HORIZON) -> None:
         self.comms = comms
         self.graph = graph
+        # The name this deployment calls THIS host (root `lease_host`). Absent =
+        # `socket.gethostname()`, so nothing changes for anyone who does not set it.
+        # It exists for CONTAINERS, where `gethostname()` is the pod/container id and
+        # is different on every restart: the same machine looks like a new host each
+        # time, which permanently demotes every lease to tier 3 (the coarse
+        # `lease_horizon` age guess) even though `os.kill(pid, 0)` would have been
+        # real evidence. Setting `lease_host` to a stable per-NODE identity (the k8s
+        # node name, the VM's hostname) restores the same-host pid probe. It must be
+        # stable AND unique per kernel — two containers sharing one `lease_host` on
+        # DIFFERENT kernels would probe each other's pid namespace and read a
+        # coincidental pid as "the owner is alive".
+        self._lease_host = lease_host
+        # LIVENESS LEASE (docs/durable-state.md §10). One owner id per Harness —
+        # "<host>/<pid>/<nonce8>" — stamped on every checkpoint write, so the lease
+        # is refreshed at every stage boundary with NO heartbeat thread: feature 2
+        # made every stage boundary a store write already, and a lease that rides
+        # the write it already had to do costs nothing. Injectable (like `clock`)
+        # so a test can play a foreign host or a dead pid.
+        self._owner = owner or mint_owner(lease_host)
+        # How long a FOREIGN host's lease may go unrefreshed before its process is
+        # presumed dead. Only tier 3 uses it — same-host liveness is probed, not
+        # guessed (LeaseState).
+        self._lease_horizon = lease_horizon
+        # The graph's TOPOLOGY hash, computed ONCE here (the graph is immutable for
+        # this harness's life) and stamped on each baton at mint. Recovery compares
+        # it before re-driving a cursor; see wiring_fingerprint for what it covers.
+        self._wiring = wiring_fingerprint(graph)
         # DEFAULT-ON resume-time decision-form enforcement (N1, TIER-0): when a
         # parked gate declared a `form`, a submitted decision is validated against
         # that form's schema BEFORE it is merged/routed; a nonconforming decision
@@ -252,10 +284,16 @@ class Harness:
         them behind FOREVER: a crashed run's checkpoint has no owner to delete it,
         and `clear` is the operator's "start from a clean store" verb. On a SHARED
         durable store a running checkpoint may belong to a run still LIVE in another
-        process (no liveness lease — docs/durable-state.md §10); dropping it does
-        not kill that process, it only removes its recovery record. `clear` is
-        already the destructive all-or-nothing reset, so that is the documented
-        cost of using it; name individual ids with `clear --baton` to be surgical.
+        process; `clear` does NOT consult the liveness lease (it is the destructive
+        all-or-nothing reset), and dropping the record does not kill that process,
+        it only removes its recovery record. Name individual ids with
+        `clear --baton` to be surgical, and read `yaah list`'s `lease=` column first.
+
+        SINCE THE FIRST-STAGE CHECKPOINT, `checkpoints_dropped` counts more than it
+        used to: a run that has not yet completed a single stage now has a record in
+        the store, so it is counted here where before it was invisible. The number
+        is bigger for the same fleet — that is the checkpoint becoming complete, not
+        a leak.
 
         (Only `clearable` stages cancel in-flight on the broadcast — by design; a
         committed side-effect node isn't cancellable, see the clearable boundary.)"""
@@ -270,18 +308,30 @@ class Harness:
         return {"parked_flushed": parked, "batons_dropped": len(suspended),
                 "checkpoints_dropped": len(running)}
 
-    async def run(self, task: Envelope, *, ttl: object = _UNSET) -> Outcome:
-        """Start a run. `ttl` overrides this baton's suspend lifetime (seconds;
-        None = never expire); omit to use the baton default."""
+    async def run(self, task: Envelope, *,
+                  ttl: object = _UNSET,
+                  checkpoint_ttl: object = _UNSET) -> Outcome:
+        """Start a run. `ttl` overrides this baton's parked-gate lifetime (seconds;
+        None = never expire) and `checkpoint_ttl` its running-checkpoint sweep
+        window (None/omitted = inherit `ttl`); omit both to use the baton defaults."""
         await self.sweep_expired()
-        baton = Baton(id=uuid.uuid4().hex, stage=self.graph.start)
+        baton = Baton(id=uuid.uuid4().hex, stage=self.graph.start,
+                      wiring=self._wiring)
         if ttl is not _UNSET:
             baton.ttl = ttl  # the lifetime is the baton's, set per run
+        if checkpoint_ttl is not _UNSET:
+            baton.checkpoint_ttl = checkpoint_ttl
+        # FIRST-STAGE CHECKPOINT: persist BEFORE driving, so `graph.start` is inside
+        # the recoverable window like every other stage. Without this write a kill
+        # during the first stage left NOTHING in the store — no baton to
+        # `resume-run`, the run re-launched from the top — which is exactly the
+        # window a long seeding/discovery first stage sits in.
+        await self._checkpoint(baton, task)
         # Level 1 persists only on park; Level 2 (docs/durable-state.md §5) ALSO
-        # writes a running checkpoint after each completed stage (see _checkpoint),
-        # so a crash mid-run is recoverable via resume_running. Both bounded: a
-        # terminal outcome deletes the baton; a park overwrites the running
-        # checkpoint with the suspended record.
+        # writes a running checkpoint at the start and after each completed stage
+        # (see _checkpoint), so a crash mid-run is recoverable via resume_running.
+        # Both bounded: a terminal outcome deletes the baton; a park overwrites the
+        # running checkpoint with the suspended record.
         return await self._settle(baton, task)
 
     async def resume(self, baton_id: str, response: Envelope) -> Outcome:
@@ -313,6 +363,7 @@ class Harness:
         # NEVER move this into `_drive`/`_settle`: a StageFailed there DELETES the
         # baton (see `_settle`), which would strand a resumable run on a typo.
         self._enforce_decision_form(baton_id, baton.pending, response)
+        self._check_gate_wiring(baton)
         baton.status = "running"
         stage = self.graph.stages[baton.stage]
         pending = baton.pending  # the gate's EMITTED artifact, captured before the merge clears it
@@ -342,9 +393,19 @@ class Harness:
         baton.awaiting = None
         baton.parked_at = None
         baton.stage = self._next_stage(stage, resume_input)
+        # FIRST-STAGE-AFTER-A-GATE CHECKPOINT (mirrors the one in `run`): the human's
+        # decision is already MERGED into `resume_input`, so persisting here is what
+        # makes the decision itself durable. Before this, a kill in the post-gate
+        # stage left the SUSPENDED record in the store and the operator had to submit
+        # the decision AGAIN; now the run recovers with `resume-run` and the gate
+        # never re-opens. Guarded exactly like `_drive`'s: a gate that routed to a
+        # terminal `None` has no next stage to checkpoint.
+        if baton.stage is not None:
+            await self._checkpoint(baton, resume_input)
         return await self._settle(baton, resume_input)
 
-    async def resume_running(self, baton_id: str) -> Outcome:
+    async def resume_running(self, baton_id: str, *, force: bool = False,
+                             allow_rewiring: bool = False) -> Outcome:
         """Recover a run KILLED mid-flight (Level 2 checkpoint durability,
         docs/durable-state.md §5). Loads the running checkpoint for `baton_id` and
         RE-DRIVES from its cursor: the stage that was in flight when the process
@@ -354,16 +415,27 @@ class Harness:
         that delivers a human decision to a SUSPENDED gate; this re-drives a
         RUNNING crash with no new input.
 
-        Refuses anything that isn't a running checkpoint — a suspended gate
-        (use resume()), a finished/swept run (gone), or a baton never checkpointed.
-        NOT single-owner safe yet: there is no CAS lease, so the engine cannot tell
-        a crashed run from one still live in another process — the CALLER asserts
-        the run is dead (the deferred guard is docs/durable-state.md §10 /
-        ROADMAP 'Baton CAS'). Re-running the in-flight stage is at-least-once; a
-        committed side effect in that stage needs an idempotency guard (§6) to stay
-        exactly-once."""
+        THREE refusals, each with its OWN escape (they are different assertions and
+        must never share a flag):
+          - not a running checkpoint — a suspended gate (use resume()), a
+            finished/swept run (gone), or a baton never checkpointed. No escape.
+          - the graph was REWIRED since this baton was minted (wiring_fingerprint):
+            the cursor no longer means what it meant. `allow_rewiring=True` (CLI
+            `--allow-rewiring`) asserts the edit is cursor-compatible. Prompt/model/
+            timeout edits do NOT trip this — see wiring_fingerprint.
+          - the owner's process is still LIVE (LeaseState): another process is
+            driving this run and re-driving it would double-execute every remaining
+            stage. `force=True` (CLI `--force`) asserts the owner is dead anyway
+            (a SIGSTOP'd process, a pid the probe cannot see through).
+
+        Single-owner is then CLAIMED, not just checked: the record is re-written
+        with a CAS on the revision it was read at, so two operators racing the same
+        recovery cannot both win (advisory on a non-CAS backend — BatonStore.claim).
+
+        Re-running the in-flight stage is at-least-once; a committed side effect in
+        that stage needs an idempotency guard (§6) to stay exactly-once."""
         await self.sweep_expired()  # a checkpoint past its ttl is already gone
-        baton = await self.batons.load(baton_id)
+        baton, rev = await self.batons.load_rev(baton_id)
         if baton is None:
             raise KeyError(
                 "no baton {!r} to recover — run `yaah list` (a finished or "
@@ -377,7 +449,90 @@ class Harness:
             raise ValueError(
                 "baton {!r} has no checkpoint (no cursor_input/stage) — it was never "
                 "checkpointed, so there is no mid-run state to recover".format(baton_id))
+        self._check_wiring(baton, allow_rewiring)
+        lease = LeaseState.of(baton, self._wall(), self._lease_horizon,
+                              host=self._lease_host)
+        if not lease.recoverable and not force:
+            raise ValueError(
+                "baton {!r} is LEASED: {}. Re-driving it would run every remaining "
+                "stage twice. Wait for that process to finish or die, or pass "
+                "--force if you know it is dead (a stopped process still answers "
+                "the liveness probe).{}".format(
+                    baton_id, lease.detail,
+                    "" if self.batons.has_cas() else
+                    " NB this store has no compare-and-set tier, so the "
+                    "single-owner claim is ADVISORY here."))
+        if not lease.recoverable and force:
+            print("warning: --force overriding a {} lease on baton {} (owner {}, "
+                  "lease age {:.0f}s) — if that process is actually alive, every "
+                  "remaining stage now runs twice.".format(
+                      lease.state, baton_id, lease.owner, lease.age or 0.0),
+                  file=sys.stderr, flush=True)
+        elif lease.state != LIVE:
+            print("note: recovering baton {} — {}".format(baton_id, lease.detail),
+                  file=sys.stderr, flush=True)
+        # TAKE the lease before re-driving, under a CAS on the revision we read at:
+        # a second operator racing the same recovery loses the claim and is refused
+        # rather than silently double-driving the run.
+        baton.owner = self._owner
+        baton.leased_at = self._wall()
+        if not await self.batons.claim(baton, rev):
+            current = await self.batons.load(baton_id)
+            raise ValueError(
+                "lost the claim to {} on baton {!r} — another process wrote this "
+                "record between our read and our claim, so it is now recovering it. "
+                "Do NOT retry blindly; re-check `yaah list`.".format(
+                    (current.owner if current is not None else None) or "another writer",
+                    baton_id))
         return await self._settle(baton, baton.cursor_input)
+
+    def _check_gate_wiring(self, baton: Baton) -> None:
+        """The GATE-resume half of the wiring check, deliberately WEAKER than
+        `_check_wiring`. A parked gate is a human waiting: refusing their decision
+        because a stage was added elsewhere in the graph would be a hostile way to
+        lose work, and the gate's own stage is the only wiring the resume needs. So
+        a mismatch WARNS and continues — EXCEPT when the parked stage itself is gone
+        from the current graph, which is not a warning but a broken resume: the very
+        next line (`self.graph.stages[baton.stage]`) would raise a bare KeyError with
+        no explanation of what happened."""
+        if baton.stage is not None and baton.stage not in self.graph.stages:
+            raise ValueError(
+                "baton {!r} is parked at stage {!r}, which NO LONGER EXISTS in the "
+                "current graph — the pipeline was edited while this gate was parked, "
+                "so there is nowhere to deliver the decision. Restore the stage (or "
+                "the graph the run started on) and resume again; `yaah clear --baton "
+                "{}` abandons the run instead.".format(
+                    baton.id, baton.stage, baton.id))
+        if baton.wiring is not None and baton.wiring != self._wiring:
+            print("warning: baton {} was parked on a DIFFERENT graph topology "
+                  "(wiring {} vs the current {}); its gate stage {!r} still exists, "
+                  "so the decision is being delivered — but the stages AFTER it may "
+                  "not be the ones this run was started on.".format(
+                      baton.id, baton.wiring[:12], self._wiring[:12], baton.stage),
+                  file=sys.stderr, flush=True)
+
+    def _check_wiring(self, baton: Baton, allow_rewiring: bool) -> None:
+        """Refuse to re-drive a cursor into a graph that was REWIRED since the baton
+        was minted. A pre-upgrade baton carries no fingerprint — skip with a note
+        rather than refuse, since refusing would strand every record written before
+        the stamp existed and the engine genuinely has no evidence."""
+        if baton.wiring is None:
+            print("note: baton {} predates the wiring fingerprint — recovering "
+                  "WITHOUT a topology check (a graph edit since the kill would go "
+                  "undetected).".format(baton.id), file=sys.stderr, flush=True)
+            return
+        if baton.wiring == self._wiring or allow_rewiring:
+            return
+        raise ValueError(
+            "baton {!r} was minted on a DIFFERENT graph topology (wiring {} vs the "
+            "current {}) and its cursor is at stage {!r}, which {}. Re-driving it "
+            "would resume onto wiring the run never took. Restore the graph the run "
+            "started on, or pass --allow-rewiring if the edit is cursor-compatible. "
+            "(Prompt/model/timeout edits do NOT trip this check — only topology: "
+            "stages, targets, branch routes, fork/fan-in shape.)".format(
+                baton.id, baton.wiring[:12], self._wiring[:12], baton.stage,
+                "no longer exists in the current graph"
+                if baton.stage not in self.graph.stages else "still exists"))
 
     async def _checkpoint(self, baton: Baton, next_input: Envelope) -> None:
         """LEVEL 2 write (docs/durable-state.md §5): after a stage completes and the
@@ -398,9 +553,35 @@ class Harness:
         of the run, and the operator would discover it only when a kill left nothing
         for `resume-run`. Once per harness — the cause is a broken store, not a
         per-stage event, so repeating it every stage would just be noise (and the
-        trace already carries every occurrence)."""
+        trace already carries every occurrence).
+
+        THE LEASE RIDES THIS WRITE. `owner`/`leased_at` are stamped here and nowhere
+        else, which is why there is no heartbeat thread: since the first-stage
+        checkpoint, every stage boundary is already a store write, so the lease is
+        refreshed exactly as often as the run makes progress. A lease that goes
+        unrefreshed therefore means "no progress" — precisely what a recovery caller
+        wants to know (LeaseState).
+
+        SO DOES THE WIRING FINGERPRINT, and for the same reason. `wiring` is stamped
+        at mint, but a checkpoint is written by whichever harness is DRIVING, so the
+        honest value is that harness's graph — not the one the run was first minted
+        on. Without the re-stamp, a `--allow-rewiring` recovery drove the edited graph
+        while the record still claimed the ORIGINAL topology, so a second kill refused
+        again and the operator had to pass the flag once per crash, each time
+        asserting compatibility with a graph that was no longer the one that ran.
+        Re-stamping makes the record mean "the topology this cursor was produced by",
+        which is exactly what the next recovery needs to compare against. The write is
+        happening anyway, so this costs nothing.
+
+        The trade is deliberate: `wiring` is no longer mint PROVENANCE. Nothing reads
+        it as such (`_check_wiring` / `_check_gate_wiring` both ask "does this cursor
+        match the graph I am about to drive?"), and a run's origin belongs on the
+        trace, not on a record that is rewritten every stage."""
         baton.cursor_input = next_input
         baton.checkpointed_at = self._wall()
+        baton.owner = self._owner
+        baton.leased_at = baton.checkpointed_at
+        baton.wiring = self._wiring
         try:
             await self.batons.save(baton)
         except Exception as e:
@@ -717,6 +898,12 @@ class Harness:
                 # cursor as the record transitions running -> suspended.
                 baton.cursor_input = None
                 baton.checkpointed_at = None
+                # ...and the LEASE with it: a parked gate has no owning process. The
+                # engine exits at the park, so leaving the lease stamped would leave
+                # a dead pid claiming the record, and `yaah list` would label a gate
+                # awaiting a human as "owned by <host>/<pid>".
+                baton.owner = None
+                baton.leased_at = None
                 # Pin THIS RUN's correlation id onto the parked artifact before it
                 # is persisted. The artifact's own chain can have diverged from the
                 # run corr (a feedback-retry envelope copies headers WITHOUT a

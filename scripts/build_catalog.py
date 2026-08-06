@@ -11,19 +11,77 @@ strict "Used by / Where / Why" docstrings ([[code-style-one-class-per-file]])
 and typed constructor signatures; this script projects them into one place
 the skill (and a human) can scan. Single source of truth stays the code.
 
+HAND-WRITTEN SECTIONS (the fence contract): everything outside a fence is
+overwritten on every regen. A block bounded by
+
+    <!-- BEGIN-HANDWRITTEN: <key> -->
+    ...anything...
+    <!-- END-HANDWRITTEN: <key> -->
+
+is read back out of the EXISTING docs/module-catalog.md, kept verbatim
+(markers included), and re-emitted at the end of the regenerated file, in the
+order the blocks appeared. Position is not preserved — only order — because the
+generated sections above them are free to appear, vanish and reorder as the code
+moves. Keys must be unique and fences must be balanced; either violation raises
+rather than silently dropping prose a human wrote.
+
 Targets Python 3.9+.
 """
 from __future__ import annotations
 
 import ast
 import json
-import sys
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent / "src" / "yaah"
 OUT_MD = Path(__file__).resolve().parent.parent / "docs" / "module-catalog.md"
 OUT_JSON = Path(__file__).resolve().parent.parent / "docs" / "module-catalog.json"
+
+HANDWRITTEN_BEGIN = re.compile(r"^<!--\s*BEGIN-HANDWRITTEN:\s*([\w.-]+)\s*-->\s*$")
+HANDWRITTEN_END = re.compile(r"^<!--\s*END-HANDWRITTEN:\s*([\w.-]+)\s*-->\s*$")
+
+
+def extract_handwritten(text: str) -> List[str]:
+    """Return every fenced hand-written block of `text`, verbatim and in order.
+
+    Each returned string starts with its BEGIN marker line and ends with its
+    END marker line, so re-emitting it round-trips the fence itself.
+    """
+    blocks: List[str] = []
+    seen: List[str] = []
+    open_key: Optional[str] = None
+    current: List[str] = []
+    for lineno, line in enumerate(text.split("\n"), start=1):
+        begin = HANDWRITTEN_BEGIN.match(line)
+        end = HANDWRITTEN_END.match(line)
+        if begin:
+            if open_key is not None:
+                raise ValueError(
+                    "line {}: BEGIN-HANDWRITTEN: {} inside still-open block {}"
+                    .format(lineno, begin.group(1), open_key))
+            open_key = begin.group(1)
+            if open_key in seen:
+                raise ValueError("line {}: duplicate handwritten key {}"
+                                 .format(lineno, open_key))
+            seen.append(open_key)
+            current = [line]
+        elif end:
+            if open_key is None:
+                raise ValueError("line {}: END-HANDWRITTEN: {} with no BEGIN"
+                                 .format(lineno, end.group(1)))
+            if end.group(1) != open_key:
+                raise ValueError("line {}: END-HANDWRITTEN: {} closes block {}"
+                                 .format(lineno, end.group(1), open_key))
+            current.append(line)
+            blocks.append("\n".join(current))
+            open_key, current = None, []
+        elif open_key is not None:
+            current.append(line)
+    if open_key is not None:
+        raise ValueError("unterminated handwritten block: " + open_key)
+    return blocks
 
 
 def _first_paragraph(text: str) -> str:
@@ -145,14 +203,64 @@ def _node_type_registry() -> List[Tuple[str, str]]:
     return pairs
 
 
-def _builder_summary(builder_fn: str) -> str:
-    src = (ROOT / "build" / "builders.py").read_text()
-    tree = ast.parse(src)
-    for n in ast.walk(tree):
-        if isinstance(n, ast.FunctionDef) and n.name == builder_fn:
-            # builders.py uses inline kwarg comments rather than docstrings — extract them
-            sub = ast.unparse(n)
-            return sub
+def _own_returns(node: ast.AST):
+    """Yield the `return` statements of `node`'s own body, not those of the
+    nested helper functions builders.py defines inside its builders."""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        if isinstance(child, ast.Return):
+            yield child
+        for r in _own_returns(child):
+            yield r
+
+
+def _assigned_calls(fn: ast.AST) -> Dict[str, str]:
+    """`name -> LastClass` for every `name = SomeClass(...)` in the function body.
+    Needed because a builder's main construction is often assigned to a local and
+    returned bare (`agent = Agent(...); ...; return agent`)."""
+    out: Dict[str, str] = {}
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Assign) and isinstance(n.value, ast.Call):
+            for t in n.targets:
+                if isinstance(t, ast.Name):
+                    cls = _unparse(n.value.func)
+                    if cls:
+                        out[t.id] = cls
+    return out
+
+
+def _builder_constructs(builder_fn: str) -> str:
+    """Name the class a builder returns.
+
+    The PRIMARY construct is the builder's LAST own return, resolved through a local
+    when that return is a bare name. Earlier, CONDITIONAL returns (an opt-in wrapper)
+    are appended in parentheses rather than replacing it.
+
+    Both rules exist for `_build_agent`, whose shape is `agent = Agent(...)` … `if
+    attach_spec: return AttachingAgent(...)` … `return agent`. Taking the last
+    CALL-return alone published `AttachingAgent` as what an `agent` node builds — the
+    rare opt-in branch, not the thing every agent node in every pipeline actually
+    is."""
+    tree = ast.parse((ROOT / "build" / "builders.py").read_text())
+    for fn in ast.walk(tree):
+        if not (isinstance(fn, ast.FunctionDef) and fn.name == builder_fn):
+            continue
+        locals_ = _assigned_calls(fn)
+        returns = list(_own_returns(fn))
+        names: List[str] = []
+        for r in returns:
+            if isinstance(r.value, ast.Call):
+                names.append(_unparse(r.value.func) or "")
+            elif isinstance(r.value, ast.Name):
+                names.append(locals_.get(r.value.id, ""))
+            else:
+                names.append("")
+        names = [n for n in names if n]
+        if not names:
+            return ""
+        primary, rest = names[-1], [n for n in names[:-1] if n != names[-1]]
+        return "{} ({})".format(primary, ", ".join(rest)) if rest else primary
     return ""
 
 
@@ -205,12 +313,6 @@ def _format_args(args: List[Dict[str, Any]]) -> str:
     return "(" + ", ".join(parts) + ")"
 
 
-def _md_class_row(c: Dict[str, Any]) -> str:
-    args = _format_args(c["args"])
-    doc = c["doc"] or "—"
-    return "| `{}` | {} | `{}` |".format(c["name"], doc, args)
-
-
 def _md_section_classes(title: str, rel: str) -> str:
     items = _classes_implementing(rel)
     if not items:
@@ -228,35 +330,16 @@ def _md_section_classes(title: str, rel: str) -> str:
     return "\n".join(lines)
 
 
-def main() -> None:
+def build_catalog() -> Dict[str, Any]:
     catalog: Dict[str, Any] = {}
 
     # 1. Node types (the pipeline JSON `type:` values)
-    nodes = []
-    for type_name, builder_fn in _node_type_registry():
-        # find the constructed class via heuristics — look up the builder fn body for the `return XClass(...)`
-        src = _builder_summary(builder_fn)
-        # extract the FIRST classname after "return"
-        classname = ""
-        for line in src.splitlines():
-            line = line.strip()
-            if line.startswith("return "):
-                tail = line[7:].split("(")[0].strip()
-                classname = tail
-                break
-        nodes.append({"type": type_name, "builder": builder_fn, "class": classname})
-    catalog["node_types"] = nodes
+    catalog["node_types"] = [
+        {"type": type_name, "builder": builder_fn,
+         "class": _builder_constructs(builder_fn)}
+        for type_name, builder_fn in _node_type_registry()]
 
     # 2. Ports (Protocols)
-    catalog["ports"] = {}
-    for rel in ["data", "prompts", "mcp", "store", "trace", "comms", "filters"]:
-        for m in _scan_dir(rel):
-            for c in m["classes"]:
-                # Protocol detection — look for "Protocol" in any base. Here we approximate by
-                # the docstring summary mentioning "port" / "interface" — fall back to scanning
-                # the class definition for a Protocol base.
-                pass
-    # Rather than approximate, scan files whose CLASS list includes a Protocol parent.
     catalog["ports"] = _extract_protocols()
 
     # 3. Adapters per port directory
@@ -294,20 +377,29 @@ def main() -> None:
     # 7. Trace contributors
     catalog["trace_contributors"] = _classes_implementing("trace/contributors")
 
-    # ---- Render JSON ----
-    OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
-    OUT_JSON.write_text(json.dumps(catalog, indent=2, default=str))
+    return catalog
 
-    # ---- Render MD ----
+
+def render_markdown(catalog: Dict[str, Any]) -> str:
     md = ["# YAAH module catalog (auto-generated)",
           "",
           "Source: `yaah/src/yaah/` — regenerated by `yaah/scripts/build_catalog.py`.",
           "Drift-free by construction: the code is the truth, this file is the projection.",
           "",
+          "Editing this file by hand only sticks inside a fence: a block between "
+          "`<!-- BEGIN-HANDWRITTEN: key -->` and `<!-- END-HANDWRITTEN: key -->` is "
+          "carried over verbatim by the generator (re-emitted at the end of the file, "
+          "in fence order). Everything else is overwritten on the next regen.",
+          "",
           "## Node types — pipeline JSON `type:` values",
           "",
           "These are the values valid in a pipeline's `nodes.<role>.type` field, "
           "registered in `build/builders.py:default_registry()`.",
+          "",
+          "**Constructs** names what the builder returns. A parenthesised class is a "
+          "CONDITIONAL wrapper the builder returns instead on an opt-in key — e.g. "
+          "`Agent (AttachingAgent)`: an `agent` node builds an `Agent`, and is wrapped "
+          "in an `AttachingAgent` only when it declares `attach: [...]`.",
           "",
           "| `type:` | Builder | Constructs |",
           "|---|---|---|"]
@@ -407,8 +499,28 @@ def main() -> None:
             md.append("| `{m}` | `{n}` | {d} |".format(m=t["module"], n=name, d=doc))
         md.append("")
 
+    return "\n".join(md)
+
+
+def regenerate(existing_text: str, catalog: Optional[Dict[str, Any]] = None) -> str:
+    """Rebuild the catalog markdown, carrying `existing_text`'s hand-written
+    fences over into it. Pass the previous file's text; get the next one back."""
+    md = render_markdown(build_catalog() if catalog is None else catalog)
+    blocks = extract_handwritten(existing_text)
+    if blocks:
+        md = md.rstrip("\n") + "\n\n" + "\n\n".join(blocks) + "\n"
+    return md
+
+
+def main() -> None:
+    catalog = build_catalog()
+
+    OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
+    OUT_JSON.write_text(json.dumps(catalog, indent=2, default=str))
+
+    existing = OUT_MD.read_text() if OUT_MD.exists() else ""
     OUT_MD.parent.mkdir(parents=True, exist_ok=True)
-    OUT_MD.write_text("\n".join(md))
+    OUT_MD.write_text(regenerate(existing, catalog))
     print("wrote", OUT_MD)
     print("wrote", OUT_JSON)
 

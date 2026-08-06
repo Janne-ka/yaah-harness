@@ -2,7 +2,6 @@
   "nodes": {
     "loop": {
       "type": "agent_loop",
-      "backend": "fake_tool",
       "max_turns": 5,
       "system_prompt": "file:agent",
       "tools": {

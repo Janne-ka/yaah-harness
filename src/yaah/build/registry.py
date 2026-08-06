@@ -26,6 +26,7 @@ from ..core import Node
 from ..node_contract import (Contract, ConsumesFor, ContractFor, builtin_consumes_for,
                              builtin_contract_for, opaque)
 from .build_context import BuildContext
+from .macros import expand_macros
 
 NodeBuilder = Callable[[Dict[str, Any], BuildContext], Node]
 # A registered contract/consumes matches the built-in fn signatures (node_contract):
@@ -56,10 +57,21 @@ class Registry:
         return builder
 
     def build(self, spec: Dict[str, Any], ctx: BuildContext) -> Node:
+        """Construct the node. Path MACROS (`{base_dir}`, `{run_dir}`) are expanded
+        on the spec HERE so a builder only ever sees resolved absolute paths and no
+        builder has to re-implement the expansion (see build.macros).
+
+        This is NOT the canonical expansion seam — `build._built_nodes` is, because
+        the spec is read by more than the builder (`_wrap_node`, `_node_config` →
+        `NodeConfig.extras`) and only expanding upstream of all three keeps them
+        consistent. The expansion is kept here as well for the DIRECT-EMBEDDER path
+        (`registry.build(spec, ctx)` with no `_built_nodes` above it). Running both
+        is harmless: `expand_macros` consumes its tokens, so a second pass over an
+        already-expanded spec substitutes nothing."""
         t = spec.get("type")
         if t not in self._builders:
             raise KeyError("unknown node type {!r}; have {}".format(t, sorted(self._builders)))
-        return self._builders[t](spec, ctx)
+        return self._builders[t](expand_macros(spec, ctx), ctx)
 
     # --- D7.1: the contract lookup (mirrors builtin_contract_for's never-raise discipline) ---
 

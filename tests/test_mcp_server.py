@@ -124,8 +124,8 @@ NOISE_TRANSFORM = (
 # prints, as JSON in the isError content (a debugger parses it, not str(e)).
 FAILING_PIPELINE = {
     "nodes": {
-        "role:do": {"type": "shell", "command": ["true"], "stage": "do"},
-        "role:check": {"type": "shell_check", "command": ["false"], "stage": "check"},
+        "role:do": {"type": "shell", "command": ["true"]},
+        "role:check": {"type": "shell_check", "command": ["false"]},
     },
     "graph": {"start": "do", "stages": {
         "do": {"node": "role:do", "validators": ["role:check"],
@@ -274,6 +274,12 @@ async def scenario_gate_roundtrip(client: _Client) -> None:
     assert [b["id"] for b in out["batons"]] == [baton_id], out
     assert out["batons"][0]["awaiting"] == "spec:approve", out
     assert "thinking" in out["batons"][0]["question"], out
+    # the LEASE fields are populated, not null: the tool passes `root` to
+    # `_baton_json` so the horizon (a root fact) is available. A parked gate is
+    # unowned by construction, so the tier is `none` — but the field must be THERE,
+    # since a driver reading `yaah list --json` and then this tool must see one shape.
+    assert out["batons"][0]["lease_state"] == "none", out["batons"][0]
+    assert out["batons"][0]["owner"] is None, out["batons"][0]
 
     is_err, out = await _call(client, "baton_schema", {"root_path": root, "baton_id": baton_id})
     assert not is_err, out

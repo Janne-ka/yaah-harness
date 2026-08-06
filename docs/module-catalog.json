@@ -3,7 +3,7 @@
     {
       "type": "agent",
       "builder": "_build_agent",
-      "class": "s"
+      "class": "Agent (AttachingAgent)"
     },
     {
       "type": "json_object",
@@ -367,6 +367,33 @@
         ],
         "args_doc": [],
         "method_args_doc": []
+      },
+      {
+        "module": "src/yaah/adapters/stores/postgres_backend.py",
+        "name": "PostgresBackend",
+        "doc": "PostgresBackend \u2014 a durable StoreBackend extender over ONE Postgres table.",
+        "args": [
+          {
+            "name": "dsn",
+            "annotation": "str",
+            "default": null,
+            "kwonly": false
+          },
+          {
+            "name": "table",
+            "annotation": "str",
+            "default": "'yaah_state'",
+            "kwonly": true
+          },
+          {
+            "name": "connection",
+            "annotation": "Any",
+            "default": "None",
+            "kwonly": true
+          }
+        ],
+        "args_doc": [],
+        "method_args_doc": []
       }
     ],
     "trace_sinks": [
@@ -564,7 +591,7 @@
           {
             "name": "timeout",
             "annotation": "Optional[float]",
-            "default": "None",
+            "default": "_UNSET",
             "kwonly": true
           },
           {
@@ -905,6 +932,12 @@
           "annotation": "bool",
           "default": "False",
           "kwonly": true
+        },
+        {
+          "name": "allow_untrusted",
+          "annotation": "bool",
+          "default": "False",
+          "kwonly": true
         }
       ],
       "args_doc": [],
@@ -955,6 +988,24 @@
           "name": "shell",
           "annotation": "bool",
           "default": "False",
+          "kwonly": true
+        },
+        {
+          "name": "tail",
+          "annotation": "int",
+          "default": "2000",
+          "kwonly": true
+        },
+        {
+          "name": "target_from",
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "interpolate_from",
+          "annotation": "Optional[Sequence[str]]",
+          "default": "None",
           "kwonly": true
         }
       ],
@@ -1011,6 +1062,18 @@
         {
           "name": "carry",
           "annotation": "Optional[List[str]]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "target_from",
+          "annotation": "Optional[str]",
+          "default": "None",
+          "kwonly": true
+        },
+        {
+          "name": "interpolate_from",
+          "annotation": "Optional[Sequence[str]]",
           "default": "None",
           "kwonly": true
         }
@@ -1138,6 +1201,14 @@
       "module": "src/yaah/trace/contributors/cost.py",
       "name": "CostContributor",
       "doc": "CostContributor \u2014 the token/model capture (the cost dimension).",
+      "args": [],
+      "args_doc": [],
+      "method_args_doc": []
+    },
+    {
+      "module": "src/yaah/trace/contributors/live.py",
+      "name": "LiveContributor",
+      "doc": "LiveContributor \u2014 project `llm_progress` pulse spans into trace records.",
       "args": [],
       "args_doc": [],
       "method_args_doc": []

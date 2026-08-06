@@ -24,7 +24,6 @@ from ..core import Envelope
 # shorter default swept the weekend's parked gates). Per-baton (each baton carries
 # its own ttl); None = never. Override per deployment via root `baton_ttl`, whose
 # value is passed straight through to `Baton.ttl` — SECONDS, not minutes.
-# Since Level 2 this window has TWO meanings — see `is_expired`.
 DEFAULT_BATON_TTL = 72 * 60 * 60.0
 
 
@@ -62,36 +61,65 @@ class Baton:
     # of `parked_at`, so an abandoned (killed, never recovered) running checkpoint
     # is swept on the same ttl as an abandoned parked gate (is_expired below).
     checkpointed_at: Optional[float] = None
+    # The RUNNING-checkpoint sweep window, SECONDS — the second half of the split
+    # `ttl` (root `checkpoint_ttl`). None = inherit `ttl`, which is the pre-split
+    # behaviour and the ONLY safe default: an engine-side number here would
+    # silently SHORTEN an existing deployment's recovery window on upgrade.
+    checkpoint_ttl: Optional[float] = None
+    # LIVENESS LEASE (docs/durable-state.md §10). Who is driving this run right now:
+    # "<host>/<pid>/<nonce8>", stamped by Harness on every checkpoint write. A
+    # recovery caller uses it to tell a CRASHED run from one still live in another
+    # process instead of asserting death (LeaseState). None on a parked gate (no
+    # owning process) and on a pre-upgrade record.
+    owner: Optional[str] = None
+    # Wall clock of the last owner stamp — the lease's age. Comparable across
+    # processes (same reason `parked_at` is wall, not monotonic). Nulled on park.
+    leased_at: Optional[float] = None
+    # The WIRING fingerprint of the graph that PRODUCED this cursor
+    # (wiring_fingerprint): topology only — stages, targets, routes — never
+    # prompts/models/timeouts. A recovery re-drives `stage` against the CURRENT graph,
+    # so a topology edit between the kill and the recovery would resume onto the wrong
+    # stage; the stamp is what makes that refusable. None on a pre-upgrade record
+    # (checks skip).
+    # NOT mint provenance: it is stamped at mint and RE-STAMPED by every checkpoint
+    # (Harness._checkpoint), so after an `--allow-rewiring` recovery it names the
+    # graph that actually ran. Otherwise the flag would be needed once per crash for
+    # the rest of the run, each time asserting compatibility with a graph nobody was
+    # driving any more.
+    wiring: Optional[str] = None
 
     def is_expired(self, now: float) -> bool:
-        """True if this baton has outlived its ttl as of `now` (the harness supplies
-        the clock reading; the policy lives here on the baton). Covers BOTH durable
-        states the store holds: a SUSPENDED gate nobody resumed (past `parked_at`)
-        and a RUNNING checkpoint nobody recovered after a crash (past
-        `checkpointed_at`) — so a killed mid-run baton is reclaimed by the same
-        sweep, not leaked forever.
+        """True if this baton has outlived its sweep window as of `now` (the harness
+        supplies the clock reading; the policy lives here on the baton). The two
+        durable states the store holds have SEPARATE windows, because they answer
+        different questions:
 
-        NOTE the DUAL MEANING one `ttl` now carries (v1, deliberate — one knob, not
-        two). For a suspended gate it is a HUMAN patience window ("nobody answered
-        in 72h"). For a running checkpoint the clock restarts at every completed
-        stage, so it doubles as a bound on how long a SINGLE stage may be in flight:
-        a stage running longer than `ttl` has its recovery record swept out from
-        under it, and a crash after that point is unrecoverable. Deployments with a
-        very long stage must set root `baton_ttl` (seconds) above that stage's
-        worst-case wall-clock. Splitting the two windows is deferred until a real
-        deployment needs different values."""
-        if self.ttl is None:
-            return False
+          - a SUSPENDED gate is swept `ttl` after `parked_at` — a HUMAN patience
+            window ("nobody answered in 72h");
+          - a RUNNING checkpoint is swept `checkpoint_ttl` after `checkpointed_at`.
+            That clock restarts at every completed stage, so this window is really
+            a bound on how long ONE stage may be in flight: a stage running longer
+            than it has its recovery record swept out from under it, and a crash
+            after that point is unrecoverable.
+
+        `checkpoint_ttl` None INHERITS `ttl` — the pre-split behaviour, kept as the
+        default so an upgrade cannot silently shorten anybody's recovery window.
+        Set root `checkpoint_ttl` (seconds) above your slowest stage's worst-case
+        wall-clock; the human window stays whatever `baton_ttl` says."""
         if self.status == "suspended" and self.parked_at is not None:
-            return now - self.parked_at > self.ttl
+            return self.ttl is not None and now - self.parked_at > self.ttl
         if self.status == "running" and self.checkpointed_at is not None:
-            return now - self.checkpointed_at > self.ttl
+            window = self.checkpoint_ttl if self.checkpoint_ttl is not None else self.ttl
+            return window is not None and now - self.checkpointed_at > window
         return False
 
     # -- serialization (for a durable BatonStore; see docs/durable-state.md) --
     # The baton must round-trip through bytes so a suspended run survives a restart
     # and can be resumed in another process. `pending` is an Envelope (already JSON
     # via to_dict/from_dict); everything else is scalars/small dicts.
+    # EVERY optional field reads with `.get(...)` defaulting to None, so a record
+    # written by an OLDER engine (no owner/leased_at/wiring/checkpoint_ttl) still
+    # loads — an upgrade must never strand the parked gates already in the store.
     def to_dict(self) -> Dict[str, Any]:
         return {
             "id": self.id,
@@ -104,6 +132,10 @@ class Baton:
             "awaiting": self.awaiting,
             "cursor_input": self.cursor_input.to_dict() if self.cursor_input is not None else None,
             "checkpointed_at": self.checkpointed_at,
+            "checkpoint_ttl": self.checkpoint_ttl,
+            "owner": self.owner,
+            "leased_at": self.leased_at,
+            "wiring": self.wiring,
         }
 
     @classmethod
@@ -121,4 +153,8 @@ class Baton:
             awaiting=d.get("awaiting"),
             cursor_input=Envelope.from_dict(cursor_input) if cursor_input is not None else None,
             checkpointed_at=d.get("checkpointed_at"),
+            checkpoint_ttl=d.get("checkpoint_ttl"),
+            owner=d.get("owner"),
+            leased_at=d.get("leased_at"),
+            wiring=d.get("wiring"),
         )

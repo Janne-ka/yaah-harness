@@ -76,11 +76,16 @@ async def _tool_validate(args: Dict[str, Any]) -> Dict[str, Any]:
 async def _tool_list_gates(args: Dict[str, Any]) -> Dict[str, Any]:
     """The mailbox view — runtime.list_gates, rendered with the same per-baton
     shape as `yaah list --json` (runtime._baton_json, the documented stable
-    contract for driver skills)."""
+    contract for driver skills).
+
+    `root` is PASSED to `_baton_json`: the lease horizon is a root fact, and without
+    it `lease_state` comes back null on every baton — the same field `yaah list
+    --json` populates. A driver skill reading one surface and then the other would
+    have seen the field simply vanish."""
     from ...runtime import _baton_json, list_gates
     root, base = _load_root(args["root_path"])
     validate_root(root)
-    return {"batons": [_baton_json(b) for b in await list_gates(root, base)]}
+    return {"batons": [_baton_json(b, root) for b in await list_gates(root, base)]}
 
 
 async def _tool_baton_schema(args: Dict[str, Any]) -> Dict[str, Any]:

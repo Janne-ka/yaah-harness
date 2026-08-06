@@ -9,10 +9,13 @@ from .done import Done
 from .gate_driver import Decider, build_decider, drive
 from .graph import Graph
 from .harness import Harness, Outcome
+from .lease_state import DEFAULT_LEASE_HORIZON, LeaseState, mint_owner
 from .stage import Stage
 from .stage_failed import DecisionRejected, StageFailed
 from .suspended import Suspended
+from .wiring_fingerprint import wiring_fingerprint
 
 __all__ = ["Harness", "Graph", "Stage", "Baton", "BatonStore", "Cleared", "Done",
            "Outcome", "Suspended", "StageFailed", "DecisionRejected",
-           "drive", "build_decider", "Decider"]
+           "drive", "build_decider", "Decider",
+           "LeaseState", "DEFAULT_LEASE_HORIZON", "mint_owner", "wiring_fingerprint"]

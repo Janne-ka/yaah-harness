@@ -20,6 +20,16 @@ channel.
 Failure posture: a missing/unreadable/garbled file keeps the LAST KNOWN
 leaves — a config re-read must never kill a running pipeline.
 
+NO MACRO EXPANSION HERE, and it is safe that there is none. The re-read is RAW
+(this class holds no BuildContext, so it could not resolve `{base_dir}` /
+`{run_dir}` even if it wanted to), but the surface it folds in cannot carry a path
+macro: `config` extras are taken only when the value is INT/FLOAT (the bounds
+class), and the five scalars are model / effort / temperature / timeout / retries —
+identifiers and numbers, never paths. Every STRING extra keeps the build-time,
+macro-expanded value from `NodeConfig.extras` (`build._built_nodes`). If the live
+surface is ever widened to string extras, the expansion has to be threaded in with
+it — a `{run_dir}` folded in raw would hand a node the literal token.
+
 Targets Python 3.9+.
 """
 from __future__ import annotations
@@ -41,7 +51,8 @@ class LiveLeafConfig:
         """The built config with the file's CURRENT mutable leaves folded in.
         Scalars mirror `_node_config` (a key removed from the file reverts to
         its default); non-numeric extras and the idempotency key stay as
-        built."""
+        built — which is also what keeps macro-expanded string extras intact
+        (see the module docstring: this re-read is raw)."""
         built = built or NodeConfig()
         spec = self._spec(role)
         if spec is None:

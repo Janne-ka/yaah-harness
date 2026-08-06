@@ -24,7 +24,7 @@ def _run(d, name, *flags):
 
 def main() -> None:
     d = tempfile.mkdtemp()
-    pipe = {"nodes": {"x": {"type": "shell", "argv": ["true"]}},
+    pipe = {"nodes": {"x": {"type": "shell", "command": ["true"]}},
             "graph": {"start": "s", "stages": {"s": {"node": "x", "then": None}}}}
     with open(os.path.join(d, "p.json"), "w") as f:
         json.dump(pipe, f)
@@ -45,7 +45,7 @@ def main() -> None:
                for e in o["errors"]), o   # did-you-mean survives into the diagnostic
 
     # a stage-scoped error carries the stage field (best-effort path info)
-    p2 = {"nodes": {"x": {"type": "shell", "argv": ["true"]}},
+    p2 = {"nodes": {"x": {"type": "shell", "command": ["true"]}},
           "graph": {"start": "s",
                     "stages": {"s": {"node": "x", "on_error": "claer", "then": None}}}}
     with open(os.path.join(d, "p2.json"), "w") as f:

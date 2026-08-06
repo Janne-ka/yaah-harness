@@ -18,13 +18,78 @@ For how a stage *uses* a node (validators / retry / branch / fork), see
 | `model`, `effort`, `temperature`, `timeout`, `retries` | `NodeConfig` | per-call scalars; the node reads them at invoke time. With root `live_config: true` these (plus numeric `config` values) refresh from the file per call — the mutable-leaf surface (`validate.MUTABLE_LEAF_KEYS`). |
 | `config` | `NodeConfig.extras` | node-specific settings; agents also resolve prompt `{{placeholders}}` from here (payload wins). |
 | `idempotency_key`, `idempotent: true` | `OnceNode` wrapper | run the node's side effect ONCE per correlation even across retries/replays (needs root `state:`). |
-| `cwd_from` | repo-bound nodes | payload key holding the per-run worktree path (usually `"workdir"`); shell/agent/get run there. |
+| `provides`, `consumes` | the data-flow lint | the payload keys this node writes / reads, when the engine cannot infer them (a `transform`'s return, a custom type). Author-time only — never read at runtime. |
+| `placement` | the `serve` selector | which worker serves this node, e.g. `"gpu"`; `serve: {placement: [...]}` in the root picks the subset. |
 | `rollback` | any node type | declares the node's undo capability: `{target, cost}`. See **Rollback** below. |
 | `note`, any `_*` key | nobody | config comments. |
 
-Unknown keys are caught by `validate_pipeline` (the silent-no-op class).
-`{base_dir}` inside agent tool `usage`/`allowed_tools` strings expands to the
-config file's directory (absolute), so tool scripts ship beside the config.
+Unknown keys are caught by `validate_pipeline` (the silent-no-op class). The
+authoritative list is `src/yaah/node_keys.py:COMMON_NODE_KEYS` plus that type's own
+row in `BUILTIN_NODE_KEYS`.
+
+**`cwd_from` is NOT in this table** — it is a PER-TYPE key, read by `agent`,
+`shell`, `shell_check`, `get` and `post` only. On any other type (`render`,
+`transform`, `worktree`, a validator) it is a hard `validate_pipeline` error, not a
+silently-ignored hint. It names the payload key holding the per-run worktree path
+(usually `"workdir"`), and those nodes then run there; see each type's section
+below.
+
+### Path macros (`{base_dir}`, `{run_dir}`)
+
+Two **single-brace** macros are expanded at BUILD time in every string leaf of a
+node spec — command elements, `cwd`, `out`, `template_file`, `source`, `sink`,
+agent tool `usage`/`allowed_tools`, `config` extras, at any nesting depth:
+
+| Macro | Expands to | Root key |
+|---|---|---|
+| `{base_dir}` | the directory the root config was loaded from (absolute) | — (implicit) |
+| `{run_dir}` | this run's artifact root (absolute) | `run_dir` |
+
+The point is that a config file stays **relocatable** — a repo-relative path a
+colleague can check out anywhere — while the runtime gets an **absolute** path,
+which it must, because a repo-bound agent runs with cwd in the task worktree and a
+shell node's `cwd` is wherever the author set it.
+
+```jsonc
+"role:report": {
+  "type": "render",
+  "template_file": "{base_dir}/templates/report.html",
+  "out": "{run_dir}/report.html"
+}
+```
+
+Both work on **every node type**, and reach `NodeConfig.extras` too — a
+`config: {"repo_root": "{run_dir}/repo"}` arrives at the node already resolved.
+(`{base_dir}` used to be agent-only, because its expansion lived inside the agent
+builder — not because the need was agent-specific. It is now one implementation in
+`yaah.build.macros`, applied in `build._built_nodes` — upstream of the builder AND
+of the `NodeConfig` extraction, so both see the same expanded spec. `Registry.build`
+expands as well, for an app calling it directly; expansion consumes its tokens, so
+stacking the two is a no-op.)
+
+**Compat edge of that widening.** A pre-existing literal `{base_dir}` in a
+NON-agent string used to survive to runtime untouched; it now expands — or, if the
+config was loaded without a base dir, raises a build error naming the macro. The
+same applies to `{run_dir}` with no root `run_dir` key. There is no such string
+anywhere in this tree, and a path-shaped `{base_dir}` was almost certainly meant to
+expand; but if you were relying on the literal, escape it out of a single-brace
+token (or move the value into a `{{key}}` the envelope fills at run time).
+
+**One exception, by design: root `live_config: true`.** The per-invocation re-read
+folds in only the `NodeConfig` scalars and NUMERIC `config` values, so it can never
+re-introduce an unexpanded macro; every string extra keeps its build-time expanded
+value. Editing a string `config` value in the live file therefore does not take
+effect — that is the frozen-at-build surface, not a macro limitation.
+
+**`{run_dir}` has no default.** Using it without the root `run_dir` key is a build
+ERROR naming the key, never a quiet fall back to the launcher's cwd — a run whose
+artifacts land in whatever tree the launcher happened to be in is the silent
+misroute this refuses to ship. The directory is created at load if missing.
+
+**Not the same as `{{key}}` interpolation.** These macros are single-brace and
+resolve at build; `{{db_url}}` is double-brace and is filled per invocation from the
+envelope/`config`. One string may carry both — `"psql {{db_url}} -o {run_dir}/d.sql"`
+expands the macro now and leaves the placeholder for the run.
 
 **`timeout` semantics (per-node, unchanged) + the provider stall watchdog.** A
 node's `timeout` still overrides the backend default exactly as before — set it
@@ -289,6 +354,19 @@ placeholders may draw from.
   byte-identical to before: a `{{key}}` in a command stays the literal `{{key}}`.
 - **Order with `target_from`**: interpolation happens first (placeholders keep
   their position), then targets are appended — targets always land last.
+- **Checked at LOAD.** A shell node declares the payload keys it reads — the
+  `{{key}}`s actually present in its argv (only when `interpolate_from` opts in),
+  plus `target_from`'s key — so the data-flow lint catches "nothing upstream
+  produces this key" at load instead of a mid-run `TargetError`. Declaring a key
+  in `interpolate_from` that the command does not use is *not* a read: the list is
+  the allow-list, the argv is the read-set (so a pipeline may declare the key
+  centrally while a host overlay decides whether its command carries the token).
+  **The check is SKIPPED when the payload reaching this stage is unknown** — the
+  common case being a `transform` upstream with no `provides:`, whose return value
+  the engine cannot see. The lint has no set to check against, so it stays silent
+  rather than guessing; that transform is reported separately as
+  `transform-provides-undeclared`, and declaring `provides:` on it is what turns
+  this check back on downstream.
 
 ```json
 "role:migrate": {"type": "shell", "cwd_from": "workdir",

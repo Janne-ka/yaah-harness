@@ -485,6 +485,28 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
             "`provides`; or graph `sticky`) or drop them from `consumes`. "
             "[lint: input-key-unprovided]".format(s_name, missing, sorted(known - {"raw"})))
 
+    def shell_msg(s_name: str, missing: List[str], known: "frozenset", hard: bool) -> str:
+        # the shell family's reads come from `interpolate_from`'s `{{key}}` and `target_from`
+        # (nodes/_target.py), so the remedy names those, not a `consumes` list to edit.
+        if hard:
+            return (
+                "stage {!r}: the command's `interpolate_from`/`target_from` reads {} which is "
+                "provably ABSENT here — the payload is a fixed set providing {}. The node "
+                "ERRORS with TargetError (or silently drops its target) EVERY run. Provide "
+                "them upstream (an agent output_schema, a transform `provides`, a node "
+                "`config` inject, or graph `sticky`). [dataflow: shell-key-absent]".format(
+                    s_name, missing, sorted(known - {"raw"})))
+        return (
+            "stage {!r}: the command's `interpolate_from`/`target_from` reads {} which nothing "
+            "on the path to it provides (provides {}). The node then ERRORS with TargetError "
+            "on any run where they're absent. Declare them on an upstream producer (an agent "
+            "`provides: [...]` or output_schema; a transform's `provides`; graph `sticky`). "
+            "[lint: shell-key-unprovided]".format(s_name, missing, sorted(known - {"raw"})))
+
+    # message SELECTION only (never contract logic): each built-in reader keeps wording that
+    # names ITS source of the read. An unlisted type falls to the declared-`consumes` wording.
+    consumes_msg_for = {"render": render_msg, "shell": shell_msg, "shell_check": shell_msg}
+
     for s_name, s in stages.items():
         node = nodes.get(s.get("node")) or {}
         pin_here = pin.get(s_name)
@@ -561,9 +583,7 @@ def analyze_dataflow(nodes: Dict[str, Any], stages: Dict[str, Any], sticky_list:
                     "fix the template/consumes. [dataflow: foreach-worker-key-absent]"
                     .format(s_name, missing, sorted(per_item)))
         elif needs:
-            # message SELECTION only (not contract logic): render keeps its established
-            # wording + tag; a declared-`consumes` node gets the generic one.
-            msg = render_msg if node.get("type") == "render" else consumes_msg
+            msg = consumes_msg_for.get(node.get("type"), consumes_msg)
             if pin_here.closed:
                 missing = [k for k in needs if k not in pin_here.known]
                 if missing:

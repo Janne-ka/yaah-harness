@@ -50,11 +50,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from .build import build, harness_from_config, serve_from_config
+from .build import build, build_graph, harness_from_config, serve_from_config
+from .build.macros import resolve_run_dir
 from .core import Envelope, Kind
-from .harness import Baton, BatonStore, Outcome, build_decider as _build_decider, drive
+from .harness import (DEFAULT_LEASE_HORIZON, Baton, BatonStore, LeaseState, Outcome,
+                      build_decider as _build_decider, drive, wiring_fingerprint)
 from .store import EnvelopeStore, IdempotencyStore
 # Config-block → runtime-leaf factories (the maps + builders, split out so this
 # module is just assembly + entrypoints). _read_json is re-exported here because
@@ -107,7 +110,8 @@ def _resolve_serve(serve: Any, pipeline: Dict[str, Any]) -> Optional[set]:
     return set(serve)
 
 
-async def _assemble_harness(root: Dict[str, Any], base: str, *, store: Any) -> Any:
+async def _assemble_harness(root: Dict[str, Any], base: str, *, store: Any,
+                            create_run_dir: bool = True) -> Any:
     """Spin up the orchestrator-side Harness from the root config — transport,
     backend, prompt/data/mcp layers, the durable state store, and the nodes (served
     over a bus, or registered in-process). Shared by run_root and resume_gate so a
@@ -167,6 +171,21 @@ async def _assemble_harness(root: Dict[str, Any], base: str, *, store: Any) -> A
     # merge, the pre-enforcement behavior). Threaded into the Harness (both the
     # in-proc build and the orchestrator-only harness_from_config).
     strict_resume = bool(root.get("strict_resume", True))
+    # `run_dir` (the `{run_dir}` node-spec macro's target) is resolved ONCE here —
+    # the only place the config's base dir is known — and the directory is created,
+    # so a node writing into it does not have to. Absent = None, and the macro then
+    # refuses at build (build.macros: no default, ever).
+    # `create_run_dir=False` comes from the TEARDOWN verb (`clear_state`): a clear
+    # must not CREATE a directory on its way to deleting state.
+    run_dir = resolve_run_dir(root.get("run_dir"), base, create=create_run_dir)
+    # How long a lease from ANOTHER host may go unrefreshed before its run is
+    # presumed recoverable. Harness owns the default; validate_budgets already
+    # rejected a value that outlives the checkpoint window.
+    lease_horizon = root.get("lease_horizon")
+    # What this deployment calls THIS host in a lease owner id. Absent =
+    # `socket.gethostname()`. Set it in a CONTAINER, where gethostname() is the pod
+    # id and changes on every restart — see Harness.__init__ / durable-state.md §10.
+    lease_host = root.get("lease_host")
 
     # One injected state store backs the resume-cursor (BatonStore) and
     # execute-once (IdempotencyStore); its lifecycle belongs to the caller's
@@ -179,18 +198,21 @@ async def _assemble_harness(root: Dict[str, Any], base: str, *, store: Any) -> A
         served = await serve_from_config(pipeline, comms, backend=backend, prompt_source=prompts,
                                          data_source=data, data_sink=sink, mcp_source=mcp,
                                          idempotency_store=idem_store, tracer=tracer,
-                                         roles=roles, base_dir=base,
+                                         roles=roles, base_dir=base, run_dir=run_dir,
                                          live_config_path=live_path)
         print("served:", served)
         return harness_from_config(pipeline, comms, baton_store=baton_store,
                                    envelope_store=env_store, tracer=tracer,
-                                   strict_resume=strict_resume)
+                                   strict_resume=strict_resume,
+                                   lease_horizon=lease_horizon, lease_host=lease_host)
     # in-process: build registers everything
     return build(pipeline, comms=comms, backend=backend, prompt_source=prompts,
                  data_source=data, data_sink=sink, mcp_source=mcp,
                  idempotency_store=idem_store, baton_store=baton_store,
                  envelope_store=env_store, tracer=tracer, base_dir=base,
-                 live_config_path=live_path, strict_resume=strict_resume)
+                 run_dir=run_dir, live_config_path=live_path,
+                 strict_resume=strict_resume, lease_horizon=lease_horizon,
+                 lease_host=lease_host)
 
 
 def _seed_task(root: Dict[str, Any], base: str) -> "Tuple[Envelope, Dict[str, Any]]":
@@ -212,7 +234,11 @@ def _seed_task(root: Dict[str, Any], base: str) -> "Tuple[Envelope, Dict[str, An
     identically and differ only in gate handling (driver vs mailbox)."""
     raw_input = root.get("input", {})
     payload = raw_input if isinstance(raw_input, dict) else _read_json(_rel(base, raw_input))
-    run_kw = {"ttl": root["baton_ttl"]} if "baton_ttl" in root else {}
+    run_kw: Dict[str, Any] = {}
+    if "baton_ttl" in root:
+        run_kw["ttl"] = root["baton_ttl"]
+    if "checkpoint_ttl" in root:
+        run_kw["checkpoint_ttl"] = root["checkpoint_ttl"]
     return Envelope(Kind.TASK, payload), run_kw
 
 
@@ -252,7 +278,40 @@ async def run_root(root: Dict[str, Any], base: str) -> "Optional[Outcome]":
             root, base, harness, harness.run(task, **run_kw))
 
 
-def _baton_json(b: "Baton") -> Dict[str, Any]:
+def current_wiring(root: Dict[str, Any], base: str) -> "Optional[str]":
+    """The TOPOLOGY fingerprint of the pipeline this root points at, or None when it
+    cannot be read. Used by the inspection surfaces (`yaah list`) to flag a running
+    checkpoint whose graph has since been rewired — the same comparison
+    `Harness.resume_running` refuses on, shown BEFORE the operator tries it.
+
+    Returns None rather than raising: a moved/edited pipeline must not take down the
+    whole listing, and "unknown" is reported as unknown (`wiring_mismatch: null`),
+    never as "matches". Cheap — it builds the Graph, not the nodes."""
+    pipeline_ref = root.get("pipeline")
+    try:
+        pipeline = (dict(pipeline_ref) if isinstance(pipeline_ref, dict)
+                    else _read_json(_rel(base, pipeline_ref)))
+        return wiring_fingerprint(build_graph(pipeline["graph"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def baton_lease(b: "Baton", root: Dict[str, Any]) -> LeaseState:
+    """This baton's liveness lease as of now, under the root's `lease_horizon` and
+    `lease_host`. ONE call site's worth of policy, shared by `yaah list`'s label and
+    (through `Harness.resume_running`) the recovery refusal — see LeaseState. Both
+    root keys are read HERE as well as in `_assemble_harness`, so the label an
+    operator reads and the tier the recovery decides on can never disagree: a
+    container that set `lease_host` must show `lease=live` for its own runs, not
+    `foreign`."""
+    horizon = root.get("lease_horizon")
+    return LeaseState.of(b, time.time(),
+                         float(horizon) if horizon is not None else DEFAULT_LEASE_HORIZON,
+                         host=root.get("lease_host"))
+
+
+def _baton_json(b: "Baton", root: Optional[Dict[str, Any]] = None,
+                wiring: "Optional[str]" = None) -> Dict[str, Any]:
     """The mailbox-view JSON shape for one suspended baton. Stable contract for
     driver skills consuming `yaah list --json`: `{id, stage, awaiting, parked_at,
     concerns, escalation, question}` (question is null when the gate has no
@@ -271,7 +330,18 @@ def _baton_json(b: "Baton") -> Dict[str, Any]:
     the wall-clock of the last checkpoint for a RUNNING baton (the `running` array
     of `yaah list --json`). A recovery tool picks the GREATEST to disambiguate N
     abandoned running checkpoints for one task, exactly as `parked_at` does for
-    killed-run gate orphans."""
+    killed-run gate orphans.
+
+    ADDITIVE recovery fields (a consumer reading the older shape is unaffected):
+    `owner`/`leased_at`/`lease_state` are the liveness lease — `lease_state` is
+    `live` (someone is driving it, do NOT resume-run), `stale` (presumed dead,
+    recoverable), `foreign` (another host, still inside `lease_horizon`) or `none`
+    (a parked gate, or a pre-upgrade record). It is computed only when `root` is
+    passed, since the horizon is a root fact; otherwise it is null.
+    `wiring` is the topology fingerprint the run was minted on, and
+    `wiring_mismatch` compares it against `wiring` (the CURRENT graph's, passed by
+    the caller): true means `resume-run` will REFUSE without `--allow-rewiring`;
+    null means "not compared" (no current fingerprint, or a pre-upgrade record)."""
     q = None
     escalation = None
     if b.pending is not None:
@@ -279,12 +349,20 @@ def _baton_json(b: "Baton") -> Dict[str, Any]:
         # surface the failed verdict that escalated this stage (Y3) — the failure
         # is in the parked payload so `yaah list` shows WHY the stage broke.
         escalation = b.pending.payload.get("escalation")
+    mismatch = None
+    if wiring is not None and b.wiring is not None:
+        mismatch = wiring != b.wiring
     return {"id": b.id, "stage": b.stage, "awaiting": b.awaiting,
             "parked_at": b.parked_at,
             "checkpointed_at": b.checkpointed_at,
             "concerns": [dict(c) for c in b.concerns],
             "escalation": escalation,
-            "question": q}
+            "question": q,
+            "owner": b.owner,
+            "leased_at": b.leased_at,
+            "lease_state": baton_lease(b, root).state if root is not None else None,
+            "wiring": b.wiring,
+            "wiring_mismatch": mismatch}
 
 
 async def list_gates(root: Dict[str, Any], base: str) -> "List[Baton]":
@@ -311,7 +389,8 @@ async def list_checkpoints(root: Dict[str, Any], base: str) -> "List[Baton]":
         return await BatonStore(store).list_running()
 
 
-async def resume_run(root: Dict[str, Any], base: str, baton_id: str) -> "Outcome":
+async def resume_run(root: Dict[str, Any], base: str, baton_id: str, *,
+                     force: bool = False, allow_rewiring: bool = False) -> "Outcome":
     """Recover a KILLED mid-run (Level 2). Loads the running checkpoint and
     re-drives from its cursor stage — the in-flight stage re-runs, completed stages
     do not — to the next gate or completion, possibly in a DIFFERENT process than
@@ -328,13 +407,20 @@ async def resume_run(root: Dict[str, Any], base: str, baton_id: str) -> "Outcome
     surface already reports. Done as a PRE-CHECK rather than by netting KeyError
     around the drive: a KeyError raised by a node mid-run must stay a run failure,
     not be reclassified as "no such baton". The wrong-STATUS refusals are already
-    ValueError and pass through unchanged."""
+    ValueError and pass through unchanged.
+
+    `force` overrides a LIVE liveness lease; `allow_rewiring` overrides a topology
+    mismatch. Two flags because they are two different assertions — "that process is
+    dead" and "this graph edit is cursor-compatible" — and one flag would let an
+    operator silence the check they did not think about."""
     load_plugins(root.get("plugins"), base)
     async with opened_store(root.get("state"), base) as store:
         harness = await _assemble_harness(root, base, store=store)
         await _require_baton(harness, baton_id, "recover")
         return await saga.settle_terminal(
-            root, base, harness, harness.resume_running(baton_id))
+            root, base, harness,
+            harness.resume_running(baton_id, force=force,
+                                   allow_rewiring=allow_rewiring))
 
 
 async def resume_gate(root: Dict[str, Any], base: str, baton_id: str,
@@ -431,10 +517,15 @@ async def clear_state(root: Dict[str, Any], base: str) -> Any:
     checkpoints — a graceful reset over the SAME store/transport the runs use.
     Returns the clear result (what was released/dropped: `parked_flushed`,
     `batons_dropped` = suspended gates, `checkpoints_dropped` = running).
-    `--clear` entrypoint."""
+    `--clear` entrypoint.
+
+    Assembles with `create_run_dir=False`: this verb exists to REMOVE state, and
+    `resolve_run_dir` otherwise mkdir's the run's artifact root on the way in — a
+    teardown that leaves a new empty directory behind (on a root that may never have
+    been run at all)."""
     load_plugins(root.get("plugins"), base)   # registered types must exist before build/validate
     async with opened_store(root.get("state"), base) as store:  # release the built backend
-        harness = await _assemble_harness(root, base, store=store)
+        harness = await _assemble_harness(root, base, store=store, create_run_dir=False)
         return await harness.clear()
 
 

@@ -340,6 +340,18 @@ def main() -> None:
             baton_id="b1", decision_file=None)
     _expect(_parse_subcommand(["resume", R, "b1", "dec.json"]), action="resume",
             root=R, baton_id="b1", decision_file="dec.json")
+    # resume-run's two recovery overrides are SEPARATE flags on purpose: they waive
+    # two different assertions ("that process is dead" / "this graph edit is
+    # cursor-compatible"), so neither may imply the other and both default off.
+    _expect(_parse_subcommand(["resume-run", R, "b1"]), action="resume-run",
+            root=R, baton_id="b1", force=False, allow_rewiring=False)
+    _expect(_parse_subcommand(["resume-run", R, "b1", "--force"]),
+            baton_id="b1", force=True, allow_rewiring=False)
+    _expect(_parse_subcommand(["resume-run", R, "b1", "--allow-rewiring"]),
+            baton_id="b1", force=False, allow_rewiring=True)
+    _expect(_parse_subcommand(["resume-run", R, "b1", "--force", "--allow-rewiring",
+                               "--json"]),
+            baton_id="b1", force=True, allow_rewiring=True, json=True)
     _expect(_parse_subcommand(["validate", R]), action="validate", root=R)
     _expect(_parse_subcommand(["validate", R, "--fake"]), action="validate", fake=True)
     _expect(_parse_subcommand(["trace", "t.jsonl"]), action="trace",

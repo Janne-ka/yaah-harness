@@ -28,8 +28,8 @@ ENV = {**os.environ, "PYTHONPATH": "src"}
 # absent (unlike an unfilled render), so the failure is a genuine RUNTIME one.
 FAILING_PIPELINE = {
     "nodes": {
-        "role:do": {"type": "shell", "command": ["true"], "stage": "do"},
-        "role:check": {"type": "shell_check", "command": ["false"], "stage": "check"},
+        "role:do": {"type": "shell", "command": ["true"]},
+        "role:check": {"type": "shell_check", "command": ["false"]},
     },
     "graph": {"start": "do", "stages": {
         "do": {"node": "role:do", "validators": ["role:check"],
@@ -62,8 +62,8 @@ AGENT_IN_VALIDATORS_PIPELINE = {
 # (which IS Kind.VERDICT, so it takes the normal path).
 PASSING_CHECKER_PIPELINE = {
     "nodes": {
-        "role:do": {"type": "shell", "command": ["true"], "stage": "do"},
-        "role:check": {"type": "shell_check", "command": ["true"], "stage": "check"},
+        "role:do": {"type": "shell", "command": ["true"]},
+        "role:check": {"type": "shell_check", "command": ["true"]},
     },
     "graph": {"start": "do", "stages": {
         "do": {"node": "role:do", "validators": ["role:check"],

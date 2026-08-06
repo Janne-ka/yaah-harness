@@ -9,6 +9,9 @@
     "$schema": {
       "type": "string"
     },
+    "allow_unknown_node_keys": {
+      "type": "boolean"
+    },
     "graph": {
       "additionalProperties": false,
       "patternProperties": {

@@ -34,6 +34,9 @@ _VERBS = ("init", "scaffold", "run", "list", "resume", "resume-run", "clear",
 _TRACE_FLAGS = ("--pretty", "--errors-only", "--cost", "--last")
 _PIPELINE_FLAGS = ("--fake", "--debug")
 _LIST_FLAGS = ("--json",)
+# resume-run's two recovery overrides — one per assertion (a live liveness lease,
+# a changed graph topology); see cli._parse_resume_run.
+_RESUME_RUN_FLAGS = ("--json", "--force", "--allow-rewiring")
 _GLOBAL_FLAGS = ("--help", "-h", "--version", "-V", "--debug")
 _ARCHETYPES = ("linear", "branch-with-gate", "fork-fanin")
 _SHELLS = ("bash", "zsh")
@@ -84,6 +87,13 @@ _yaah_completion() {{
     list)
       if [[ "$cur" == -* ]]; then
         COMPREPLY=( $(compgen -W "{list_flags} --debug" -- "$cur") )
+      else
+        COMPREPLY=( $(compgen -f -X '!*.json' -- "$cur") )
+      fi
+      ;;
+    resume-run)
+      if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "{resume_run_flags} --debug" -- "$cur") )
       else
         COMPREPLY=( $(compgen -f -X '!*.json' -- "$cur") )
       fi
@@ -164,6 +174,14 @@ _yaah() {{
         '--debug[full traceback]' \\
         '*:root.json:_files -g "*.json"'
       ;;
+    resume-run)
+      _arguments \\
+        '--json[parseable outcome]' \\
+        '--force[the owner is dead despite a live liveness probe]' \\
+        '--allow-rewiring[the graph changed; the edit is cursor-compatible]' \\
+        '--debug[full traceback]' \\
+        '*:root.json:_files -g "*.json"'
+      ;;
     doctor) ;;
     *)
       _arguments \\
@@ -186,6 +204,7 @@ def bash_completion() -> str:
         global_flags=" ".join(_GLOBAL_FLAGS),
         trace_flags=" ".join(_TRACE_FLAGS),
         list_flags=" ".join(_LIST_FLAGS),
+        resume_run_flags=" ".join(_RESUME_RUN_FLAGS),
         pipeline_flags=" ".join(_PIPELINE_FLAGS),
         archetypes=" ".join(_ARCHETYPES),
         shells=" ".join(_SHELLS),

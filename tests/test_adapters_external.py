@@ -431,7 +431,65 @@ async def litellm_stream_reports_usage_to_cost_bridge() -> None:
     async for _ in be.stream({"messages": [], "model": "gpt-4o"},
                              on_usage=lambda u: got.update(u)):
         pass
-    assert got == {"tokens_in": 3, "tokens_out": 1, "model": "gpt-4o"}, got
+    assert got == {"tokens_in": 3, "tokens_cache_read": 0, "tokens_cache_write": 0,
+                   "tokens_out": 1, "model": "gpt-4o"}, got
+
+
+async def litellm_usage_splits_cached_input_classes() -> None:
+    # The three INPUT classes bill at different rates (cache read ~0.1x the
+    # input rate, cache write ~1.25x), so they must reach the cost bridge
+    # SEPARATELY under the provider-agnostic names claude_cli_provider also
+    # reports. litellm's prompt_tokens is cache-INCLUSIVE (OpenAI counts
+    # cached_tokens inside it; the anthropic shim sums all three into it), so
+    # tokens_in is the remainder after subtracting both cache classes.
+    got = {}
+
+    async def stub(**kwargs):
+        return {"model": "claude-sonnet",
+                "choices": [{"message": {"content": "x"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 41000, "completion_tokens": 200,
+                          "cache_read_input_tokens": 38000,
+                          "cache_creation_input_tokens": 2000}}
+
+    be = LiteLLMProvider(acompletion=stub)
+    async for _ in be.stream({"messages": [], "model": "claude:sonnet"},
+                             on_usage=lambda u: got.update(u)):
+        pass
+    assert got == {"tokens_in": 1000, "tokens_cache_read": 38000,
+                   "tokens_cache_write": 2000, "tokens_out": 200,
+                   "model": "claude-sonnet"}, got
+
+    # OpenAI dialect: the cache read lives in prompt_tokens_details.cached_tokens
+    got2 = {}
+
+    async def stub_openai(**kwargs):
+        return {"model": "gpt-4o",
+                "choices": [{"message": {"content": "x"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5000, "completion_tokens": 10,
+                          "prompt_tokens_details": {"cached_tokens": 4096}}}
+
+    be2 = LiteLLMProvider(acompletion=stub_openai)
+    async for _ in be2.stream({"messages": [], "model": "gpt-4o"},
+                              on_usage=lambda u: got2.update(u)):
+        pass
+    assert got2["tokens_in"] == 904 and got2["tokens_cache_read"] == 4096, got2
+    assert got2["tokens_cache_write"] == 0, got2
+
+    # a provider that reports a cache count NOT folded into prompt_tokens must
+    # never drive tokens_in negative (which would UNDER-bill)
+    got3 = {}
+
+    async def stub_exclusive(**kwargs):
+        return {"model": "weird",
+                "choices": [{"message": {"content": "x"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 1,
+                          "cache_read_input_tokens": 9000}}
+
+    be3 = LiteLLMProvider(acompletion=stub_exclusive)
+    async for _ in be3.stream({"messages": [], "model": "weird"},
+                              on_usage=lambda u: got3.update(u)):
+        pass
+    assert got3["tokens_in"] == 0 and got3["tokens_cache_read"] == 9000, got3
 
 
 async def litellm_stream_assembles_chunked_tool_calls() -> None:
@@ -592,6 +650,7 @@ async def main() -> None:
         litellm_explicit_timeout_wins_including_none,
         litellm_stream_true_yields_incremental_deltas,
         litellm_stream_reports_usage_to_cost_bridge,
+        litellm_usage_splits_cached_input_classes,
         litellm_stream_reports_resolved_model_like_single_shot,
         litellm_stream_merges_author_stream_options,
         litellm_stream_assembles_chunked_tool_calls,

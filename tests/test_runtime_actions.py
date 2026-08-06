@@ -229,10 +229,73 @@ def scenario_resume_run_recovers_crash() -> None:
             assert "typo-id" in str(e) and "yaah list" in str(e), e
 
 
+def scenario_root_ttl_keys_reach_the_baton() -> None:
+    """The ROOT half of the split sweep window. `baton_ttl` / `checkpoint_ttl` are root
+    keys that `_seed_task` turns into `harness.run(ttl=…, checkpoint_ttl=…)` kwargs —
+    a three-hop thread (root -> run_kw -> Baton) that nothing exercised, so a break
+    anywhere in it would have shown up only as a fleet silently sweeping on the wrong
+    window months later. What the two windows then DO is
+    `test_checkpoint_resume.py::scenario_checkpoint_ttl_sweeps_the_run_not_the_gate`.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "pipeline.json"), "w") as f:
+            json.dump(PIPELINE, f)
+        # `lease_horizon` must come down WITH `checkpoint_ttl`: `validate_budgets`
+        # rejects a horizon longer than the checkpoint window (a foreign host's
+        # crashed run would be swept before it was old enough to declare stale).
+        # That coherence rule is asserted here too — it is easy to break by lowering
+        # one number and not the other.
+        # `lease_host` rides along: it is the third lease/TTL root key threaded through
+        # `_assemble_harness`, and a break in that threading is a TypeError at build.
+        root = dict(_root(tmp), baton_ttl=100000, checkpoint_ttl=1, lease_horizon=1,
+                    lease_host="node-7")
+
+        # the seeding hop, in isolation: absent keys pass NOTHING (the harness
+        # defaults stay the one place the numbers are written down).
+        _task, run_kw = r._seed_task(root, tmp)
+        assert run_kw == {"ttl": 100000, "checkpoint_ttl": 1}, run_kw
+        assert r._seed_task(_root(tmp), tmp)[1] == {}, "absent root keys pass no kwargs"
+
+        # ...and end to end: the run parks, and the PERSISTED baton carries both.
+        out, _printed = _call(r.run_root(root, tmp))
+        assert isinstance(out, Suspended), out
+        store = BatonStore(FileBackend(os.path.join(tmp, "state")))
+        baton = asyncio.run(store.load(out.baton_id))
+        assert (baton.ttl, baton.checkpoint_ttl) == (100000, 1), baton
+    print("PASS root `baton_ttl`/`checkpoint_ttl` reach the persisted baton's two windows")
+
+
+def scenario_clear_does_not_create_the_run_dir() -> None:
+    """A TEARDOWN verb must not build anything. `clear_state` assembles a harness only
+    to reach the clear/flush primitives, and the assembly resolves `run_dir` — which
+    used to `os.makedirs` it, so `yaah clear` created the run's artifact root on a root
+    whose run may never have happened. A `run` still creates it (that is where nodes
+    write), so the two are asserted together."""
+    with tempfile.TemporaryDirectory() as tmp:
+        with open(os.path.join(tmp, "pipeline.json"), "w") as f:
+            json.dump(PIPELINE, f)
+        root = dict(_root(tmp), run_dir="artifacts/run-1")
+        made = os.path.join(tmp, "artifacts", "run-1")
+
+        _call(r.clear_state(root, tmp))
+        assert not os.path.exists(made), "clear must not CREATE {}".format(made)
+
+        _call(r.run_root(root, tmp))          # parks at the gate; run_dir is real work
+        assert os.path.isdir(made), "a run still creates its artifact root"
+
+        # and a clear AFTER the run leaves the existing directory alone (it drops
+        # store state, not artifacts).
+        _call(r.clear_state(root, tmp))
+        assert os.path.isdir(made), made
+    print("PASS `clear` resolves run_dir without creating it; `run` still creates it")
+
+
 def main() -> None:
     scenario_inline_pipeline_dict_runs()
     scenario_clear_batons_targeted()
     scenario_resume_run_recovers_crash()
+    scenario_root_ttl_keys_reach_the_baton()
+    scenario_clear_does_not_create_the_run_dir()
     with tempfile.TemporaryDirectory() as tmp:
         with open(os.path.join(tmp, "pipeline.json"), "w") as f:
             json.dump(PIPELINE, f)

@@ -25,4 +25,5 @@ class BuildContext:
     mcp_source: Optional[Any] = None             # shared MCP-config source for agents (yaah.mcp.McpSource)
     idempotency_store: Optional[Any] = None      # for `idempotent: true` nodes (yaah.store.IdempotencyStore)
     tracer: Optional[Any] = None                 # injected Tracer for stage/model/tool spans (yaah.trace.Tracer)
-    base_dir: Optional[str] = None               # resolve relative file paths (e.g. render templates)
+    base_dir: Optional[str] = None               # resolve relative file paths (e.g. render templates); the `{base_dir}` macro
+    run_dir: Optional[str] = None                # this run's artifact root (root key `run_dir`, absolute); the `{run_dir}` macro. None = the macro refuses (build.macros)

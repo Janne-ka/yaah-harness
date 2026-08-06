@@ -1,11 +1,14 @@
 """The `yaah list --json` mailbox shape.
 
-What it proves: the stable JSON shape `{id, stage, awaiting, parked_at, concerns,
-escalation, question}`
-the CLI emits for each suspended baton — the contract a driver skill consumes
-instead of parsing the prose `GATE …` lines. Covers: question lifted from
-`payload['question']` OR `payload['ask']`, null when neither is present, full
-concerns list passes through. Usability-gaps §5 (skill interface).
+What it proves: the stable JSON shape `{id, stage, awaiting, parked_at,
+checkpointed_at, concerns, escalation, question}` plus the ADDITIVE recovery
+fields `{owner, leased_at, lease_state, wiring, wiring_mismatch}` the CLI emits for
+each baton — the contract a driver skill consumes instead of parsing the prose
+`GATE …` lines. Covers: question lifted from `payload['question']` OR
+`payload['ask']`, null when neither is present, full concerns list passes through,
+the lease label appearing only when a root supplies the horizon, and
+`wiring_mismatch` staying NULL (not false) when there is nothing to compare.
+Usability-gaps §5 (skill interface).
 
 Run: cd yaah && PYTHONPATH=src python3 tests/test_list_json.py
 
@@ -31,7 +34,9 @@ def main() -> None:
                   "checkpointed_at": None,
                   "concerns": [{"by": "schema", "msg": "missing key"}],
                   "escalation": None,
-                  "question": "ship it?"}, j1
+                  "question": "ship it?",
+                  "owner": None, "leased_at": None, "lease_state": None,
+                  "wiring": None, "wiring_mismatch": None}, j1
 
     # gate that used `ask` instead of `question` (HumanGate's default key)
     b2 = Baton(id="b-2", stage="audit", awaiting="human:data-audit",
@@ -55,7 +60,9 @@ def main() -> None:
     j4 = _baton_json(b4)
     assert j4 == {"id": "b-4", "stage": None, "awaiting": None,
                   "parked_at": None, "checkpointed_at": None,
-                  "concerns": [], "escalation": None, "question": None}, j4
+                  "concerns": [], "escalation": None, "question": None,
+                  "owner": None, "leased_at": None, "lease_state": None,
+                  "wiring": None, "wiring_mismatch": None}, j4
     assert "parked_at" in j4, j4
 
     # A running checkpoint (Level 2): no parked_at, a checkpointed_at wall-clock —
@@ -77,14 +84,35 @@ def main() -> None:
     j5 = _baton_json(b5)
     assert j5["escalation"]["failures"][0]["code"] == "not_ok", j5
 
+    # A LEASED running checkpoint: `lease_state` is computed only when a root is
+    # supplied (the horizon is a root fact), and `wiring_mismatch` compares the
+    # baton's stamp against the current graph's fingerprint the caller passes.
+    b7 = Baton(id="b-7", stage="code", status="running",
+               cursor_input=Envelope(Kind.RESULT, {}),
+               checkpointed_at=1769990500.0,
+               owner="otherhost/4242/abcd1234", leased_at=1769990500.0,
+               wiring="aaaa")
+    assert _baton_json(b7)["lease_state"] is None, "no root -> no lease verdict"
+    j7 = _baton_json(b7, {"lease_horizon": 3600}, "bbbb")
+    assert j7["owner"] == "otherhost/4242/abcd1234", j7
+    assert j7["leased_at"] == 1769990500.0, j7
+    assert j7["lease_state"] in ("stale", "foreign"), j7   # foreign host, age-dependent
+    assert j7["wiring"] == "aaaa" and j7["wiring_mismatch"] is True, j7
+    assert _baton_json(b7, {}, "aaaa")["wiring_mismatch"] is False, "same wiring"
+    # NOT compared is null, never false — "unknown" must not read as "matches"
+    assert _baton_json(b7, {})["wiring_mismatch"] is None, "no current fingerprint"
+    assert _baton_json(b6, {}, "aaaa")["wiring_mismatch"] is None, "pre-upgrade baton"
+
     # the contract is the keyset itself — a skill iterating fields must not be
     # surprised by drift
     assert set(j1.keys()) == {"id", "stage", "awaiting", "parked_at",
                               "checkpointed_at", "concerns", "escalation",
-                              "question"}
+                              "question", "owner", "leased_at", "lease_state",
+                              "wiring", "wiring_mismatch"}
 
     print("PASS yaah list --json shape: {id, stage, awaiting, parked_at, "
-          "checkpointed_at, concerns, escalation, question}")
+          "checkpointed_at, concerns, escalation, question, owner, leased_at, "
+          "lease_state, wiring, wiring_mismatch}")
 
 
 if __name__ == "__main__":

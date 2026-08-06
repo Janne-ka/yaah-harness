@@ -45,22 +45,11 @@ def _build_agent(spec: Dict[str, Any], ctx: BuildContext) -> Node:
         raise ValueError("an 'agent' node needs 'template' or 'prompt' in its config")
     if prompt_key is not None and ctx.prompt_source is None:
         raise ValueError("node uses 'prompt' but no prompt_source passed to build()")
-    def _expand(s: str) -> str:
-        # `{base_dir}` -> the config file's dir (absolute). Tool scripts ship
-        # beside the config, but a repo-bound agent runs with cwd in the task
-        # worktree — the path must be absolute at runtime yet stay relocatable
-        # in the file.
-        if "{base_dir}" not in s:
-            return s
-        if not ctx.base_dir:
-            raise ValueError("agent config uses {base_dir} but no base_dir was passed to build()")
-        return s.replace("{base_dir}", _os.path.abspath(ctx.base_dir))
-
-    tools = [Tool.from_dict(dict(t, usage=_expand(t["usage"])) if t.get("usage") else t)
-             for t in spec.get("tools", [])]  # model-initiated capabilities
+    # `{base_dir}` / `{run_dir}` in tool strings are already expanded: the macro
+    # walk runs on the whole spec in Registry.build (build.macros), which is why
+    # this builder has no expansion of its own any more.
+    tools = [Tool.from_dict(t) for t in spec.get("tools", [])]  # model-initiated capabilities
     allowed_tools = spec.get("allowed_tools")
-    if allowed_tools:
-        allowed_tools = [_expand(a) for a in allowed_tools]
     filters_spec = spec.get("filters") or {}  # R10: name -> {type, ...args}
     envelope_filters = None
     if filters_spec:

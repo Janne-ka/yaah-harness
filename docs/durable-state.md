@@ -188,23 +188,51 @@ runs, exactly as `_batons` does today.
     nulls `cursor_input`/`checkpointed_at`, so a parked gate is Level 1's own
     artifact and never ALSO looks mid-run-resumable (`list_running` filters
     `status=="running" and cursor_input is not None`).
-  - **TTL sweep** reclaims an abandoned running checkpoint on the same ttl as an
-    abandoned parked gate (`Baton.is_expired` covers both `parked_at` and
-    `checkpointed_at`). Note that ttl (root `baton_ttl`, **seconds**) therefore also
-    bounds how long ONE stage may be in flight before its recovery record is swept —
-    set it above your slowest stage's wall-clock.
-  - **NOT written before the first stage of a leg.** The checkpoint is written
-    *after* a stage completes, so there are two un-checkpointed windows:
-    - **The first stage of a run.** `Harness.run` mints the baton and drives
-      straight into `graph.start`; nothing is persisted until that stage completes.
-      A kill during the first stage leaves **nothing in the store** — there is no
-      baton to `resume-run`, and the run is re-launched from the top.
-    - **The first stage after a gate resume.** `Harness.resume` delivers the
-      decision and drives on; the next checkpoint lands only when that stage
-      completes. A kill in that window leaves the **suspended record still in the
-      store** (the park write is never deleted until a terminal outcome), so the
-      run is recoverable — but via `yaah resume <root> ID` with the decision
-      **given again**, not `resume-run`. The decision itself was not persisted.
+  - **TTL sweep** reclaims an abandoned running checkpoint (`Baton.is_expired`).
+    Since the split the two stored kinds have SEPARATE windows: a suspended gate on
+    `baton_ttl` from `parked_at` (a human patience window), a running checkpoint on
+    **`checkpoint_ttl`** from `checkpointed_at`. The second clock restarts at every
+    completed stage, so it bounds how long ONE stage may be in flight before its
+    recovery record is swept — set it above your slowest stage's wall-clock.
+    `checkpoint_ttl` absent **inherits `baton_ttl`** (the pre-split behaviour):
+    there is no engine default, because one would silently shorten an existing
+    deployment's recovery window on upgrade. Recommended explicit value: `21600`.
+  - **Written BEFORE the first stage of each leg** (since the first-stage
+    checkpoint). Both windows that used to be uncovered are now inside it:
+    - **The first stage of a run.** `Harness.run` mints the baton, `_checkpoint`s it
+      with the task envelope, and only then drives into `graph.start`. A kill during
+      the first stage leaves a recoverable checkpoint cursored at `graph.start` —
+      which is exactly where a long seeding/discovery stage sits.
+    - **The first stage after a gate resume.** `Harness.resume` merges the decision,
+      advances the cursor, and checkpoints *before* driving on — so the human's
+      decision is itself persisted. A kill in that window recovers with
+      `yaah resume-run`, with the decision intact, and the gate does **not** re-open
+      (the record is `running`, so `resume()` refuses it). Before this, the decision
+      had to be submitted again.
+
+      **One narrow window remains, and it is honest in the code.** The checkpoint is
+      guarded by `if baton.stage is not None` — a gate whose decision routes to a
+      TERMINAL outcome has no next stage to cursor at, so nothing is written and the
+      record stays `suspended` until `_settle` deletes it. A kill between the merge
+      and that delete therefore leaves the gate OPEN, and the decision must be
+      submitted again. The alternative — writing a `running` checkpoint with a null
+      cursor — would be a record that `resume_running` cannot drive and `resume`
+      refuses: an un-recoverable run in place of a re-answerable gate. Re-answering a
+      gate whose decision was terminal is the cheaper loss.
+
+    Two honest consequences of that write:
+    - The durable store now holds **one record from t0** of every run, not only of
+      runs that have completed a stage. Delete-on-terminal covers it (`_settle`
+      deletes on Done and on StageFailed), and the TTL sweep covers an abandoned
+      one, so nothing leaks — but the store is never empty while a run is live.
+    - `clear()`'s **`checkpoints_dropped` now counts never-advanced runs** too. The
+      number is larger for the same fleet than it was; that is the checkpoint
+      becoming complete, not a leak.
+    - The first stage is now **re-runnable on recovery**, which is the at-least-once
+      contract applied one stage earlier than before. A seeding first stage that
+      commits a side effect (creates a worktree, claims a ticket, posts a webhook)
+      needs the same idempotency guard as any other side-effecting stage (§6); a
+      pure discovery/seed stage re-runs harmlessly.
 
   **Fork scope (v1).** Only the MAIN chain is checkpointed. A fork's inner branch
   stages run inside `ForkCoordinator` (via `_exec_stage`, not `_drive`), so they are
@@ -213,16 +241,80 @@ runs, exactly as `_batons` does today.
   recovery re-runs the WHOLE fork (all branches) — acceptable under the
   at-least-once contract. Per-branch checkpointing is deferred.
 
-  **Known limitation — no wiring fingerprint (yet).** A graph EDITED between the
-  kill and the resume is UNDETECTED: `resume_running` re-drives `baton.stage` against
-  the CURRENT graph, so a renamed/removed stage would resume onto the wrong stage or
-  KeyError. The graph-hash guard is tracked in ROADMAP ("Baton CAS + graph
-  fingerprint"). Also NOT single-owner safe: with a SHARED durable store the engine
-  cannot distinguish a crashed run from one still live in another process (no CAS
-  lease — §10) — so recovery is an EXPLICIT operator action naming a specific baton,
-  never automatic, and `yaah run` does NOT gate on the presence of running
-  checkpoints (that would deadlock a fleet whose concurrent runs each hold a live
-  checkpoint on the shared store).
+  **Wiring fingerprint (SHIPPED).** `Baton.wiring` carries `wiring_fingerprint(graph)`
+  — a sha256 over the graph's TOPOLOGY, stamped at mint and RE-STAMPED by every
+  checkpoint, so it means "the topology this cursor was produced by".
+  `resume_running` REFUSES a mismatch (escape: `--allow-rewiring`), naming the cursor
+  stage and whether it still exists; a gate `resume` only WARNS, because a parked
+  human must not lose their decision to an unrelated edit — EXCEPT when the parked
+  stage itself vanished, which is a clean refusal instead of the bare `KeyError` that
+  path used to raise. A pre-upgrade baton carries no stamp and is recovered with a
+  note.
+
+  The re-stamp is what keeps `--allow-rewiring` a ONE-TIME assertion. Stamping only
+  at mint meant a run recovered onto an edited graph kept claiming the original
+  topology while driving the new one, so every later crash refused again and the flag
+  had to be passed once per crash — each time asserting compatibility with a graph
+  nobody was running any more. The cost is that `wiring` is not mint provenance;
+  nothing reads it as such, and a run's origin belongs on the trace.
+
+  What the fingerprint covers is deliberately narrow: `start`, `sticky`, and per
+  stage its name, node role/id, `then`, `branch` (on/routes/default), `fork`,
+  `fanin.expect`, `fanout`, `foreach.items`, `final`. It EXCLUDES prompts, models,
+  timeouts, retry budgets and validators — behaviour drift is `config_fingerprint`'s
+  job (experiment identity), not recovery's. "Fix the prompt, resume the run" is the
+  most common recovery there is; a check that refused it would train operators to
+  pass `--allow-rewiring` reflexively and cost the guard its whole meaning.
+
+  **Liveness lease + CAS claim (SHIPPED).** `Baton.owner` (`<host>/<pid>/<nonce>`)
+  and `leased_at` are stamped on every checkpoint write — no heartbeat thread,
+  because since the first-stage checkpoint every stage boundary is already a store
+  write, so the lease refreshes exactly as often as the run makes progress. A park
+  CLEARS both (a parked gate has no owning process). `resume_running` then decides in
+  three tiers (`LeaseState`): **no owner** → allow with a note (a pre-upgrade
+  record); **same host** → a real `os.kill(pid, 0)` probe, dead ⇒ recover, alive ⇒
+  REFUSE naming host/pid (escape: `--force`, with a loud stderr line); **foreign
+  host** → no probe is possible, so fall back to the lease age against root
+  `lease_horizon` (default 3600s) — past it ⇒ allow with a warning, within it ⇒
+  refuse. The decision is then CLAIMED with `BatonStore.claim(baton, expected_rev)`
+  (CAS on the revision it was read at), so two operators racing the same recovery
+  cannot both win; the loser is refused naming the winner.
+
+  `--force` and `--allow-rewiring` are SEPARATE flags on purpose: they waive two
+  different assertions ("that process is dead" / "this graph edit is
+  cursor-compatible"), and one combined flag would let an operator silence the check
+  they never considered.
+
+  **v1 non-proofs, documented rather than defended against.** Clock skew between
+  hosts distorts the foreign-host age (the horizon is a coarse fallback, not a
+  consensus protocol). A SIGSTOP'd process answers the liveness probe and so refuses
+  forever — the escape is `--force`. PID REUSE can report a dead owner as live (a
+  false REFUSE, the safe direction). **The CAS claim fences RECOVERY, not the
+  INCUMBENT: `_checkpoint` saves unconditionally, so an owner wrongly presumed dead
+  (the foreign-host-past-horizon case) re-takes the record at its next stage boundary
+  and the two drivers alternate ownership rather than one being stopped.**
+  `FileBackend`'s CAS is flock-serialized, which is advisory over NFS;
+  `BatonStore.has_cas()` is false on a backend without the tier and the refusal
+  message says the claim was advisory. Every one of these fails toward "refuse" or
+  "one loud `--force`", never toward a silent double-drive — except the incumbent
+  case above, which needs the per-checkpoint claim below.
+
+  **Container hostnames (root `lease_host`).** The same-host pid tier keys on
+  `socket.gethostname()`, which in a container is the pod/container id and is
+  different on every restart — so the same machine looks like a new host each time
+  and every one of its own runs is `foreign`, decided by the coarse age guess rather
+  than by a real `kill(pid, 0)`. Root `lease_host` overrides the name (absent =
+  `gethostname()`, so nothing changes for anyone who does not set it). Give it a
+  stable identity that is **unique per kernel** — the k8s node name, the VM's
+  hostname. Two containers on *different* kernels sharing one `lease_host` would
+  probe each other's pid namespace and read a coincidental pid as "alive".
+
+  Recovery remains an EXPLICIT operator action naming a specific baton, never
+  automatic, and `yaah run` does NOT gate on the presence of running checkpoints
+  (that would deadlock a fleet whose concurrent runs each hold a live checkpoint on
+  the shared store). `yaah list` now labels each RUNNING line
+  `owner=… lease=live|stale(2h14m)|foreign(2h14m)|none` and prints the `resume-run`
+  hint ONLY when the lease is not live.
 
 ## 6. `IdempotencyStore` — execute-once for side effects
 
@@ -328,11 +420,29 @@ same generic builder used for the other layers (`_build_router`-style).
 - **At-least-once delivery, idempotent effects.** The harness retries and (L2)
   re-runs on recovery; `OnceNode` + `IdempotencyStore` collapse repeats on
   side-effecting nodes. Pure nodes need no guard (re-running is harmless).
-- **Single-owner baton.** A baton is processed by one holder at a time. With
-  durable storage, enforce this with a CAS on the baton's revision at resume
-  (`cas(expected=loaded_rev)`) so two processes can't resume the same gate twice.
-- **TTL still applies.** `Baton.is_expired` is unchanged; the store's `sweep_expired`
-  enforces it (a backend's native per-key TTL, where it has one, is a backstop).
+- **Single-owner baton — RECOVERY is fenced (shipped); the INCUMBENT is not.**
+  Two mechanisms, both in §5: a **liveness lease** (`owner`/`leased_at`, refreshed
+  by every checkpoint) answers *is the owner still alive?*, and a **CAS claim**
+  (`BatonStore.claim(baton, expected_rev)` → `cas(expected=loaded_rev)`) makes the
+  recovery itself atomic, so two processes can't both *take* the same record. The CAS
+  tier is probed with `getattr` (the same optional-capability stance as `close()`):
+  a backend without it falls back to a plain put and the claim is ADVISORY, which
+  the refusal message states.
+
+  What that does **not** give you is a fence on the process already running.
+  `_checkpoint` saves unconditionally — it never checks whether it still owns the
+  record — so if a recovery took the baton from an owner that was in fact alive (the
+  foreign-host-past-horizon tier, or a `--force`), that owner simply re-stamps itself
+  as owner at its next stage boundary and both keep driving. The claim decides who
+  *starts* a recovery, not who *continues*. Closing it is per-checkpoint CAS, in
+  Phase B below.
+- **TTL still applies**, with SEPARATE windows per stored kind: a suspended gate on
+  `baton_ttl` from `parked_at`, a running checkpoint on `checkpoint_ttl` (inheriting
+  `baton_ttl` when unset) from `checkpointed_at`. `Baton.is_expired` decides; the
+  store's `sweep_expired` enforces it (a backend's native per-key TTL, where it has
+  one, is a backstop). `lease_horizon` must be ≤ the effective checkpoint window —
+  otherwise a foreign host's crashed run is swept before it is old enough to be
+  declared stale, and could never be recovered. `validate_budgets` rejects that.
 
 ## 11. Phased plan
 
@@ -354,8 +464,17 @@ with whatever extender is available.
 5. **KV-backed `mem:` source/sink + `stateRef`** convention.
 6. **Mailbox view (`list_suspended`) + a thin UI node** (§8).
 7. **Level 2 checkpointing + recovery** (SHIPPED 2026-07 — `_checkpoint` /
-   `Harness.resume_running` / `yaah resume-run`, §5). *(later)* graph-fingerprint
-   guard + CAS single-owner (§10) and **Phase B** concurrent claims.
+   `Harness.resume_running` / `yaah resume-run`, §5). **Completed 2026-08:** the
+   first-stage checkpoint (both legs), the wiring fingerprint, the liveness lease +
+   CAS single-owner claim (§10), and the split `checkpoint_ttl` / `lease_horizon`
+   windows. *(later)* **Phase B** concurrent claims (many workers pulling from one
+   queue of checkpoints, rather than an operator naming one), and with it
+   **per-checkpoint CAS + refuse-on-lost**: `_checkpoint` would write under a CAS on
+   the revision it last held and, on losing it, STOP the run instead of re-stamping
+   itself as owner. That is what fences the INCUMBENT (§10) — today's claim only
+   fences the recovery. It costs a `load_rev` per stage boundary and turns a
+   best-effort write into a run-terminating condition, so it belongs with Phase B's
+   concurrency rather than being bolted onto the operator-driven recovery path.
 
 Build 1–3 first: they close idempotency (#14) and put the resume cursor behind a
 store, with no backend decision required. A concrete durable extender (step 4)

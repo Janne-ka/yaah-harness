@@ -55,8 +55,10 @@ Run & inspect:
                                 add --golden FILE to diff collected outputs against
                                 a pinned expected artifact (zero model calls)
   list <root> [--json]          show parked gates + running checkpoints (mailbox + recovery view; --json for a parseable shape)
+                                each RUNNING line carries owner= and lease=live|stale|foreign|none
   resume <root> ID [FILE]       deliver a decision (optionally from FILE) to a parked gate
   resume-run <root> ID          recover a killed mid-run: re-drive its running checkpoint from the in-flight stage (Level 2)
+                                add --force to override a LIVE owner lease, --allow-rewiring for an edited graph
   baton-schema <root> <id>      print the JSON Schema of decision.json for one parked baton
   clear <root>                  graceful reset: broadcast clear + flush parked + drop every
                                 stored baton (parked gates AND running checkpoints)
@@ -312,9 +314,18 @@ def _parse_resume(rest: list) -> dict:
 
 
 def _parse_resume_run(rest: list) -> dict:
-    """`resume-run <root> ID [--json]` — recover a killed mid-run by re-driving its
-    running checkpoint (Level 2). No decision file: unlike `resume`, a crashed run
-    carries no gate to answer, it just continues from the in-flight stage."""
+    """`resume-run <root> ID [--force] [--allow-rewiring] [--json]` — recover a
+    killed mid-run by re-driving its running checkpoint (Level 2). No decision file:
+    unlike `resume`, a crashed run carries no gate to answer, it just continues from
+    the in-flight stage.
+
+    TWO separate overrides, deliberately not merged into one flag:
+      --force           the owning process is LIVE by the liveness probe, but you
+                        know it is dead (e.g. it is SIGSTOP'd).
+      --allow-rewiring  the graph's topology changed since the run was minted, but
+                        the edit is compatible with where the cursor is.
+    Each silences one assertion; sharing a flag would let an operator waive the
+    check they never considered."""
     rest = list(rest)
     fake = "--fake" in rest
     if fake:
@@ -325,11 +336,18 @@ def _parse_resume_run(rest: list) -> dict:
     as_json = "--json" in rest
     if as_json:
         rest.remove("--json")
+    force = "--force" in rest
+    if force:
+        rest.remove("--force")
+    allow_rewiring = "--allow-rewiring" in rest
+    if allow_rewiring:
+        rest.remove("--allow-rewiring")
     if len(rest) != 2:
         _usage_exit("resume-run needs a root config and a baton id "
-                    "(yaah resume-run <root> ID)")
+                    "(yaah resume-run <root> ID [--force] [--allow-rewiring])")
     return {"action": "resume-run", "root": rest[0], "baton_id": rest[1],
-            "fake": fake, "debug": debug, "json": as_json}
+            "fake": fake, "debug": debug, "json": as_json,
+            "force": force, "allow_rewiring": allow_rewiring}
 
 
 def _parse_validate(rest: list) -> dict:
@@ -985,17 +1003,18 @@ def _dispatch_baton_schema(spec: Dict[str, Any], root: Dict[str, Any], base: str
 
 
 def _dispatch_list(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
-    from .runtime import list_gates, list_checkpoints, _baton_json
+    from .runtime import baton_lease, current_wiring, list_gates, list_checkpoints, _baton_json
     gates = asyncio.run(list_gates(root, base))
     running = asyncio.run(list_checkpoints(root, base))
+    wiring = current_wiring(root, base)   # None when the pipeline can't be read
     if spec.get("json"):
         # one JSON document with the same fields the prose view shows — so a
         # driver skill can parse instead of interpret (shape: _baton_json).
         # `running` is an ADDITIVE key (Level 2): a suspended-gate consumer
         # reading `batons` is unaffected; a recovery tool reads `running`.
         print(json.dumps({
-            "batons": [_baton_json(b) for b in gates],
-            "running": [_baton_json(b) for b in running]}, indent=2))
+            "batons": [_baton_json(b, root, wiring) for b in gates],
+            "running": [_baton_json(b, root, wiring) for b in running]}, indent=2))
         return
     for b in gates:
         print("GATE baton_id={} stage={} awaiting={} concerns={}".format(
@@ -1014,12 +1033,22 @@ def _dispatch_list(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> Non
         print("(no suspended gates)")
     # Running checkpoints (Level 2): a distinct section, ADDITIVE below the gates —
     # these are NOT gates awaiting a human, they are runs mid-flight (live) or
-    # crashed (recoverable). The engine can't tell which without a liveness lease,
-    # so the label is honest and the resume command is only actionable once the
-    # operator knows its process is dead (docs/durable-state.md §5).
+    # crashed (recoverable). The LIVENESS LEASE now answers "which?" for the common
+    # case, so the resume-run hint is printed ONLY when the run is not live: an
+    # unconditional hint next to a healthy run is an invitation to double-drive it.
     for b in running:
-        print("RUNNING baton_id={} stage={}  (if its process died: "
-              "yaah resume-run {} {})".format(b.id, b.stage, spec["root"], b.id))
+        lease = baton_lease(b, root)
+        rewired = wiring is not None and b.wiring is not None and b.wiring != wiring
+        print("RUNNING baton_id={} stage={} owner={} lease={}{}".format(
+            b.id, b.stage, b.owner or "-", lease.label(),
+            "  REWIRED (graph edited since this run started)" if rewired else ""))
+        if lease.recoverable:
+            print("  {}; recover with: yaah resume-run {} {}{}".format(
+                lease.detail, spec["root"], b.id,
+                " --allow-rewiring" if rewired else ""))
+        else:
+            print("  {} — do NOT resume-run it (add --force only if you know "
+                  "otherwise)".format(lease.detail))
 
 
 def _dispatch_clear(spec: Dict[str, Any], root: Dict[str, Any], base: str) -> None:
@@ -1065,7 +1094,9 @@ def _dispatch_resume_run(spec: Dict[str, Any], root: Dict[str, Any], base: str) 
     from .runtime import resume_run
     print("[yaah resume-run] re-driving the checkpoint in this process from the "
           "in-flight stage until the next gate or completion", file=sys.stderr)
-    _render_outcome(asyncio.run(resume_run(root, base, spec["baton_id"])),
+    _render_outcome(asyncio.run(resume_run(root, base, spec["baton_id"],
+                                           force=spec.get("force", False),
+                                           allow_rewiring=spec.get("allow_rewiring", False))),
                     as_json=spec.get("json", False))
 
 

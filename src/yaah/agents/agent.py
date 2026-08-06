@@ -347,11 +347,15 @@ class Agent(Node):
         # (a disabled capture costs nothing) — see the contributor/capture design.
         # ACCUMULATES across calls (bug review M3): a multi-turn tool loop calls back
         # once per turn, so we SUM tokens (dict.update would keep only the last turn).
-        usage = {"tokens_in": 0, "tokens_out": 0, "model": None}
+        usage = {"tokens_in": 0, "tokens_cache_read": 0, "tokens_cache_write": 0,
+                 "tokens_out": 0, "model": None}
 
         def _on_usage(u: dict) -> None:
-            usage["tokens_in"] += u.get("tokens_in", 0) or 0
-            usage["tokens_out"] += u.get("tokens_out", 0) or 0
+            # the cached-input classes are OPTIONAL in the bridge shape (a
+            # backend that reports no caching just omits them) — never assume
+            for k in ("tokens_in", "tokens_cache_read", "tokens_cache_write",
+                      "tokens_out"):
+                usage[k] += u.get(k, 0) or 0
             if u.get("model"):
                 usage["model"] = u["model"]
 
@@ -378,7 +382,9 @@ class Agent(Node):
             function-calling nor a manifest — don't mix capabilities on a
             tool-using laddered agent (documented in node-reference)."""
             await self._emit("calling model {}".format(model or "default"))
-            in0, out0 = usage["tokens_in"], usage["tokens_out"]  # per-call delta
+            # per-call deltas, one per token class the bridge accumulates
+            in0, out0 = usage["tokens_in"], usage["tokens_out"]
+            cr0, cw0 = usage["tokens_cache_read"], usage["tokens_cache_write"]
             usage["model"] = None  # per-call too: a stale value from the previous
             # rung would mislabel this span when THIS call's backend doesn't report
             t0 = time.monotonic()
@@ -407,6 +413,8 @@ class Agent(Node):
             await self._tracer.emit(Span.timed(
                 "model_call", corr=input.correlation_id, parent=input.id, t0=t0, t1=t1,
                 tokens_in=int(usage["tokens_in"] - in0), tokens_out=int(usage["tokens_out"] - out0),
+                tokens_cache_read=int(usage["tokens_cache_read"] - cr0),
+                tokens_cache_write=int(usage["tokens_cache_write"] - cw0),
                 model=usage.get("model") or model, status="ok",
                 # model_ref = the CONFIG ref ("provider:model") beside the
                 # backend-RESOLVED `model` name: price maps are authored

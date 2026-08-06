@@ -31,6 +31,8 @@ import difflib
 import re
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
+from .node_keys import legal_keys, unknown_node_keys  # pure table, no third-party deps
+
 # Lazy imports for enum tables that depend on third-party modules — pulled inside
 # functions to keep this module cheap to import (validators may run in CI sandboxes).
 
@@ -50,6 +52,7 @@ _ROOT_KEYS = frozenset({
     "transport", "trace", "state",
     "pipeline", "input",
     "decisions", "interactive", "run", "serve", "baton_ttl",
+    "checkpoint_ttl", "lease_horizon", "lease_host", "run_dir",
     "live_config", "plugins", "strict_resume",
 })
 
@@ -468,6 +471,31 @@ def _check_rollback(role: str, rb: Any, errs: List[str]) -> None:
                     "cost".format(role, unknown))
 
 
+def _check_node_keys(role: str, n: Dict[str, Any], errs: List[str]) -> None:
+    """Reject a spec key no builder of this node's TYPE reads — the same
+    silent-no-op class as `_STAGE_KEYS`, one level down. An unread key is DROPPED:
+    the run looks healthy and the feature the author configured was never there.
+    That is how `target_from`/`interpolate_from` sat in a live pipeline for five
+    weeks against an engine that had never heard of them, which is also how long
+    `docs/shape-grammar.md` had been claiming this check existed.
+
+    The legal set per type is `node_keys.BUILTIN_NODE_KEYS` (one row per builder).
+    A CUSTOM type the engine does not build is skipped — its keys are the
+    registering app's business, not ours."""
+    ntype = n.get("type")
+    unknown = unknown_node_keys(ntype, n)
+    if not unknown:
+        return
+    legal = legal_keys(ntype)
+    for k in unknown:
+        errs.append(
+            "node {!r} (type {!r}): unknown key {!r}{} — no {!r} builder reads it, "
+            "so it is silently dropped at run time. Legal keys for {!r}: {} (plus "
+            "any `_`-prefixed comment key)".format(
+                role, ntype, k, _suggest(k, legal), ntype, ntype,
+                ", ".join(sorted(legal))))
+
+
 def _successor_edges(stages: Dict[str, Any]) -> Dict[str, set]:
     """stage -> set of possible NEXT stages, from every routing key build_graph
     reads (then, branch routes + default, fork targets). The fanin `expect`
@@ -619,8 +647,16 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None, *
     strict_resume=False the lenient blind-merge makes the forbidden decision reachable
     again, so that finding downgrades to a lint WARNING (see `lint_pipeline`) and is NOT
     raised here. `build()` passes the harness's own strict_resume so the load-time verdict
-    matches the run's actual enforcement."""
+    matches the run's actual enforcement.
+
+    `allow_unknown_node_keys` (pipeline top-level, default false) is the release
+    valve for the per-node-type key check: a pipeline authored against a NEWER
+    engine carries keys this one cannot read, and a consumer who knowingly accepts
+    that (rather than pinning the engine) sets it. Deliberately explicit and
+    per-pipeline — silent tolerance is the exact failure this check exists to end,
+    so there is no WARN-only mode to drift back into."""
     nodes = set(config.get("nodes", {}))
+    allow_unknown_node_keys = bool(config.get("allow_unknown_node_keys"))
     g = config.get("graph") or {}
     stages = g.get("stages", {})
     errs: List[str] = []
@@ -637,6 +673,8 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None, *
                 "overlay, the base pipeline has no such node (stale overlay key "
                 "after a rename/removal?)".format(role, _suggest(role, nodes - {role})))
             continue
+        if not allow_unknown_node_keys:
+            _check_node_keys(role, n, errs)
         # ADR-0005 `provides` (data-flow contract): the keys a node GUARANTEES on the
         # payload. Required to lint across an envelope-transform (whose output keys are
         # otherwise opaque), optional elsewhere as an explicit override. Must be a list
@@ -1550,9 +1588,33 @@ def validate_budgets(root: Dict[str, Any], pipeline: Dict[str, Any]) -> None:
         `transport.request_timeout` (the NATS reply window);
       - a fork's `wait.timeout` must cover the largest single node `timeout`
         inside its branches (the join would abandon a branch that was
-        CONFIGURED to take longer).
+        CONFIGURED to take longer);
+      - `lease_horizon` must fit the effective running-checkpoint window
+        (`checkpoint_ttl`, or `baton_ttl` when it is absent). A record swept
+        before it can be declared stale is incoherent: a foreign host's crashed
+        run would be deleted by the sweep while still inside the window that
+        says "too fresh to recover", so it could never be recovered at all.
     Pure data, no I/O; raises ValueError listing every violation."""
+    # Imported lazily: the defaults live with the code that OWNS them (one source of
+    # truth), but pulling `yaah.harness` at module import would drag comms/store/trace
+    # into every `yaah validate`.
+    from .harness.baton import DEFAULT_BATON_TTL
+    from .harness.lease_state import DEFAULT_LEASE_HORIZON
+
     errs: List[str] = []
+    horizon = root.get("lease_horizon", DEFAULT_LEASE_HORIZON)
+    checkpoint_window = root.get("checkpoint_ttl",
+                                 root.get("baton_ttl", DEFAULT_BATON_TTL))
+    if (isinstance(horizon, (int, float)) and isinstance(checkpoint_window, (int, float))
+            and horizon > checkpoint_window):
+        errs.append(
+            "lease_horizon {}s exceeds the running-checkpoint window {}s ({}) — a "
+            "crashed run on another host would be SWEPT before its lease is old "
+            "enough to declare stale, so it could never be recovered. Lower "
+            "lease_horizon or raise checkpoint_ttl.".format(
+                horizon, checkpoint_window,
+                "checkpoint_ttl" if "checkpoint_ttl" in root
+                else ("baton_ttl" if "baton_ttl" in root else "the 72h default")))
     nodes = pipeline.get("nodes") or {}
     stages = (pipeline.get("graph") or {}).get("stages") or {}
     transport = root.get("transport") or {}
