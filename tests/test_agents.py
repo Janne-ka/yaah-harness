@@ -360,6 +360,21 @@ async def scenario_escalate_model_strong_parse_fail_is_a_verdict() -> None:
                              NodeConfig(model="fake:weak"))
     v = Verdict.from_envelope(out)
     assert not v.ok and v.failures[0].code == "not_json", out.payload
+    # The failure SAMPLES the reply: a prose refusal and an empty reply are
+    # different diagnoses ("no JSON found" alone cannot tell them apart — the
+    # 2026-08-07 A-arm storms were invisible for exactly this reason).
+    assert "sorry, plain prose" in v.failures[0].message, v.failures[0].message
+
+
+async def scenario_not_json_failure_names_an_empty_reply() -> None:
+    """An EMPTY reply's not_json failure says so, instead of a bare
+    "no JSON found: char 0" that reads identically to a prose refusal."""
+    backend = LadderBackend({"fake:m": ""})
+    out = await Agent(backend, "go").invoke(
+        Envelope("task", {}, {"correlation_id": "c"}), NodeConfig(model="fake:m"))
+    v = Verdict.from_envelope(out)
+    assert not v.ok and v.failures[0].code == "not_json", out.payload
+    assert "EMPTY" in v.failures[0].message, v.failures[0].message
 
 
 def scenario_escalate_model_requires_parse() -> None:
@@ -405,6 +420,7 @@ async def main() -> None:
     await scenario_escalate_model_repeated_help_surfaces()
     await scenario_escalate_model_off_by_default()
     await scenario_escalate_model_strong_parse_fail_is_a_verdict()
+    await scenario_not_json_failure_names_an_empty_reply()
     scenario_escalate_model_requires_parse()
     print("ok")
 

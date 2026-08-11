@@ -23,6 +23,7 @@ from ..cwd import carry_cwd, resolve_cwd
 from ..jsonio import extract_json
 from ..jsonschema import check_schema
 from ..trace import NullTracer, Span
+from ..trace.bounded_text import bounded
 # The backend is an ApiProvider (declared, ADR-0007); the optional tool-loop
 # capability stays a runtime check (SupportsTurn / supports_turn) because
 # claude_cli deliberately lacks it.
@@ -453,11 +454,25 @@ class Agent(Node):
                 obj = extract_json(reply_text, keys=self._output_required,
                                    schema=self._output_schema)
             except json.JSONDecodeError as e:
+                # Sample the reply into the failure: "no JSON found" alone cannot
+                # tell an EMPTY reply from a prose refusal, and the retry loop +
+                # trace need that distinction to be diagnosable (A-arm storms,
+                # 2026-08-07). bounded() caps the source at 160 chars; repr() can
+                # then expand it (\uXXXX is 6x), so the trace's ERROR_MAX still
+                # re-clips in the worst case — bound the repr too to stay honest.
+                stripped = reply_text.strip()
+                sample = (bounded(repr(bounded(stripped, 160)), 200) if stripped
+                          else "(the output was EMPTY)")
                 return Verdict.failed(
-                    Failure.not_json(e, subject="agent output")).to_envelope(input)
+                    Failure.not_json(e, subject="agent output",
+                                     sample=sample)).to_envelope(input)
             if not isinstance(obj, dict):
                 return Verdict.failed(Failure(
-                    "not_object", "agent output top-level is not a JSON object",
+                    "not_object",
+                    "agent output top-level is not a JSON object but {} — the "
+                    "output began: {}".format(
+                        type(obj).__name__,
+                        bounded(repr(bounded(reply_text.strip(), 160)), 200)),
                     "return a JSON object (not a list/scalar)")).to_envelope(input)
             # Node contract: when the agent declares output_schema, enforce it on
             # ITS OWN output here (the same checker the json_schema validator uses,

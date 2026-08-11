@@ -44,9 +44,17 @@ class Failure:
 
     @classmethod
     def not_json(cls, exc: object, *, subject: str = "output",
-                 fix_hint: str = "return a single JSON object") -> "Failure":
-        """`raw` didn't parse as JSON (extract_json raised)."""
-        return cls("not_json", "{} is not valid JSON: {}".format(subject, exc), fix_hint)
+                 fix_hint: str = "return a single JSON object",
+                 sample: str = "") -> "Failure":
+        """`raw` didn't parse as JSON (extract_json raised). `sample` (optional,
+        caller-bounded) is appended so the failure NAMES what the producer
+        actually said — "no JSON found" alone cannot distinguish an empty reply
+        from a prose refusal, and that distinction is the whole diagnosis (the
+        2026-08-07 A-arm storms were prose refusals, invisible until sampled)."""
+        msg = "{} is not valid JSON: {}".format(subject, exc)
+        if sample:
+            msg = "{} — the output began: {}".format(msg, sample)
+        return cls("not_json", msg, fix_hint)
 
     @classmethod
     def schema_mismatch(cls, errors: List[str], *,
