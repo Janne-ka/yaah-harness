@@ -378,8 +378,8 @@ def _is_fork(stage_config: Dict[str, Any], stage_names: set) -> bool:
 # `note` is the config comment convention; any `_`-prefixed key is meta (`_about`).
 _STAGE_KEYS = frozenset({
     "node", "id", "validators", "max_attempts", "error_retries", "feedback",
-    "escalate", "then", "final", "fanout", "min_success", "fork", "branch", "fanin",
-    "foreach", "wait", "clears", "concerns_from", "concerns_into", "clearable",
+    "escalate", "confirm", "then", "final", "fanout", "min_success", "fork", "branch",
+    "fanin", "foreach", "wait", "clears", "concerns_from", "concerns_into", "clearable",
     "on_error", "effects_from", "note",
 })
 
@@ -816,6 +816,36 @@ def validate_pipeline(config: Dict[str, Any], base_path: Optional[str] = None, *
         for v in s.get("validators", []) or []:
             if v not in nodes:
                 errs.append("stage {!r}: validator {!r} is not a declared node".format(name, v))
+        # confirm: the SECOND-OPINION checker role at the done-boundary. A non-empty
+        # string naming a declared node (like a validator), so a typo can't silently
+        # skip the check. REJECTED on a fork/fanin stage: those complete on the fork
+        # coordinator's separate no-output path, never through _run_attempts where the
+        # beat lives, so the check would silently never run (the silent-no-op class).
+        cfm = s.get("confirm")
+        if cfm is not None:
+            if not (isinstance(cfm, str) and cfm):
+                errs.append("stage {!r}: confirm must be a non-empty role string (a "
+                            "cheap checker agent node returning {{ok, reason}})".format(name))
+            elif cfm not in nodes:
+                errs.append("stage {!r}: confirm role {!r} is not a declared "
+                            "node".format(name, cfm))
+            else:
+                # The confirmer returns free-form {ok, reason} output — only an AGENT
+                # (LLM) node sensibly does that. A transform/shell/etc. cannot, so its
+                # reply would always miss the contract and every confirm would park as
+                # confirm_malformed. Refuse loud at LOAD instead (matches the doc's
+                # "checker AGENT").
+                ctype = (config.get("nodes") or {}).get(cfm, {}).get("type")
+                if ctype != "agent":
+                    errs.append("stage {!r}: confirm role {!r} is a {!r} node, but confirm "
+                                "must be an `agent` node — only an agent returns the free-form "
+                                "{{ok, reason}} second-opinion contract".format(name, cfm, ctype))
+            if s.get("fork") or s.get("fanin"):
+                errs.append("stage {!r}: confirm is not allowed on a fork/fanin stage — "
+                            "those complete on the fork coordinator's separate path, not "
+                            "through the attempt loop where the confirm beat runs, so it "
+                            "would silently never fire; put confirm on the node stage that "
+                            "produces the output".format(name))
         for r in fo:  # fanout = the role BARRIER: every target must be a declared node
             if r not in nodes:
                 hint = " (it IS a stage — did you mean \"fork\"?)" if r in stage_names else ""

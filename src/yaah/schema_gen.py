@@ -243,6 +243,9 @@ def build_pipeline_schema() -> Dict[str, Any]:
         # ADR-0008 D2: payload key whose value rides the completion span as the
         # rollback effect handle. Rejected on fork/fanin stages (check in validate.py).
         "effects_from": {"type": "string", "minLength": 1},
+        # SECOND-OPINION checker role dispatched at the done-boundary after validators
+        # pass; ok=false feeds the retry loop. Rejected on fork/fanin (check in validate.py).
+        "confirm": {"type": "string", "minLength": 1},
         "foreach": {  # ADR-0007 dynamic per-item fan-out; hard check in validate.py
             "type": "object",
             "required": ["items"],

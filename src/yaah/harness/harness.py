@@ -97,6 +97,14 @@ _TRANSIENT_SIGNALS = (
     "exited before pipe opened",
 )
 
+# Keys the retry loop injects into a producer's INPUT on a feedback retry
+# (_with_feedback): the producer's own rejected draft + the validator's critique.
+# They are the producer's SELF-CORRECTION SCRATCH, not its output. The confirm
+# beat (a COLD second opinion) must never see them — a checker that reads the
+# first opinion's rejected drafts and critique is no longer independent. Stripped
+# from the confirm context; see Harness._confirm_context.
+_PRODUCER_SCRATCH_KEYS = frozenset({"priorAttempt", "feedback"})
+
 
 def _is_transient(text: object) -> bool:
     t = str(text or "").lower()
@@ -244,8 +252,18 @@ class Harness:
         transient" and re-ran the WHOLE swarm on the error_retries budget —
         15 calls for 5 items at the defaults. The transient-retry rationale
         ("a fresh request, pre-effect") is false for a swarm: the healthy items'
-        cost already happened. Partial tolerance is `min_success`, not a re-run."""
-        if any(f.code == "foreach_error" for f in verdict.failures):
+        cost already happened. Partial tolerance is `min_success`, not a re-run.
+
+        A `confirm_rejected`/`confirm_malformed` verdict is EXEMPT for the same
+        looks-like-X→treat-as-X reason this whole feature exists to close: the
+        confirm reason is AGENT-AUTHORED free text, so a substantive veto that
+        merely MENTIONS "timeout"/"rate limit"/"503" must never be mistaken for an
+        infra blip — that would ride the error budget (no attempt spent, no feedback
+        folded) and silently triple the producer's cost while suppressing recovery.
+        `node_error` stays transient so a genuinely-down confirm PROVIDER still rides
+        the error budget."""
+        if any(f.code in ("foreach_error", "confirm_rejected", "confirm_malformed")
+               for f in verdict.failures):
             return False
         return any(_is_transient((f.code or "") + " " + (f.message or ""))
                    for f in verdict.failures)
@@ -1097,6 +1115,10 @@ class Harness:
         (e.g. a fan-out error) or None to validate normally. This is the ONLY
         place the retry/escalate policy lives; called by _run_stage with one of
         the producers below."""
+        # The PRISTINE stage input, captured before the loop reassigns `input`
+        # with feedback. The confirm beat reads this as the COLD task context —
+        # it predates (and so can never carry) THIS stage's retry scratch.
+        task = input
         attempt = 0
         errors = 0
         while True:
@@ -1108,6 +1130,15 @@ class Harness:
                 verdict, soft = await self._validate(stage, out)
             else:  # the producer already decided (e.g. a fan-out role failed)
                 verdict, soft = pre_verdict, []
+            # CONFIRM BEAT — a second opinion at the done-boundary. Runs ONLY once
+            # the deterministic validators have passed, BEFORE the Pass is committed:
+            # a cheap COLD checker reads the OUTPUT + pristine task and can veto a
+            # valid-but-wrong output. A veto becomes an ordinary failed verdict, so
+            # it falls into the SAME retry-with-feedback / escalate / StageFailed
+            # policy below — no parallel loop. Opt-in: no `confirm` declared, no
+            # dispatch, byte-identical behavior.
+            if verdict.ok and stage.confirm:
+                verdict = await self._confirm(stage, task, out)
             if verdict.ok:
                 return _Pass(out, soft)
             # TRANSIENT-FAULT tolerance on a SEPARATE budget (does NOT spend
@@ -1544,6 +1575,83 @@ class Harness:
                              "message": f.message, "fix_hint": f.fix_hint}
                             for f in verdict.failures)
         return Verdict.passed(), soft
+
+    async def _confirm(self, stage: Stage, task: Envelope, out: Envelope) -> Verdict:
+        """The confirm beat: dispatch the stage's `confirm` role (a cheap checker
+        AGENT) through the SAME comms path as any node, hand it the COLD context
+        (_confirm_context), and MAP its {ok, reason} reply onto a Verdict the retry
+        loop already understands:
+
+          - ok is True                 -> Verdict.passed()  (the Pass stands, advance)
+          - ok is False                -> a hard fail carrying `reason` as the failure
+                                          message — feeds the SAME retry-with-feedback /
+                                          escalate / StageFailed policy as a validator fail
+          - ERROR reply / malformed    -> a hard fail naming the misconfiguration (fail-loud,
+                                          same treatment a not-a-checker validator gets)
+
+        The engine hardcodes NOTHING about the checker: its model (intended cheap/
+        haiku-class) and its adversarial prompt are the referenced agent node's own
+        config — this method only names the role and reads the verdict. Returning a
+        Verdict (never raising / never parking here) is what keeps the beat inside the
+        one existing loop instead of growing a parallel retry/escalate mechanism.
+
+        EVERY dispatch emits one `confirm` trace note (pass OR veto): the CHEAP
+        property invites a cost surprise — a second agent ran — so the call must be
+        visible in the trace even on the happy path, not only when the checker
+        self-traces."""
+        reply = await self._safe_request(stage.confirm, self._confirm_context(task, out))
+        await self._ingest_remote_trace(reply)  # R6 — the checker may have traced too
+        verdict = self._confirm_verdict(stage.confirm, reply)
+        await self._spans.note(stage.name, out, status="ok" if verdict.ok else "error",
+                               attrs={"confirm": stage.confirm, "ok": verdict.ok,
+                                      "detail": self._verdict_detail(verdict) if not verdict.ok else ""})
+        return verdict
+
+    @staticmethod
+    def _confirm_verdict(role: str, reply: Envelope) -> Verdict:
+        """Map a confirm checker's reply onto a Verdict (see _confirm). Split out so
+        the dispatch path can emit ONE trace note over the resolved verdict."""
+        if reply.kind == Kind.ERROR:  # the checker crashed remotely (H3) — fail loud
+            return Harness._error_verdict(role, reply)
+        ok = reply.payload.get("ok")
+        reason = reply.payload.get("reason")
+        if not isinstance(ok, bool):
+            # A checker that did not return the {ok: bool, reason: str} contract is a
+            # MISCONFIGURATION (wrong prompt / wrong node in `confirm`), surfaced loud
+            # rather than silently treated as a pass. Same class as a validator role
+            # that isn't a checker; routed through the same loop so it parks named.
+            return Verdict.failed(Failure(
+                "confirm_malformed",
+                "confirm role {!r} did not return {{ok: bool, reason: str}} — got "
+                "ok={!r} ({})".format(role, ok, reply.payload),
+                "the confirm agent must emit a boolean `ok` and a string `reason` "
+                "(declare an output_schema / json validator on that node)"))
+        if ok:
+            return Verdict.passed()
+        return Verdict.failed(Failure(
+            "confirm_rejected",
+            str(reason) if reason else "confirm returned ok=false with no reason",
+            "revise the output to address the confirm reason, or tighten the "
+            "producing prompt"))
+
+    @staticmethod
+    def _confirm_context(task: Envelope, out: Envelope) -> Envelope:
+        """Build the confirmer's COLD input from the ENVELOPE alone: the pristine
+        task fields UNION the node OUTPUT (output wins on a key clash — it is the
+        artifact under second opinion). Two things make it cold, not a copy of the
+        producer's live state:
+          - `task` is the stage's PRE-FEEDBACK input (captured before the retry loop),
+            so it never carries this stage's own retry scratch;
+          - the producer's self-correction keys (_PRODUCER_SCRATCH_KEYS: its rejected
+            draft + the validator critique) are stripped defensively regardless.
+        The checker therefore sees WHAT was produced and the TASK it answers to, never
+        the first opinion's reasoning trail. Chains off `out` (reply_with) so corr /
+        baton / clear_id carry and the checker's spans stitch into the run's trace."""
+        payload: Dict[str, Any] = {
+            k: v for k, v in task.payload.items() if k not in _PRODUCER_SCRATCH_KEYS
+        }
+        payload.update(out.payload)  # the output is authoritative on any key clash
+        return out.reply_with(out.kind, payload)
 
     @staticmethod
     def _with_feedback(input: Envelope, out: Envelope, verdict: Verdict) -> Envelope:

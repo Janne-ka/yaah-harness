@@ -55,6 +55,10 @@
               "clears": {},
               "concerns_from": {},
               "concerns_into": {},
+              "confirm": {
+                "minLength": 1,
+                "type": "string"
+              },
               "effects_from": {
                 "minLength": 1,
                 "type": "string"

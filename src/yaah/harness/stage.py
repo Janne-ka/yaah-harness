@@ -28,6 +28,16 @@ class Stage:
                             # counts as a stage failure — so a blip can't fail a max_attempts:1 gate.
     feedback: bool = False  # feed the verdict back into the retry input
     escalate: Optional[str] = None  # 'human' → suspend when attempts run out
+    confirm: Optional[str] = None  # SECOND-OPINION check at the done-boundary: a role
+                                   # (a cheap agent node) dispatched AFTER the deterministic
+                                   # validators pass but BEFORE the Pass is committed. It reads
+                                   # the node OUTPUT + the pristine task (COLD — never the
+                                   # producer's retry scratch) and returns {ok: bool, reason: str}.
+                                   # ok=false is treated EXACTLY like a validator hard-fail: the
+                                   # `reason` feeds the SAME retry-with-feedback loop, spends an
+                                   # attempt, and escalates/fails on exhaustion. Model + adversarial
+                                   # prompt are the referenced agent node's own config (the engine
+                                   # only names the role). Absent = byte-identical to today.
     then: Optional[str] = None  # next stage name, or None to finish
     final: bool = False  # TERMINAL stage only: skip the graph.sticky re-fold on THIS
                          # stage's output, so its payload is the run's FINAL word — a
