@@ -75,13 +75,27 @@ _DANGEROUS_FLAGS = frozenset({
 # line == one whole authored file.
 _STREAM_LINE_LIMIT = 8 * 2 ** 20  # 8 MiB per stream-json line
 
-# How much of a failing child's stderr rides the error event. Deliberately BELOW
-# PhaseContributor.ERROR_MAX (500), because that is where this text ends up: the
-# harness notes the whole message as the failure detail and the phase capture
-# re-bounds it at ERROR_MAX. Budget it at 500 and the "claude exit N: " prefix
-# pushes the message over, so the downstream bound eats this one's own truncation
-# marker — stack two bounds and the inner one must leave the outer some room.
-_STDERR_MAX = 400
+# How much of a failing child's stderr rides the error event. Sized for
+# diagnosability (M44: a fan-out's parallel calls all died exit 1 x3 attempts
+# and the trace could not say why — a rate-limit storm needs the CLI's actual
+# complaint, not a 400-char sliver), but deliberately BELOW
+# PhaseContributor.ERROR_MAX (2600), because that is where this text ends up:
+# the harness notes the whole message as the failure detail and the phase
+# capture re-bounds it at ERROR_MAX. Budget it AT the outer bound and the
+# "claude exit N: " prefix plus the harness's own wrapping push the message
+# over, so the downstream bound eats this one's truncation marker AND the tail
+# end of stderr — the part that holds the diagnosis. Stack two bounds and the
+# inner one must leave the outer some room (here: ~600 for prefix, wrapping,
+# and the result-event error below).
+_STDERR_MAX = 2000
+
+# Bound on the result-event error text (see the read loop): claude -p in
+# stream-json mode reports SOME failures — rate limits among them — as an
+# error-subtyped `result` event on STDOUT and then exits nonzero with an EMPTY
+# stderr, so without this capture the failure reads "claude exit 1" and nothing
+# else (the M44 undiagnosable storm). Head-kept: it is a structured message
+# whose code leads.
+_RESULT_ERROR_MAX = 400
 
 # Inactivity watchdog default — network-cut / stall protection. stream()'s read
 # loop wraps every `proc.stdout.readline()` in asyncio.wait_for(timeout=...): on
@@ -303,6 +317,7 @@ class ClaudeCliProvider(ApiProvider):
         timeout = opts.get("timeout", self._timeout)
         usage: Optional[Dict[str, Any]] = None
         stop_reason = "end_turn"
+        result_error = ""  # error text from an error-subtyped result event (M44)
         tool_names: Dict[str, str] = {}  # tool_use id → name, to label tool_result notices
         # The whole read+drain sequence is wrapped so `finally` can GUARANTEE
         # the subprocess is reaped on every exit path (below). Without it, a
@@ -325,13 +340,20 @@ class ClaudeCliProvider(ApiProvider):
                     except ProcessLookupError:
                         pass  # already gone between the timeout and the kill
                     await proc.wait()
+                    # The child is dead, so its buffered stderr — if it wrote
+                    # any before wedging — is the only witness to WHY it went
+                    # silent. Attach the bounded tail like the exit-nonzero path
+                    # does (M44: an undiagnosed kill costs a full paid retry).
+                    tail = await _stderr_tail_of_dead_child(proc)
                     yield {"type": "error",
                            "message": "claude stream-json INACTIVITY timeout after {}s "
                                       "with no output from the subprocess — likely a "
                                       "network outage, a wedged CLI, or an MCP stall. The "
                                       "child was killed; the run can be resumed once "
                                       "connectivity returns (the engine's error path owns "
-                                      "retry/park).".format(timeout)}
+                                      "retry/park).{}".format(
+                                          timeout,
+                                          " stderr tail: " + tail if tail else "")}
                     return
                 except (ValueError, asyncio.LimitOverrunError) as exc:
                     # A single stream-json line exceeded even the 8 MiB
@@ -395,6 +417,18 @@ class ClaudeCliProvider(ApiProvider):
                     u = obj.get("usage")
                     if isinstance(u, dict):
                         usage = u
+                    # An error-subtyped result is the CLI's own failure report
+                    # (rate limit, execution error) — delivered on STDOUT, often
+                    # with an EMPTY stderr and a nonzero exit. Capture the text
+                    # so the exit-nonzero event below can carry the diagnosis
+                    # (M44: without it a parallel-call storm traced as bare
+                    # "claude exit 1" x12 and was unexplainable).
+                    if obj.get("is_error") or str(obj.get("subtype") or "").startswith("error"):
+                        for key in ("result", "error"):
+                            val = obj.get(key)
+                            if isinstance(val, str) and val.strip():
+                                result_error = val.strip()
+                                break
                 # system / rate_limit_event: ignored (diagnostic noise)
 
             # CRIT-004 (opus bugs review): drain stderr BEFORE wait(). If the
@@ -413,12 +447,18 @@ class ClaudeCliProvider(ApiProvider):
                 # last thing written. This message rides into the harness's
                 # failure detail and from there into the trace, so it uses the
                 # one shared bound + marker (see trace.bounded_text) and leaves
-                # ERROR_MAX headroom for the prefix (see _STDERR_MAX).
+                # ERROR_MAX headroom for the prefix (see _STDERR_MAX). When the
+                # CLI reported its failure as an error-subtyped result event
+                # instead (stderr can be EMPTY then — the M44 storm), that text
+                # rides too, so "claude exit 1" is never the whole story the
+                # child told.
                 err_text = bounded(err_bytes.decode(errors="replace"),
                                    _STDERR_MAX, keep="tail") if err_bytes else ""
+                detail = ": " + err_text if err_text else ""
+                if result_error:
+                    detail += "; result: " + bounded(result_error, _RESULT_ERROR_MAX)
                 yield {"type": "error",
-                       "message": "claude exit {}{}".format(
-                           proc.returncode, ": " + err_text if err_text else "")}
+                       "message": "claude exit {}{}".format(proc.returncode, detail)}
                 return
 
             # Cost bridge (R4/L8): feed the result-event usage to on_usage — the
@@ -443,6 +483,26 @@ class ClaudeCliProvider(ApiProvider):
                 except ProcessLookupError:
                     pass  # already gone between the check and the kill
                 await proc.wait()
+
+
+async def _stderr_tail_of_dead_child(proc: Any) -> str:
+    """Best-effort bounded stderr tail from an already-killed/reaped child —
+    the timeout-kill path's counterpart of the exit-nonzero stderr capture.
+    Called ONLY after kill()+wait() (a dead child cannot block on a full pipe,
+    so reading to EOF here cannot deadlock — the live-child ordering concern
+    of CRIT-004 does not apply). Best-effort by design: the caller is already
+    reporting a timeout, and a stderr salvage that raised or hung would
+    replace a clean diagnostic with a worse failure — so any read problem
+    yields "" and the timeout event goes out as before."""
+    if proc.stderr is None:
+        return ""
+    try:
+        data = await asyncio.wait_for(proc.stderr.read(), timeout=5.0)
+    except Exception:
+        return ""
+    if not data:
+        return ""
+    return bounded(data.decode(errors="replace"), _STDERR_MAX, keep="tail")
 
 
 def _prompt_from_messages(messages: List[Dict[str, Any]], system: Optional[str]) -> str:

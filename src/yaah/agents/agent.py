@@ -15,7 +15,7 @@ import json
 import re
 import secrets
 import time
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ..comms import Comms
 from ..core import Node, Envelope, Failure, NodeConfig, Verdict
@@ -142,6 +142,73 @@ def _neutralize_fence_mimics(value: str) -> str:
 # pass them as `**extra` (duplicate-kwarg TypeError, assessment cluster 3 B1).
 # `raw` is the model text and is always written by invoke() itself.
 _RESERVED_REPLY_KWARGS = frozenset({"raw"})
+
+# Upper bound on the top-level-value walk in _salvage_first_json_object's
+# diagnostic COUNT (the "first of N" in the trace note). The count is advisory
+# only — the walk must never turn a pathological reply into an unbounded scan.
+_SALVAGE_COUNT_MAX = 20
+
+
+def _salvage_first_json_object(text: str, schema: dict) -> "Optional[Tuple[dict, int]]":
+    """Salvage the FIRST top-level JSON object from a multi-value agent reply.
+
+    Used by: Agent.invoke's _parse_reply, ONLY after the full extract_json parse
+    failed AND the agent declares an output_schema (the schema-parse seam — the
+    same site that samples the reply into the not_json failure).
+    Where: the agent-reply parse path, between the full-parse failure and the
+    not_json/not_object verdict.
+    Why: an agent with an output_schema sometimes answers with its JSON answer
+    PLUS a format example as a SECOND top-level object; the full parse then
+    fails (ambiguous / extra data) and the reply is rejected — which burned a
+    TRUE veto from a confirm agent, the exact halt that beat exists to deliver.
+    Always-on, no config knob: a first object that VALIDATES against the
+    declared schema is strictly better than a burned attempt (the schema gate
+    is what makes accepting a fragment safe — without a schema nothing
+    distinguishes the answer from arbitrary trailing JSON, so no schema means
+    no salvage).
+
+    Acceptance rule — deterministic, first-or-nothing:
+      1. locate the first ``{`` in the reply;
+      2. json.JSONDecoder().raw_decode from there — the first balanced
+         top-level JSON value, string-aware, no repair;
+      3. accept iff that value is a dict AND check_schema(...) reports no
+         errors. Anything else -> None, and the caller raises the UNCHANGED
+         not_json/not_object failure with the reply sample.
+    LATER top-level values are NEVER tried: shopping through the reply for
+    whichever object happens to validate would let a trailing format example
+    win over a malformed real answer — first-or-nothing keeps the rule
+    predictable and keeps a bad first answer failing loud. (Corollary the
+    prompt author owns: an example that PRECEDES the answer and also validates
+    is indistinguishable from the answer — examples belong after the answer or
+    behind the decoy-key marker extract_json already skips.)
+
+    Returns (obj, n_top_level_values) on acceptance — n feeds the caller's
+    `json_salvaged` trace note so the salvage is never silent — else None."""
+    start = text.find("{")
+    if start < 0:
+        return None
+    decoder = json.JSONDecoder()
+    try:
+        obj, end = decoder.raw_decode(text, start)
+    except ValueError:
+        return None
+    if not isinstance(obj, dict) or check_schema(obj, schema, "$"):
+        return None
+    # Count the remaining top-level JSON values for the trace note. Diagnostic
+    # only (bounded walk; undecodable trailing prose simply stops the count —
+    # it is "trailing content discarded" either way).
+    total = 1
+    pos = end
+    while total < _SALVAGE_COUNT_MAX:
+        openers = [i for i in (text.find("{", pos), text.find("[", pos)) if i >= 0]
+        if not openers:
+            break
+        try:
+            _, pos = decoder.raw_decode(text, min(openers))
+        except ValueError:
+            break
+        total += 1
+    return obj, total
 
 
 class Agent(Node):
@@ -444,6 +511,27 @@ class Agent(Node):
         # catches it cleanly — same shape json_object would have produced.
         # Parsed keys override `extra` (carry/cwd) on conflict: the agent
         # just produced the key, that wins over what was carried.
+        salvage_notes: "List[str]" = []  # filled by _parse_reply (sync); emitted
+        # by _note_salvage (async) right after each successful parse — the note
+        # must reach the trace, and the parse helper itself cannot await.
+
+        def _salvage(reply_text: str) -> "Optional[dict]":
+            """The multi-object salvage beat (see _salvage_first_json_object):
+            with a declared output_schema, accept a schema-valid FIRST top-level
+            object when the full parse failed, and queue the trace note that
+            makes the salvage visible. None -> the caller raises its unchanged
+            failure."""
+            if self._output_schema is None:
+                return None
+            salvaged = _salvage_first_json_object(reply_text, self._output_schema)
+            if salvaged is None:
+                return None
+            obj, total = salvaged
+            salvage_notes.append(
+                "json_salvaged: first of {} top-level values used; trailing "
+                "content discarded".format(total))
+            return obj
+
         def _parse_reply(reply_text: str) -> "Union[dict, Envelope]":
             """extract_json + the output_schema contract gate on ONE reply.
             Returns the parsed dict, or a failed-Verdict envelope (not_json /
@@ -454,6 +542,14 @@ class Agent(Node):
                 obj = extract_json(reply_text, keys=self._output_required,
                                    schema=self._output_schema)
             except json.JSONDecodeError as e:
+                # The unreadable-veto salvage (M44): a reply that is the JSON
+                # answer PLUS trailing top-level values (a format example) fails
+                # the full parse — before burning the attempt, accept a
+                # schema-validated FIRST object. Schema-gated + noted, never
+                # silent; on no salvage the failure below is byte-identical.
+                obj = _salvage(reply_text)
+                if obj is not None:
+                    return obj
                 # Sample the reply into the failure: "no JSON found" alone cannot
                 # tell an EMPTY reply from a prose refusal, and the retry loop +
                 # trace need that distinction to be diagnosable (A-arm storms,
@@ -467,6 +563,12 @@ class Agent(Node):
                     Failure.not_json(e, subject="agent output",
                                      sample=sample)).to_envelope(input)
             if not isinstance(obj, dict):
+                # Same salvage on the not_object arm: the full parse "succeeded"
+                # on a non-object (say a leading array) while a schema-valid
+                # object sits beside it — the same multi-value reply shape.
+                salvaged = _salvage(reply_text)
+                if salvaged is not None:
+                    return salvaged
                 return Verdict.failed(Failure(
                     "not_object",
                     "agent output top-level is not a JSON object but {} — the "
@@ -495,6 +597,21 @@ class Agent(Node):
             f = (Verdict.from_envelope(env).failures or [Failure("?", "", "")])[0]
             await self._emit("{}: {}".format(f.code, f.message))
 
+        async def _note_salvage() -> None:
+            # The salvage must never be silent: the note reaches BOTH the
+            # progress stream (like parse failures do) and the durable trace —
+            # a point-in-time `json_salvage` span whose bounded `note` the phase
+            # capture projects. Drains the queue, so a no-salvage parse emits
+            # nothing (byte-identical trace on the normal path).
+            while salvage_notes:
+                note = salvage_notes.pop(0)
+                await self._emit(note)
+                now = time.monotonic()
+                await self._tracer.emit(Span.timed(
+                    "json_salvage", corr=input.correlation_id, parent=input.id,
+                    t0=now, t1=now, status="ok",
+                    attrs={"stage": self._stage, "note": note}))
+
         parsed: dict = {}
         if self._parse:
             p = _parse_reply(text)
@@ -502,6 +619,7 @@ class Agent(Node):
                 await _emit_parse_failure(p)
                 return p
             parsed = p
+            await _note_salvage()
             # M7 ladder: the model says it CANNOT do the job ({"help": ...},
             # the app-side blocked-agent contract). Re-call the SAME prompt
             # ONCE with the stronger model and take THAT reply through the
@@ -517,6 +635,7 @@ class Agent(Node):
                     await _emit_parse_failure(p2)
                     return p2
                 parsed = p2
+                await _note_salvage()  # the rung's reply passes the same gate — and the same note
         # R6 envelope carriage: the drain does NOT happen here. It lives at the
         # serve boundary (CarriageBoundaryNode, applied by build._wrap_node) —
         # draining inside the agent body lost spans whenever a NESTED agent

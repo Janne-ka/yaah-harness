@@ -514,6 +514,96 @@ async def claude_stream_error_keeps_the_end_of_stderr() -> None:
     assert short_msg == "claude exit 1: auth failed", short_msg
 
 
+async def claude_stream_overlong_stderr_carries_bounded_tail() -> None:
+    # The M44 exit-1 storm fix, sized: a failing CLI's LONG stderr (a rate-limit
+    # storm's retry log) must ride the error event as a BOUNDED tail — big
+    # enough to diagnose (~_STDERR_MAX chars), never unbounded, and always the
+    # END of the stream where the fatal line lives.
+    from yaah.adapters.providers.claude_cli_provider import _STDERR_MAX
+    from yaah.trace.bounded_text import TRUNCATED_MARKER
+
+    filler = ("retrying after 429 rate_limit_error; attempt log line\n" * 200)
+    fatal = "Error: rate limit exceeded for parallel requests, giving up"
+    proc = FakeStreamProc(returncode=1, stdout_lines=[],
+                          stderr=(filler + fatal).encode())
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
+    events = await _drain(be.stream({"messages": [{"role": "user", "content": "x"}]}))
+    msg = [e for e in events if e["type"] == "error"][0]["message"]
+    assert msg.endswith(fatal), msg[-90:]                 # the diagnosis survived
+    assert TRUNCATED_MARKER in msg, msg[:90]              # the cut is marked
+    # bounded at the provider's budget (prefix + marker + tail), not unbounded
+    assert len(msg) <= _STDERR_MAX + len(TRUNCATED_MARKER) + len("claude exit 1: "), len(msg)
+    # ...and the budget genuinely fits the storm: a full _STDERR_MAX of tail
+    assert len(msg) > _STDERR_MAX, len(msg)
+
+
+async def claude_stream_error_result_event_reaches_error_message() -> None:
+    # claude -p (stream-json) reports some failures — rate limits among them —
+    # as an error-subtyped `result` event on STDOUT, then exits 1 with an EMPTY
+    # stderr. Without capturing that event the trace says "claude exit 1" and
+    # nothing else (the undiagnosable fan-out storm). The result text must ride
+    # the error event, bounded.
+    lines = [
+        b'{"type":"system","subtype":"init"}\n',
+        b'{"type":"result","subtype":"error_during_execution","is_error":true,'
+        b'"result":"Rate limit reached; too many concurrent requests"}\n',
+    ]
+    proc = FakeStreamProc(returncode=1, stdout_lines=lines)   # stderr EMPTY
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []))
+    events = await _drain(be.stream({"messages": [{"role": "user", "content": "x"}]}))
+    msg = [e for e in events if e["type"] == "error"][0]["message"]
+    assert msg.startswith("claude exit 1"), msg
+    assert "Rate limit reached; too many concurrent requests" in msg, msg
+
+    # an over-long result error is truncated (head kept — its code leads)
+    from yaah.adapters.providers.claude_cli_provider import _RESULT_ERROR_MAX
+    from yaah.trace.bounded_text import TRUNCATED_MARKER
+    long_lines = [
+        ('{"type":"result","subtype":"error_during_execution","is_error":true,'
+         '"result":"E999 %s"}\n' % ("x" * 3000)).encode(),
+    ]
+    proc2 = FakeStreamProc(returncode=1, stdout_lines=long_lines)
+    be2 = ClaudeCliProvider(spawn=_stream_spawner(proc2, []))
+    ev2 = await _drain(be2.stream({"messages": [{"role": "user", "content": "x"}]}))
+    msg2 = [e for e in ev2 if e["type"] == "error"][0]["message"]
+    assert "E999" in msg2 and TRUNCATED_MARKER in msg2, msg2[:120]
+    assert len(msg2) <= len("claude exit 1; result: ") + _RESULT_ERROR_MAX \
+        + len(TRUNCATED_MARKER), len(msg2)
+
+
+async def claude_stream_timeout_attaches_stderr_tail() -> None:
+    # "Also apply to timeout kills": a wedged child that DID write to stderr
+    # before going silent gets its bounded tail on the timeout error event —
+    # the killed child's stderr is the only witness to why it wedged.
+    class HangingStdout:
+        async def readline(self):
+            await asyncio.Event().wait()
+        async def read(self): return b""
+
+    proc = FakeStreamProc(stdout_lines=[],
+                          stderr=b"api_retry 429; api_retry 429; stuck behind rate limiter")
+    proc.stdout = HangingStdout()
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []), timeout=0.2)
+    events = await asyncio.wait_for(
+        _drain(be.stream({"messages": [{"role": "user", "content": "x"}]})),
+        timeout=3.0)
+    err = [e for e in events if e["type"] == "error"][0]
+    assert "timeout" in err["message"].lower(), err
+    assert "stuck behind rate limiter" in err["message"], err["message"]
+    assert proc.killed, "wedged claude must still be killed"
+
+    # a wedged child with NO stderr keeps the clean timeout message (no
+    # dangling "stderr tail:" fragment)
+    proc2 = FakeStreamProc(stdout_lines=[])
+    proc2.stdout = HangingStdout()
+    be2 = ClaudeCliProvider(spawn=_stream_spawner(proc2, []), timeout=0.2)
+    ev2 = await asyncio.wait_for(
+        _drain(be2.stream({"messages": [{"role": "user", "content": "x"}]})),
+        timeout=3.0)
+    msg2 = [e for e in ev2 if e["type"] == "error"][0]["message"]
+    assert "stderr tail" not in msg2, msg2
+
+
 async def claude_stream_passes_prompt_via_stdin() -> None:
     # The user message from context becomes the prompt on stdin. Multi-message
     # contexts collapse to the most recent user message — claude -p has no
@@ -615,6 +705,29 @@ async def claude_stream_timeout_kills_proc_and_yields_error() -> None:
         "expected 'timeout' in error message; got: {}".format(err["message"])
     # The stalled process must be killed (otherwise it leaks).
     assert proc.killed, "wedged claude must be killed on timeout"
+
+
+async def claude_stream_timeout_attaches_nonempty_stderr_tail() -> None:
+    # M44 review gap: `_stderr_tail_of_dead_child` had no happy-path test — a
+    # wedged child that DID write stderr before going silent must have that
+    # tail in the timeout error (it is the only witness to why it wedged).
+    class HangingStdout:
+        def __init__(self): self._closed = False
+        async def readline(self):
+            await asyncio.Event().wait()
+        async def read(self): return b""
+
+    proc = FakeStreamProc(stdout_lines=[],
+                          stderr=b"429 rate limited: too many requests\n")
+    proc.stdout = HangingStdout()
+    be = ClaudeCliProvider(spawn=_stream_spawner(proc, []), timeout=0.3)
+    events = await asyncio.wait_for(
+        _drain(be.stream({"messages": [{"role": "user", "content": "x"}]})),
+        timeout=3.0)
+    err = [e for e in events if e["type"] == "error"][0]
+    assert "429 rate limited" in err["message"], \
+        "timeout error must carry the child's stderr tail; got: {}".format(
+            err["message"])
 
 
 async def claude_stream_parses_captured_fixture_end_to_end() -> None:
@@ -925,11 +1038,16 @@ async def main() -> None:
         claude_stream_malformed_lines_skipped,
         claude_stream_nonzero_exit_yields_error_event,
     claude_stream_error_keeps_the_end_of_stderr,
+        # M44 — provider stderr / result-event error must reach the failure
+        claude_stream_overlong_stderr_carries_bounded_tail,
+        claude_stream_error_result_event_reaches_error_message,
+        claude_stream_timeout_attaches_stderr_tail,
         claude_stream_passes_prompt_via_stdin,
         claude_stream_prepends_system_and_joins_content_blocks,
         claude_stream_handles_none_stdin_without_crashing,
         claude_stream_drains_stdin_before_closing,
         claude_stream_timeout_kills_proc_and_yields_error,
+        claude_stream_timeout_attaches_nonempty_stderr_tail,
         # network-cut / stall protection: armed-by-default inactivity watchdog
         claude_timeout_default_is_finite_not_none,
         claude_timeout_explicit_none_opts_out_to_wait_forever,

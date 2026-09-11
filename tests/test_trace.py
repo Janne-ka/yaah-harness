@@ -59,7 +59,8 @@ async def scenario_phase_projects_retry_cause() -> None:
     calls on rejected replies is undiagnosable (the M7 ladder_from lesson: an
     attr missing from the projection is dead in real runs)."""
     tr = RecordingTracer([PhaseContributor()])
-    long_detail = "not_ok: " + ("x" * 900)
+    bound = PhaseContributor.ERROR_MAX
+    long_detail = "not_ok: " + ("x" * (bound + 400))
     await tr.emit(Span(id="e1", corr="run-1", name="stage", parent="p0",
                        duration_ms=12.0, status="error",
                        attrs={"stage": "review", "retry": "feedback",
@@ -67,11 +68,11 @@ async def scenario_phase_projects_retry_cause() -> None:
     r = tr.records[-1]
     assert r["status"] == "error" and r["stage"] == "review", r
     assert r["retry"] == "feedback" and r["attempt"] == 2, r
-    # bounded: 500 chars of the detail + the marker, and the HEAD is kept
+    # bounded: ERROR_MAX chars of the detail + the marker, and the HEAD is kept
     # (the failure code is at the front, where the diagnosis lives)
     assert r["error"].startswith("not_ok: xxx"), r["error"][:40]
-    assert r["error"] == long_detail[:500] + PhaseContributor.ERROR_TRUNCATED_MARKER, r["error"]
-    assert len(r["error"]) == 500 + len(PhaseContributor.ERROR_TRUNCATED_MARKER), len(r["error"])
+    assert r["error"] == long_detail[:bound] + PhaseContributor.ERROR_TRUNCATED_MARKER, r["error"]
+    assert len(r["error"]) == bound + len(PhaseContributor.ERROR_TRUNCATED_MARKER), len(r["error"])
 
     # a short error rides through verbatim — no marker, no clipping. The
     # transient counter is `error_retry_n`; the pre-2026-08 bare `n` is a
@@ -126,8 +127,10 @@ async def scenario_harness_retry_cause_reaches_the_record() -> None:
 
     class _AlwaysFails:
         async def invoke(self, input: Envelope, config: NodeConfig) -> Envelope:
-            return Verdict.failed(
-                Failure("not_ok", "y" * 900, "fix it")).to_envelope()
+            return Verdict.failed(  # longer than PhaseContributor.ERROR_MAX,
+                # so the projection's truncation is exercised end-to-end
+                Failure("not_ok", "y" * (PhaseContributor.ERROR_MAX + 400),
+                        "fix it")).to_envelope()
 
     comms = InProcessComms()
     comms.register("role:nope", _Nope())

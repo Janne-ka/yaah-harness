@@ -20,14 +20,19 @@ from ..span import Span
 class PhaseContributor(TraceContributor):
     name = "phase"
 
-    #: Bound on the projected `error` detail. `error` is the ONE free-text attr
-    #: in this projection (every other key is an identity, a key list, or a
-    #: number), and trace records are line-oriented JSONL — one unbounded
-    #: validator message (a schema dump, a diffed payload, a stack) would blow a
-    #: single line to megabytes and make the file hostile to `tail`/`jq`/grep.
-    #: Bounded here, at the projection, so no sink has to defend itself.
-    #: The marker is the engine-wide one (see trace.bounded_text).
-    ERROR_MAX = 500
+    #: Bound on the projected free-text attrs (`error`, `note` — every other key
+    #: is an identity, a key list, or a number). Trace records are line-oriented
+    #: JSONL — one unbounded validator message (a schema dump, a diffed payload,
+    #: a stack) would blow a single line to megabytes and make the file hostile
+    #: to `tail`/`jq`/grep. Bounded here, at the projection, so no sink has to
+    #: defend itself. The marker is the engine-wide one (see trace.bounded_text).
+    #: Sized to fit the deepest STACKED inner bound with headroom: a
+    #: ClaudeCliProvider failure carries up to _STDERR_MAX (2000) of stderr tail
+    #: plus _RESULT_ERROR_MAX (400) of result-event error plus the exit prefix
+    #: and the harness's own wrapping (M44: a provider storm must arrive in the
+    #: trace with its diagnosis intact, not re-clipped to a sliver). A ~2.6KB
+    #: worst-case line stays tail/jq/grep-friendly.
+    ERROR_MAX = 2600
     ERROR_TRUNCATED_MARKER = TRUNCATED_MARKER
 
     def contribute(self, span: Span) -> Dict[str, Any]:
@@ -41,7 +46,7 @@ class PhaseContributor(TraceContributor):
         # `approver` (WHO overrode — identity only), and `decision_diff` (the
         # emitted-vs-edited key-level audit / self-repair corpus signal). All of
         # these carry payload KEYS only (or an identity), never decision VALUES
-        # — with ONE documented exception, the free-text `error` (see below).
+        # — with the documented free-text exceptions `error`/`note` (see below).
         # These must reach the projected record, not just sit in span.attrs — else
         # the lines are dead in real runs (the sink only sees the record, never the
         # raw span). The `effects`/`effects_truncated`/`effects_head` trio is the
@@ -74,14 +79,21 @@ class PhaseContributor(TraceContributor):
                   "retry", "attempt", "error_retry_n"):
             if k in span.attrs:
                 out[k] = span.attrs[k]
-        # THE keys-only exception. `error` is free text, and a validator message
-        # routinely QUOTES the payload it rejected — so a trace file inherits the
-        # sensitivity class of the payloads its run carried, and on the envelope
-        # carriage those values ride the wire too. Kept deliberately (the detail
-        # IS the postmortem value of the retry-cause trio) and stated in the
-        # tracing docs, so nobody treats trace.jsonl as safe-by-construction.
+        # The keys-only exceptions — TWO free-text attrs, same bound, stated in
+        # the tracing docs so nobody treats trace.jsonl as safe-by-construction:
+        # - `error`: a validator message routinely QUOTES the payload it
+        #   rejected — so a trace file inherits the sensitivity class of the
+        #   payloads its run carried, and on the envelope carriage those values
+        #   ride the wire too. Kept deliberately (the detail IS the postmortem
+        #   value of the retry-cause trio).
+        # - `note`: the advisory sibling of `error` for a NON-error event that
+        #   must not be silent — e.g. the agent's `json_salvage` span ("first of
+        #   N top-level values used"). Without projection here the note would
+        #   sit dead in span.attrs and the salvage would be invisible in a run's
+        #   persisted trace.
         # Bounded (see ERROR_MAX); everything above is an identity, a key list,
         # or a number and needs no bound.
-        if "error" in span.attrs:
-            out["error"] = bounded(span.attrs["error"], self.ERROR_MAX)
+        for freetext in ("error", "note"):
+            if freetext in span.attrs:
+                out[freetext] = bounded(span.attrs[freetext], self.ERROR_MAX)
         return out

@@ -165,7 +165,7 @@ tool_call children. ✓ = ok, ✗ = error, ⏸ = suspended (parked).
 Each rejected attempt is its own `status: error` record carrying **why** it was
 rejected: `retry` (`transient` | `retry` | `feedback`), `attempt`/`n` (which
 attempt, on the `max_attempts` and `error_retries` budgets respectively), and
-`error` — the failing verdict's detail, truncated at 500 chars with a trailing
+`error` — the failing verdict's detail, truncated at 2600 chars with a trailing
 `...[truncated]` marker (JSONL stays line-readable; the full text lives in the
 stage's artifact). This is the answer to "four paid model calls ran and the
 stage still failed — what did the validator object to?".

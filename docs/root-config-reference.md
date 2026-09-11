@@ -179,8 +179,10 @@ separate `error_retries` budget), and `error` (the failing verdict's detail).
 `yaah trace` (JSON) carries them on each `errors[]` entry. Traces written before
 2026-08 spell the counter `n`; the readers accept that legacy key and report it
 as `error_retry_n`, but nothing emits it any more.
-`error` is the only free-text value here and is therefore **truncated at 500
-chars** with a trailing `...[truncated]` marker: trace files are line-oriented
+`error` and `note` (advisory free text, e.g. the `json_salvaged` marker) are
+the two free-text values here; `error` is **truncated at 2600 chars** with a
+trailing `...[truncated]` marker (sized so a CLI provider's
+bounded stderr tail arrives with its diagnosis intact): trace files are line-oriented
 JSONL, and one unbounded validator message (a schema dump, a diffed payload)
 would blow a single line to megabytes and make the file hostile to
 `tail`/`jq`/grep. Read the full message from the stage's own artifact or the
@@ -189,7 +191,7 @@ run's failure output; the trace carries the diagnostic, not the corpus.
 > **A trace file inherits the sensitivity class of its run's payloads.** Every
 > other projected attr is a key, an identity, or a number — `error` is the
 > documented exception: a rejecting validator routinely QUOTES the payload it
-> rejected, so payload VALUES (bounded at 500 chars, but values) land in
+> rejected, so payload VALUES (bounded at 2600 chars, but values) land in
 > `trace.jsonl`, in whatever `sinks` you configured (a third-party observability
 > backend included), and — under `mode: "envelope"` — on the wire records that
 > ride replies between nodes. That is deliberate: the detail is the whole
